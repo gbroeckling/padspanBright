@@ -1,0 +1,27 @@
+name: Feature Request
+description: Suggest a new feature or improvement for PadSpan Bright
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: feature
+    attributes:
+      label: Feature description
+      description: "A clear description of the feature you would like."
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case / motivation
+      description: "Why do you want this feature? What problem does it solve?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: "Have you considered any alternative solutions or workarounds?"
+    validations:
+      required: false

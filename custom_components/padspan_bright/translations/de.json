@@ -1,0 +1,36 @@
+{
+  "title": "PadSpan Bright",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up PadSpan Bright",
+        "description": "Local-first setup (no API required).",
+        "data": {
+          "scan_interval": "Update interval (seconds)"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure PadSpan Bright",
+        "description": "Update scan interval.",
+        "data": {
+          "scan_interval": "Update interval (seconds)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "PadSpan Bright is already configured.",
+      "reconfigure_successful": "Saved.",
+      "unknown": "An unexpected error occurred. Check Home Assistant logs."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "PadSpan Bright options",
+        "data": {
+          "scan_interval": "Update interval (seconds)"
+        }
+      }
+    }
+  }
+}

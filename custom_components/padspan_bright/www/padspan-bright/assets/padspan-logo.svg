@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="160" viewBox="0 0 512 160">
+  <rect x="8" y="8" width="144" height="144" rx="28" fill="#111a2d" stroke="#37588f" stroke-width="4"/>
+  <circle cx="80" cy="80" r="42" fill="none" stroke="#7aa2ff" stroke-width="8"/>
+  <circle cx="80" cy="80" r="18" fill="none" stroke="#9cb1d3" stroke-width="8"/>
+  <path d="M80 34 L80 20 M80 140 L80 126 M34 80 L20 80 M140 80 L126 80" stroke="#9cb1d3" stroke-width="6" stroke-linecap="round"/>
+  <text x="176" y="86" font-family="Inter,Arial,sans-serif" font-size="44" fill="#e2e8f0" font-weight="700">PadSpan</text>
+  <text x="176" y="118" font-family="Inter,Arial,sans-serif" font-size="18" fill="#9cb1d3">Home Assistant Integration</text>
+</svg>

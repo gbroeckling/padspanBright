@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+.claude/
+*.tmp
+*_preview.html
+bermuda_vs_padspan_comparison.txt
+# Raw local screen captures — curated doc assets in images/ are added by name
+Screenshot *.png
+# Local pre-deploy store backups — never publish
+backups/
+# Working notes containing LAN addresses and deploy commands — never publish
+docs/fabric-independence-plan-*.md
+docs/fabric-simplification-pass*.md
+# The generated PadSpan Bright edition — built by scripts/release.py, lives in ITS repo
+dist/padspan_bright.zip
+dist/bright/
+
+# Intermediate frames for scripts/make_demo_montage.py — the MP4/GIF are committed, these are not
+build/

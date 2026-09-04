@@ -1,0 +1,24 @@
+{
+  "domain": "padspan_bright",
+  "name": "PadSpan Bright",
+  "after_dependencies": [
+    "bluetooth",
+    "frontend",
+    "http",
+    "mqtt",
+    "panel_custom",
+    "tag",
+    "websocket_api"
+  ],
+  "codeowners": [
+    "@gbroeckling"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/gbroeckling/padspanHA",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/gbroeckling/padspanHA/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.38.19"
+}

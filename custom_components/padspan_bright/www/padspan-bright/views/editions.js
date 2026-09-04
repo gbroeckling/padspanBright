@@ -1,0 +1,153 @@
+// PadSpan Bright — BLE Room-Presence Tracking for Home Assistant
+// Copyright (C) 2026 Garry Broeckling
+// Licensed under the GNU General Public License v3.0
+// See LICENSE file or https://www.gnu.org/licenses/gpl-3.0.html
+//
+// Editions and tiers, on the frontend side — a mirror of licence.py, read
+// from the settings payload (settings.tier / settings.edition / tier_floor)
+// and never re-derived here.
+//
+//   EDITION  which build was downloaded: "full" (PadSpan Bright / PadSpan Pro)
+//            or "bright" (PadSpan Bright / PadSpan Bright Pro).  Visibility.
+//   TIER     what the key says: free < bright < pro.  Capability.
+//
+// Every navigable surface is classified below, once. A Bright build renders
+// the `lighting` surfaces only. The map is asserted TOTAL by
+// tests/test_editions_map.py: add a view to panel.js and forget to classify
+// it, and the suite goes red — that is the entire mechanism by which "the
+// rest just flows" without anyone remembering Bright.
+
+// ── Where a licence comes from, and where it goes ───────────────────────────
+// A gate that names a product without saying where to buy one or where to put
+// the key is a dead end, and until 2026-08-24 every gate in PadSpan was one:
+// the light-placement refusal said "needs PadSpan Bright Pro or PadSpan Pro"
+// with no price and no link, and the ONLY key-entry field in the whole panel
+// was a prompt() hidden inside the Forensics toggle — so a customer who bought
+// Pro to place lights had to enable an unrelated recording feature to activate
+// it. These four constants are the single source for every gate message, so a
+// refusal can always answer "then what?".
+export const BUY_URL = "https://padspan.traks.ca/#pro";
+export const LIGHTS_URL = "https://padspan.traks.ca/#lights";
+export const PRO_PRICE = "$45 CAD/year";
+// Where "what changed" lives. The same page the update-check manifest
+// points at (release.py sets notes_url to it), so the notification and the
+// in-panel card cannot disagree about where the release notes are.
+export const WHATSNEW_URL = "https://padspan.traks.ca/#whatsnew";
+
+// ── What to say about the paid half, to whom ────────────────────────────────
+// There are exactly two paid features, and most free installs have never seen
+// either — the only place they are named is a refusal you hit by trying to use
+// them. The what's-new card is a fair place to say what they are: once per
+// release, one line, no badge and no banner.
+//
+// What it says depends on what the licence already covers, because pitching
+// somebody a thing they have already bought is an insult:
+//
+//   pro     -> null. They have both. Say nothing.
+//   bright  -> Forensics only; light placement is already theirs.
+//   free    -> both.
+//   lapsed  -> what went read-only, and that nothing was lost.
+//
+// Pure on purpose: it takes the settings payload and returns text, so the rule
+// can be tested without a browser (tests/js/pro_pitch.mjs).
+export function proPitch(settings) {
+  const st = settings || {};
+  const tier = String(st.tier || "free").toLowerCase();
+  const hasKey = !!st.pro_has_key;
+  const lapsed = st.pro_active === false;
+
+  if (hasKey && lapsed) {
+    return {
+      kind: "lapsed",
+      text: "Your licence has lapsed, so Forensics and light placement are read-only. "
+          + "Everything you recorded and every light you placed is still here and still exportable. ",
+      cta: `Renew PadSpan Pro — ${PRO_PRICE}`,
+      url: BUY_URL,
+    };
+  }
+  if (tier === "pro") return null;
+  if (tier === "bright") {
+    return {
+      kind: "bright",
+      text: "Your key covers the lighting half. The one thing it does not is Forensics — "
+          + "which Bluetooth devices were near a given scanner in any time window, with dwell "
+          + "time and CSV export. ",
+      cta: `PadSpan Pro — ${PRO_PRICE}`,
+      url: BUY_URL,
+    };
+  }
+  return {
+    kind: "free",
+    text: "Two things a licence adds, in case you have never hit them: Forensics, which answers "
+        + "which Bluetooth devices were near a scanner in any time window; and light placement, "
+        + "which puts every light exactly where it hangs instead of clustered in the middle of "
+        + "its room. ",
+    cta: `PadSpan Pro — ${PRO_PRICE}`,
+    url: BUY_URL,
+  };
+}
+// The one true path to the licence card. If this moves, it moves here.
+export const LICENCE_PATH = "Settings \u2192 Features \u2192 PadSpan licence";
+
+export const TIERS = ["free", "bright", "pro"];
+
+export function tierAtLeast(tier, want) {
+  const r = t => { const i = TIERS.indexOf(String(t || "").toLowerCase()); return i < 0 ? 0 : i; };
+  return r(tier) >= r(want);
+}
+
+/** The effective tier the backend computed, off the settings payload. */
+export function currentTier(settings) {
+  const t = String((settings && settings.tier) || "").toLowerCase();
+  return TIERS.includes(t) ? t : "free";
+}
+
+export function currentEdition(settings) {
+  return String((settings && settings.edition) || "").toLowerCase() === "bright" ? "bright" : "full";
+}
+
+// The classification. `lighting` is what PadSpan Bright is; `presence` is
+// everything the lighting product does not show. Health and Settings are
+// lighting because a Bright install still has to be diagnosed and configured
+// — both trim themselves by edition inside.
+export const SURFACE_CLASS = Object.freeze({
+  overview:    "presence",
+  purelive:    "presence",
+  follow:      "presence",
+  objects:     "presence",
+  devices:     "presence",
+  bluetooth:   "presence",
+  presence:    "presence",
+  history:     "presence",
+  monitor:     "presence",
+  maps:        "lighting",
+  events:      "presence",
+  health:      "lighting",
+  settings:    "lighting",
+  manage:      "presence",
+  debug:       "presence",
+  diagnostics: "presence",
+  qa:          "presence",
+  training:    "presence",
+  calibration: "presence",
+  traceback:   "presence",
+  forensics:   "presence",
+  sandbox:     "presence",
+  occupancy:   "presence",
+  // The developer's install-base dashboard is about BOTH builds' installs,
+  // but it is a presence-build surface: Bright has no Pro key to present.
+  installbase: "presence",
+});
+
+/**
+ * Which of `ids` a build shows. The full edition shows everything it is
+ * handed. Bright shows the lighting surfaces — and the presence ones too when
+ * the reveal switch is on (settings.bright_reveal_presence): hide-by-default,
+ * never hidden for good.
+ */
+export function surfacesForEdition(ids, settings) {
+  const edition = currentEdition(settings);
+  if (edition !== "bright") return ids.slice();
+  const reveal = !!(settings && settings.bright_reveal_presence);
+  return ids.filter(id => reveal || SURFACE_CLASS[id] === "lighting");
+}

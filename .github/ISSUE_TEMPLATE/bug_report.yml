@@ -1,0 +1,79 @@
+name: Bug Report
+description: Report a bug in PadSpan Bright
+labels: ["bug"]
+body:
+  - type: input
+    id: padspan_version
+    attributes:
+      label: PadSpan Bright version
+      description: "The version of PadSpan Bright you are running (e.g. 0.5.49)."
+      placeholder: "0.5.49"
+    validations:
+      required: true
+
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      description: "The version of Home Assistant Core you are running."
+      placeholder: "2025.2.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ble_scanner
+    attributes:
+      label: BLE scanner type
+      description: "Which BLE scanner integration are you using?"
+      options:
+        - ESPresense
+        - Bermuda
+        - HA Bluetooth Proxy
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: "A clear description of the bug."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: "Step-by-step instructions to reproduce the issue."
+      placeholder: |
+        1. Go to ...
+        2. Click on ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: "What you expected to happen."
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "Relevant log output from Home Assistant (Settings > System > Logs)."
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: "If applicable, add screenshots to help explain the problem."
+    validations:
+      required: false
