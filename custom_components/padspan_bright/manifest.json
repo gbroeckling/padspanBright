@@ -15,10 +15,10 @@
   ],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/gbroeckling/padspanHA",
+  "documentation": "https://github.com/gbroeckling/padspanBright",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/gbroeckling/padspanHA/issues",
+  "issue_tracker": "https://github.com/gbroeckling/padspanBright/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.38.21"
+  "version": "0.38.22"
 }
