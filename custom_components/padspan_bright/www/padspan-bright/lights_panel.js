@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.22";
-const BUILD_ID = "20260904T172251Z";
+const APP_VERSION = "0.38.23";
+const BUILD_ID = "20260909T152306Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -215,7 +215,13 @@ class PadSpanLightsApp extends HTMLElement {
       this.state._showcase      = !!s.lights_showcase;
       this.state._fitRooms      = !!s.lights_fit_rooms;
       this.state._hideUntouched = !!s.lights_hide_untouched;
+      this.state._hideDeviceCodes = !!s.lights_hide_device_codes;
       this.state._isolux        = !!s.lights_isolux;
+      this.state._automorph     = !!s.lights_automorph_enabled;
+      this.state._automorphPct  = Number(s.lights_automorph_room_pct) || 0;
+      this.state._automorphHardness = Number(s.lights_automorph_hardness) || 0;
+      this.state._automorphStyle = s.lights_automorph_style || "glow";
+      this.state._automorphSubtlety = Number(s.lights_automorph_subtlety) || 0;
       // The effective tier the backend computed (licence.py). Below `bright`
       // the shared pipeline draws the free map — see lights_map.js. A settings
       // fetch that failed keeps the tier it last knew rather than flickering
@@ -259,18 +265,22 @@ class PadSpanLightsApp extends HTMLElement {
   async _toggle(eid){
     if(!this._hass) return;
     // The service domain is the entity's own: light.* → light, fan.* → fan.
-    // A motion sensor is read-only — a tap on it is a no-op, its state is
-    // the blue pulse on the map. A temperature sensor.* is read-only the
+    // A binary_sensor — motion or door/window — is read-only — a tap on it
+    // is a no-op, its state is the blue pulse (motion) or a static glyph
+    // (door/window) on the map. A temperature sensor.* is read-only the
     // same way — its "state" is the number it just showed on the marker.
     const domain=String(eid).split(".")[0];
-    if(domain==="binary_sensor"){ this._toast("Motion sensors are read-only"); return; }
+    if(domain==="binary_sensor"){ this._toast("Sensors are read-only"); return; }
     if(domain==="sensor"){ this._toast("Temperature sensors are read-only"); return; }
-    const on=this._hass.states[eid]?.state==="on";
+    // lock.* (gap #8, best-in-class roadmap) has no on/off at all —
+    // "locked" is its normal state, lock/unlock its services.
+    const isLockDomain=domain==="lock";
+    const on=isLockDomain ? this._hass.states[eid]?.state==="locked" : this._hass.states[eid]?.state==="on";
     // Optimistic: the marker flips NOW (shared claim in lights_map.js, so the
     // index row flips with it), and HA's next state reconciles it. A failed
     // call takes the claim back at once and shakes the marker — a tap that
     // did nothing must never look like a tap that worked.
-    setOptimistic(eid, on?"off":"on");
+    setOptimistic(eid, isLockDomain ? (on?"unlocked":"locked") : (on?"off":"on"));
     this._render();
     try{
       // Off→on restores the level it was dimmed to. HA drops `brightness`
@@ -282,7 +292,8 @@ class PadSpanLightsApp extends HTMLElement {
         const bri=lastBrightness(eid);
         if(bri!==null) data.brightness=bri;
       }
-      await this._hass.callService(domain, on?"turn_off":"turn_on", data);
+      const svc=isLockDomain ? (on?"unlock":"lock") : (on?"turn_off":"turn_on");
+      await this._hass.callService(domain, svc, data);
       setTimeout(()=>this._render(), 600);
     }catch(e){
       clearOptimistic(eid);
@@ -317,6 +328,7 @@ class PadSpanLightsApp extends HTMLElement {
       toast:(m,e)=>this._toast(m,e),
       rerender:()=>this._render(),
       onEdit: this._isAdmin() ? (e)=>this._gotoBuilder(e) : null,
+      ip: this._regStore?.reg?.ipMap?.[eid] || null,
     });
   }
 
@@ -332,7 +344,7 @@ class PadSpanLightsApp extends HTMLElement {
   // The api the shared use surface and sheets act through — the sidebar's
   // toggle (optimistic + shake), its control card, its aggregate action.
   _useApi(lightsByEid, lights){
-    const controlsFor=(l0)=>!!(l0 && (isWledLight(l0)||isPartitionLight(l0)||l0.dimmable||l0.isFan));
+    const controlsFor=(l0)=>!!(l0 && (isWledLight(l0)||isPartitionLight(l0)||l0.dimmable||l0.isFan||l0.isLock));
     const api={
       hass:this._hass, lightsByEid, lights, controlsFor,
       toggle:(eid)=>this._toggle(eid),
@@ -392,7 +404,7 @@ class PadSpanLightsApp extends HTMLElement {
       ? ensureLightsRegistry(this._regStore, this._hass, this.state.model.areas, ()=>this._render())
       : { areaMap:{}, platformMap:{}, loading:true };
     const lightsLoading = reg.loading;
-    const lights = gatherLights(this._hass?.states||{}, reg.areaMap, this.state._shapeOverrides, this.state._tier, reg.platformMap, this.state._typeOverrides, reg.pairMap);
+    const lights = gatherLights(this._hass?.states||{}, reg.areaMap, this.state._shapeOverrides, this.state._tier, reg.platformMap, this.state._typeOverrides, reg.pairMap, reg.manufacturerMap);
 
     if(!lights.length){
       root.appendChild(el("div",{class:"muted",style:"padding:8px"},"No light entities found."));
@@ -422,6 +434,19 @@ class PadSpanLightsApp extends HTMLElement {
       showcase: !!this.state._showcase,
       fitRooms: !!this.state._fitRooms,
       isolux: !!this.state._isolux,
+      // Read-only reflection, same reason as showcase/fitRooms/isolux above:
+      // Automorph is set in Mapping -> Lights and this panel displays the
+      // map that tab builds, so its aura must show here too, or the two
+      // "identical" views disagree on what the house currently looks like.
+      // No onAutomorph/onAutomorphRoomPct — this panel never edits modes.
+      automorph: !!this.state._automorph,
+      automorphRoomPct: this.state._automorphPct || 0,
+      automorphHardness: this.state._automorphHardness || 0,
+      automorphStyle: this.state._automorphStyle || "glow",
+      automorphSubtlety: this.state._automorphSubtlety || 0,
+      // Same read-only reflection as the modes above — no onHideDeviceCodes,
+      // this panel never edits it, only displays what Mapping -> Lights set.
+      hideDeviceCodes: !!this.state._hideDeviceCodes,
       ambient: sunAmbient(this._hass),
       // Same filter as the builder, from the same rule, over the same
       // placements — the map hides them, the index table below still lists
@@ -434,6 +459,12 @@ class PadSpanLightsApp extends HTMLElement {
         : hidden,
       lightsByEid,
       lightsLoading,
+      // Read-only reflection of link status — no onConfigureDoor, this
+      // sidebar has no Rooms tab of its own to jump to (that lives in
+      // Mapping, a separate panel route); the table just shows whether a
+      // door/window is linked, same status Mapping -> Lights shows.
+      doorLinkedIds: new Set((this.state.model?.rf_barriers_m || [])
+        .filter(b => b.linked_entity_id).map(b => b.linked_entity_id)),
       view: this._view,
       saveView: ()=>this._saveSettings(),
       callWS: (msg)=>this._hass.callWS(msg),
@@ -456,10 +487,18 @@ class PadSpanLightsApp extends HTMLElement {
       onHexesBuilt: (isoDiv)=>{
         requestAnimationFrame(()=>wireUseSurface(isoDiv, this._useApi(lightsByEid, lights)));
       },
-      onRowClick: (l)=> this._toggle(l.entity_id),
-      onRowLongPress: (l)=>{ if(isWledLight(l) || isPartitionLight(l) || l.dimmable || l.isFan) this._openWledDetail(l.entity_id); },
+      // A row in the list is the same object as its marker on the map, so a
+      // tap here has to mean the same thing a tap THERE means — the map's
+      // own click handler (wirePress in lights_map.js) already special-cases
+      // motion to open its activity history instead of the read-only
+      // refusal; this row click went through the generic toggle path
+      // unconditionally and never got the same treatment, so clicking a
+      // motion sensor in the list still said "read-only" long after tapping
+      // its marker on the map started opening the calendar.
+      onRowClick: (l)=> l.isMotion ? openActivityCalendar(this._hass, l.entity_id) : this._toggle(l.entity_id),
+      onRowLongPress: (l)=>{ if(isWledLight(l) || isPartitionLight(l) || l.dimmable || l.isFan || l.isLock) this._openWledDetail(l.entity_id); },
       // The "⋯" on every row: the controls in plain sight.
-      onRowMore: (l)=>{ if(isWledLight(l) || isPartitionLight(l) || l.dimmable || l.isFan) this._openWledDetail(l.entity_id); else this._toggle(l.entity_id); },
+      onRowMore: (l)=>{ if(isWledLight(l) || isPartitionLight(l) || l.dimmable || l.isFan || l.isLock) this._openWledDetail(l.entity_id); else this._toggle(l.entity_id); },
       onToggleHidden: (eid)=>{
         if(hidden.has(eid)) hidden.delete(eid);
         else hidden.add(eid);
@@ -471,6 +510,19 @@ class PadSpanLightsApp extends HTMLElement {
         if(this._regStore.reg) this._regStore.reg.ts=0;
         this._render();
       },
+      // A per-entity classification correction, not a presentation mode —
+      // unlike showcase/fitRooms/isolux above, this panel DOES let you edit
+      // it here, the same as Hide/Show and the Room-assignment dropdown
+      // already do. Pro only, matching the Mapping tab's own gate.
+      typeOverrides: this.state._typeOverrides,
+      onTypeOverride: String(this.state._tier||"").toLowerCase()==="pro" ? async (eid, kind) => {
+        const next = { ...this.state._typeOverrides };
+        if (!kind || kind === "auto") delete next[eid]; else next[eid] = kind;
+        this.state._typeOverrides = next;
+        try { await this._hass.callWS({ type: "padspan_bright/settings_set", light_type_overrides: next }); }
+        catch (e) { this._toast("Could not save the type override: " + String(e), true); }
+        this._render();
+      } : null,
       // The index's own filter + sort — independent of the map's layer
       // chips (classFilter/onClassFilter above): this hides rows outright,
       // the ordinary meaning of "filter" for a list, so choosing a type
@@ -479,6 +531,8 @@ class PadSpanLightsApp extends HTMLElement {
       onTableClassFilter: (cls)=>{ this.state._tableClassFilter=cls; this._render(); },
       tableSort: this.state._tableSort || null,
       onTableSort: (next)=>{ this.state._tableSort=next; this._render(); },
+      tableHealthFilter: !!this.state._tableHealthFilter,
+      onTableHealthFilter: (on)=>{ this.state._tableHealthFilter=on; this._render(); },
     };
 
     root.appendChild(buildLightsMapCard(host));

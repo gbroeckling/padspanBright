@@ -366,9 +366,12 @@ function _scannerMap(ctx, el, haFloors){
         // Number label on dot
         markersSvg += `<text x="${cx}" y="${(parseFloat(cy)+0.35).toFixed(1)}" text-anchor="middle" dominant-baseline="middle" font-size="1.2" fill="white" font-weight="bold">${i+1}</text>`;
         // Scanner name + confidence — compact label above marker
-        const labelY = (r.y_frac * vbH - parseFloat(outerR) - 0.5).toFixed(1);
+        // Clamp so the label text never gets pushed outside the viewBox (and clipped
+        // by the container's overflow:hidden) for scanners near an edge of the map.
+        const labelY = Math.max(r.y_frac * vbH - parseFloat(outerR) - 0.5, 2).toFixed(1);
+        const labelX = Math.min(Math.max(parseFloat(cx), 8), 92).toFixed(2);
         const shortName = r.name.length > 14 ? r.name.slice(0,12)+"…" : r.name;
-        markersSvg += `<text x="${cx}" y="${labelY}" text-anchor="middle" font-size="1.5" fill="${col}" font-weight="600" paint-order="stroke" stroke="#071008" stroke-width="0.5">${esc(shortName)} ${confPct}%</text>`;
+        markersSvg += `<text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="1.5" fill="${col}" font-weight="600" paint-order="stroke" stroke="#071008" stroke-width="0.5">${esc(shortName)} ${confPct}%</text>`;
       });
 
       const mapDiv = el("div",{style:"border-radius:6px;overflow:hidden;border:1px solid #1b3526;margin-bottom:8px"});
@@ -672,11 +675,14 @@ function _estimatePositionsPerMap(calData, radios){
   for(const [mapId, bySource] of Object.entries(acc)){
     result[mapId] = [];
     for(const [source, pts] of Object.entries(bySource)){
+      // dBm -> linear power ratio: a scanner heard 10dB louder gets 10x the pull
+      // on the estimated position (deliberate physics-based weighting).
       const weights = pts.map(p => Math.pow(10, p.mean_rssi / 10));
       const totalW  = weights.reduce((a,b)=>a+b, 0);
       const x = pts.reduce((s,p,i) => s + p.x_frac * weights[i], 0) / totalW;
       const y = pts.reduce((s,p,i) => s + p.y_frac * weights[i], 0) / totalW;
       const meanRssi  = Math.round(pts.reduce((s,p)=>s+p.mean_rssi,0) / pts.length);
+      // 6 calibration points is the chosen threshold at which confidence saturates to 100%.
       const confidence = Math.min(1, pts.length / 6);
       // Resolve display name from live snapshot radios
       const radio = radios.find(r => r.source === source);
@@ -1156,7 +1162,7 @@ function _settingsPresence(ctx, el){
 
   // ── Signal Loss Linger ───────────────────────────────────────────────────
   const currentLinger = (settings.signal_loss_linger_s != null ? Number(settings.signal_loss_linger_s) : 90);
-  const lingerPolls = Math.max(2, Math.round(currentLinger / 10));
+  const lingerPolls = Math.max(2, Math.round(currentLinger / _pollInt));
   const lingerInp = el("input", {
     type: "number", min: "10", max: "300", step: "10", value: String(currentLinger), style: inpStyle,
   });
@@ -1914,6 +1920,72 @@ function _settingsPresence(ctx, el){
       el("div", { class: "muted", style: "font-size:12px" }, "0–3 m (default 1.0)"),
     ]),
     el("div", { style: "margin-top:8px" }, devHSaveBtn),
+  ]));
+
+  // ── GPS Bridge (gap #5, best-in-class roadmap) ────────────────────────────
+  // The fabric's metre plane has no inherent relationship to a real-world
+  // location — these three anchor it, so a tracked object's device_tracker
+  // can report a real latitude/longitude and plot on HA's built-in map.
+  const gpsLatInp = el("input", {
+    type: "number", step: "0.000001", min: "-90", max: "90",
+    value: settings.fabric_origin_lat != null ? String(settings.fabric_origin_lat) : "",
+    placeholder: "e.g. 49.283", style: inpStyle,
+  });
+  const gpsLonInp = el("input", {
+    type: "number", step: "0.000001", min: "-180", max: "180",
+    value: settings.fabric_origin_lon != null ? String(settings.fabric_origin_lon) : "",
+    placeholder: "e.g. -123.121", style: inpStyle,
+  });
+  const gpsBearingInp = el("input", {
+    type: "number", step: "1", min: "0", max: "359",
+    value: String(settings.fabric_bearing_deg ?? 0),
+    style: inpStyle,
+  });
+  const gpsSaveBtn = el("button", { class: "btn inline" }, "Save");
+  gpsSaveBtn.addEventListener("click", async () => {
+    const latStr = gpsLatInp.value.trim(), lonStr = gpsLonInp.value.trim();
+    const lat = latStr === "" ? null : parseFloat(latStr);
+    const lon = lonStr === "" ? null : parseFloat(lonStr);
+    if ((lat != null && !isFinite(lat)) || (lon != null && !isFinite(lon))) {
+      ctx.toast("Enter valid coordinates, or leave both blank to disable", true); return;
+    }
+    if ((lat == null) !== (lon == null)) {
+      ctx.toast("Set both latitude and longitude, or clear both", true); return;
+    }
+    const rawBearing = ((parseFloat(gpsBearingInp.value) % 360) + 360) % 360;
+    const safeBearing = isFinite(rawBearing) ? rawBearing : 0;
+    try {
+      await ctx.actions.settingsSet({
+        fabric_origin_lat: lat, fabric_origin_lon: lon,
+        fabric_bearing_deg: safeBearing,
+      });
+      ctx.toast(lat == null ? "GPS bridge disabled" : "GPS origin saved");
+    } catch (e) { ctx.toast("Failed to save setting", true); }
+  });
+  wrap.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "h2" }, "GPS Bridge"),
+    el("div", { class: "muted", style: "font-size:12px;margin-bottom:14px" },
+      "Anchor the fabric to a real-world location so tracked objects' device_tracker entities report a " +
+      "real latitude/longitude and plot on Home Assistant's built-in map — in addition to, not instead " +
+      "of, their room-name state. Leave latitude/longitude blank to disable (no GPS is reported, never a " +
+      "guess at (0, 0)). Bearing is the compass direction, clockwise from true north, that the fabric's " +
+      "own +Y axis points toward on your floorplan — 0 if you don't know, since most floorplans are " +
+      "drawn roughly north-up."
+    ),
+    el("div", { style: rowStyle }, [
+      el("div", { style: "font-size:13px;color:#a7f3d0;min-width:130px" }, "Origin latitude"),
+      gpsLatInp,
+    ]),
+    el("div", { style: rowStyle }, [
+      el("div", { style: "font-size:13px;color:#a7f3d0;min-width:130px" }, "Origin longitude"),
+      gpsLonInp,
+    ]),
+    el("div", { style: rowStyle }, [
+      el("div", { style: "font-size:13px;color:#a7f3d0;min-width:130px" }, "Bearing (°)"),
+      gpsBearingInp,
+      el("div", { class: "muted", style: "font-size:12px" }, "0–359, clockwise from true north"),
+    ]),
+    el("div", { style: "margin-top:8px" }, gpsSaveBtn),
   ]));
 
   // ── Scanner RSSI Offsets ───────────────────────────────────────────────────

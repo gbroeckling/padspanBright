@@ -15,7 +15,7 @@ const { buildIsoSVG, shapeSvg, fabricFrame, sampleSceneField, pointInPolygon, of
         lightClassOf } =
   await import(`./iso_lights.js${new URL(import.meta.url).search}`);
 const { assignLightCodes, resolveLightShape, LIGHT_SHAPES, LIGHT_TYPE_OVERRIDES,
-        WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, TEMP_BORDER } =
+        WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, TEMP_BORDER, LOCK_BORDER, DOOR_BORDER, healthOf } =
   await import(`./light_codes.js${new URL(import.meta.url).search}`);
 const { tierAtLeast } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
@@ -56,6 +56,10 @@ export function lightsHostForTier(host){
     hideUntouched: false, untouchedCount: 0, onHideUntouched: null,
     onTypeOverride: null, typeOverrides: {},
     isolux: false, onIsolux: null,
+    automorph: false, onAutomorph: null, automorphRoomPct: 0, onAutomorphRoomPct: null,
+    automorphHardness: 0, onAutomorphHardness: null,
+    automorphStyle: "glow", onAutomorphStyle: null,
+    automorphSubtlety: 0, onAutomorphSubtlety: null,
     sceneName: null, onScene: null, onSceneAngle: null, onSceneApply: null,
     rippleArmed: false, onRipple: null, onRippleFire: null,
     // Placement is paid, so the placement queue is too. And at free EVERY
@@ -136,7 +140,11 @@ export function effectiveState(eid, reported, now = Date.now()){
 // ── Device classes on the map ────────────────────────────────────────────────
 // The layer chips: the map keeps every class in view and DIMS the others,
 // because a fan's place on the ceiling is context for the light beside it.
-export const LIGHT_CLASSES = [["all","All"],["light","Lights"],["strip","Strips"],["fan","Fans"],["motion","Motion"],["temp","Temps"]];
+export const LIGHT_CLASSES = [["all","All"],["light","Lights"],["strip","Strips"],["fan","Fans"],["motion","Motion"],["temp","Temps"],["lock","Locks"],["door","Doors/Windows"]];
+
+// Automorph's style dropdown vocabulary — the UI's copy of what
+// automorphAuraSvg (iso_lights.js) actually switches on.
+export const AUTOMORPH_STYLES = [["glow","Glow"],["blueprint","Blueprint"],["nebula","Nebula"]];
 export { lightClassOf };
 export function classMatches(l, cls){ return !cls || cls === "all" || lightClassOf(l) === cls; }
 
@@ -772,9 +780,15 @@ export function openControlCard(hass, eid, api){
     el("button", { style: smallBtn + (api && api.onEdit ? "" : ";margin-left:auto"), onclick: close }, "✕"),
   ]));
 
-  const on = st.state === "on";
   // The service domain is the entity's own — this card serves fans too.
   const domain = String(eid).split(".")[0];
+  // lock.* has no on/off at all (gap #8, best-in-class roadmap: the first
+  // domain generalized beyond light/fan) — "locked" is its lit/normal
+  // state, lock/unlock are its services, and a jammed lock is neither, so
+  // it reads as "not locked" (offers Lock as the recovery action) with its
+  // own warning line below rather than a misleading Turn On/Off button.
+  const isLockDomain = domain === "lock";
+  const on = isLockDomain ? st.state === "locked" : st.state === "on";
   const onBtn = el("button", {
     style: "width:100%;margin-bottom:14px;padding:10px;font-weight:700;font-size:13px;border-radius:10px;cursor:pointer;"
       + "letter-spacing:.02em;transition:filter .15s ease;"
@@ -786,13 +800,17 @@ export function openControlCard(hass, eid, api){
         const bri = lastBrightness(eid);
         if (bri !== null) data.brightness = bri;
       }
-      setOptimistic(eid, on ? "off" : "on");
-      try { await hass.callService(domain, on ? "turn_off" : "turn_on", data); } catch (e) { clearOptimistic(eid); }
+      const svc = isLockDomain ? (on ? "unlock" : "lock") : (on ? "turn_off" : "turn_on");
+      setOptimistic(eid, isLockDomain ? (on ? "unlocked" : "locked") : (on ? "off" : "on"));
+      try { await hass.callService(domain, svc, data); } catch (e) { clearOptimistic(eid); }
       close();
       setTimeout(rerender, 400);
     },
-  }, on ? "Turn Off" : "Turn On");
+  }, isLockDomain ? (on ? "Unlock" : "Lock") : (on ? "Turn Off" : "Turn On"));
   box.appendChild(onBtn);
+  if (isLockDomain && st.state === "jammed") {
+    box.appendChild(el("div", { style: "font-size:12px;color:#f87171;margin:-8px 0 12px" }, "⚠ Lock is jammed"));
+  }
 
   // ── Fan card ─────────────────────────────────────────────────────────
   if (domain === "fan") {
@@ -908,6 +926,16 @@ export function openControlCard(hass, eid, api){
       try { await hass.callService("light", "turn_on", { entity_id: eid, effect: effSel.value }); } catch (e) {}
     });
     box.appendChild(el("div", {}, [el("div", { style: capLbl }, "Effect"), effSel]));
+    // The device registry's own configuration_url — WLED (and most ESPHome
+    // devices) set this to the unit's local web UI, so it's already known
+    // from the same registry fetch gatherLights uses for Brand, no extra
+    // round trip. Only shown here, in the WLED-specific block, per the ask
+    // ("when drilling into the wled controls") — a plain light has no
+    // per-device web UI worth surfacing.
+    if (api && api.ip) {
+      box.appendChild(el("div", { style: "font-size:11px;color:#64748b;margin-top:8px;text-align:center" },
+        `IP: ${api.ip}`));
+    }
   }
 
   overlay.appendChild(box);
@@ -1003,6 +1031,38 @@ export function computeMotionOccupancyPairs(entReg, states){
   return pairMap;
 }
 
+// Brand column resolution (Garry, 2026-09-08: "why are you not seeing the
+// control4 lights as brand control4, sloppy... better logic for the search.
+// Blanks in the brand column should be rare"). Root cause, verified live:
+// manufacturer alone left ~60 Control4 devices behind an HC800 blank — HA's
+// device registry genuinely has no manufacturer string for them — while a
+// few C4 outlet modules DID report one, making the column read as
+// inconsistently sloppy rather than uniformly empty. Every device still
+// carries its OWNING INTEGRATION (identifiers[0][0], or the entity's own
+// platform when no device exists at all), so that becomes the fallback
+// brand — stylized for the integrations with a real retail name, title-
+// cased for everything else so a future integration resolves with no code
+// change ("control4" → "Control4" automatically). A small set of pure
+// transport/container domains stay honestly blank — they carry no brand
+// identity of their own to report.
+const _BRAND_STYLED = {
+  wled: "WLED", esphome: "ESPHome", hue: "Philips Hue", lifx: "LIFX",
+  tplink: "TP-Link", tradfri: "IKEA", wiz: "WiZ", flux_led: "Magic Home",
+  zha: "Zigbee", zwave_js: "Z-Wave", deconz: "deCONZ",
+  lutron_caseta: "Lutron", homekit_controller: "HomeKit",
+};
+const _BRAND_BLANK = new Set([
+  "mqtt", "template", "group", "light_group", "switch_as_x", "demo",
+  "homeassistant", "input_boolean", "adaptive_lighting", "scene",
+]);
+export function resolveBrand(manufacturer, identDomain, platform){
+  if (manufacturer) return manufacturer;
+  const domain = identDomain || platform || null;
+  if (!domain || _BRAND_BLANK.has(domain)) return null;
+  if (_BRAND_STYLED[domain]) return _BRAND_STYLED[domain];
+  return domain.split("_").map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(" ");
+}
+
 // ── Registry: entity_id → area name for every light ──────────────────────────
 // One implementation with ONE staleness rule so the two views can never
 // disagree about which room a light is in. `store` is a host-owned plain
@@ -1031,8 +1091,37 @@ export function ensureLightsRegistry(store, hass, areas, onLoaded){
         for (const a of (areas || [])) areaIdToName[a.id] = a.name;
         // device_id → area_id (entities commonly inherit area from device)
         const devAreaId = {};
-        for (const d of (devReg || [])) if (d.area_id) devAreaId[d.id] = d.area_id;
-        const areaMap = {}, platformMap = {};
+        // device_id → manufacturer, for the index's Brand column. Many
+        // Zigbee/Tuya devices report their manufacturer as a raw firmware
+        // string (e.g. "_TZE204_ex3rcdha") rather than the name on the box
+        // — that is what HA itself knows, so it is what this shows too;
+        // sold-as branding for a white-label device is not something the
+        // device registry has ever known. When a device has NO manufacturer
+        // at all (every Control4 device behind an HC800, live-verified),
+        // devIdentDomain below carries its owning integration instead —
+        // resolveBrand is what turns either into the column's final text.
+        const devManufacturer = {};
+        // device_id → owning integration domain, from the device's own
+        // identifiers (a list of [domain, unique_id] pairs — defensively
+        // guarded, since a malformed/third-party entry could ship a bare
+        // string or an empty tuple instead of the documented shape).
+        const devIdentDomain = {};
+        // device_id → IP/hostname, for the WLED control card. WLED (and most
+        // ESPHome devices) set the device registry's own configuration_url
+        // to the device's local web UI — http://<ip>/ — so this is already
+        // in hand from the SAME fetch, no separate network call per device.
+        const devHost = {};
+        for (const d of (devReg || [])) {
+          if (d.area_id) devAreaId[d.id] = d.area_id;
+          if (d.manufacturer) devManufacturer[d.id] = d.manufacturer;
+          const firstIdent = Array.isArray(d.identifiers) ? d.identifiers[0] : null;
+          if (Array.isArray(firstIdent) && typeof firstIdent[0] === "string") devIdentDomain[d.id] = firstIdent[0];
+          if (d.configuration_url) {
+            try { devHost[d.id] = new URL(d.configuration_url).hostname || null; }
+            catch (_) { devHost[d.id] = null; }
+          }
+        }
+        const areaMap = {}, platformMap = {}, manufacturerMap = {}, ipMap = {};
         for (const e of (reg || [])) {
           // Fans and motion sensors ride the lights pipeline now, so their
           // room assignment resolves the same way a light's does. Temperature
@@ -1053,11 +1142,13 @@ export function ensureLightsRegistry(store, hass, areas, onLoaded){
           // ESPHome-style split strip, whatever ELSE reports it is not our
           // business. Same registry fetch, no extra round trip.
           platformMap[e.entity_id] = e.platform || null;
+          manufacturerMap[e.entity_id] = resolveBrand(devManufacturer[e.device_id], devIdentDomain[e.device_id], e.platform);
+          ipMap[e.entity_id] = devHost[e.device_id] || null;
         }
         // Same registry fetch, no extra round trip — hass.states is already
         // in hand for the device_class/name each pairing decision needs.
         const pairMap = computeMotionOccupancyPairs(reg, hass.states);
-        store.reg = { ts: Date.now(), areaMap, platformMap, pairMap };
+        store.reg = { ts: Date.now(), areaMap, platformMap, manufacturerMap, ipMap, pairMap };
         store.retryAfter = 0;
       } catch (_) {
         // A failed fetch must never become the authoritative answer. With a
@@ -1065,7 +1156,7 @@ export function ensureLightsRegistry(store, hass, areas, onLoaded){
         // stay in the loading state (the map keeps its placeholder) instead of
         // caching an empty areaMap for 60s, which would tell the user every
         // light in the house has no room.
-        if (store.reg) store.reg = { ts: Date.now(), areaMap: store.reg.areaMap, platformMap: store.reg.platformMap, pairMap: store.reg.pairMap };
+        if (store.reg) store.reg = { ts: Date.now(), areaMap: store.reg.areaMap, platformMap: store.reg.platformMap, manufacturerMap: store.reg.manufacturerMap, ipMap: store.reg.ipMap, pairMap: store.reg.pairMap };
         else store.retryAfter = Date.now() + 10000;
       } finally {
         store.loading = false;
@@ -1076,6 +1167,8 @@ export function ensureLightsRegistry(store, hass, areas, onLoaded){
   return {
     areaMap: store.reg ? store.reg.areaMap : {},
     platformMap: store.reg ? store.reg.platformMap : {},
+    manufacturerMap: store.reg ? store.reg.manufacturerMap || {} : {},
+    ipMap: store.reg ? store.reg.ipMap || {} : {},
     pairMap: store.reg ? store.reg.pairMap || {} : {},
     loading: !store.reg,
   };
@@ -1093,7 +1186,11 @@ export function ensureLightsRegistry(store, hass, areas, onLoaded){
 // light's class outright (see isWledLight/isPartitionLight).
 // fan.* entities ride the same pipeline: same codes discipline (F-series),
 // same rooms, same table, same map — a ceiling has fans on it.
-export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap, typeOverrides, pairMap){
+// manufacturerMap = registry manufacturerMap from ensureLightsRegistry,
+// entity_id → the device registry's manufacturer string. Informational
+// only (identifying hardware, not a placement or styling control), so it
+// is ungated — free tier sees it same as everyone else.
+export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap, typeOverrides, pairMap, manufacturerMap, nowMs){
   const paid = lightingUnlocked(tier);
   const pro = tierAtLeast(tier, "pro");
   // A verified motion+occupancy pair (see computeMotionOccupancyPairs) rides
@@ -1113,33 +1210,53 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
   const primaryFor = pairMap || {};
   const lights = Object.keys(states || {})
     .filter(eid => eid.startsWith("light.") || eid.startsWith("fan.")
-      // Motion sensors join by DEVICE CLASS, not domain alone — doors,
-      // windows and every other binary_sensor stay out of a lighting map.
-      // "occupancy" rides along with "motion": both are PIR presence
-      // sensors in HA's own taxonomy (motion = momentary, occupancy =
-      // sustained — e.g. an outlet-integrated bathroom sensor reports
-      // occupancy) and read identically on this map — found live: the
-      // bathroom outlets' PIRs (binary_sensor.invisoutlet_occupancy*)
-      // were invisible to the map until this line admitted their class.
+      // Motion sensors join by DEVICE CLASS, not domain alone — every
+      // other binary_sensor still stays out unless a later clause below
+      // names its own device_class explicitly. "occupancy" rides along
+      // with "motion": both are PIR presence sensors in HA's own taxonomy
+      // (motion = momentary, occupancy = sustained — e.g. an outlet-
+      // integrated bathroom sensor reports occupancy) and read identically
+      // on this map — found live: the bathroom outlets' PIRs
+      // (binary_sensor.invisoutlet_occupancy*) were invisible to the map
+      // until this line admitted their class.
       // A verified pair's OCCUPANCY half is excluded here — it is not a
       // separate device on this map, it is folded into its motion partner.
       || (eid.startsWith("binary_sensor.")
           && ["motion", "occupancy"].includes(states[eid].attributes?.device_class)
           && !primaryFor[eid])
+      // Door/window sensors (Garry, 2026-09-08 — door/window barrier
+      // project, step 1: "Also add that device type to the list of devices
+      // in mapping, lighting"). A separate clause from motion/occupancy on
+      // purpose: doors never fold into a motion pair (primaryFor is a
+      // motion+occupancy-only concept) and read on the map as their own
+      // class — a static "is this left open" glyph, not a pulse.
+      || (eid.startsWith("binary_sensor.")
+          && ["door", "window"].includes(states[eid].attributes?.device_class))
       // Temperature sensors ride the same ceiling map — "same as WLED or
       // any other object... devices telling the temperature can also act
       // like a motion sensor" (Garry). sensor.* is a domain nothing else
       // here admits, so this can never collide with a light/fan/binary_sensor.
-      || (eid.startsWith("sensor.") && states[eid].attributes?.device_class === "temperature"))
+      || (eid.startsWith("sensor.") && states[eid].attributes?.device_class === "temperature")
+      // lock.* — gap #8, best-in-class roadmap: the first domain this
+      // pipeline generalized to beyond light/fan/binary_sensor/sensor.
+      // Whole domain, no device_class gate needed (every lock entity is
+      // relevant).
+      || eid.startsWith("lock."))
     .map(eid => ({
       entity_id:     eid,
       friendly_name: states[eid].attributes?.friendly_name || eid,
       state:         states[eid].state,   // "on" | "off" | "unavailable"
+      // Captured now that binary_sensor. admits TWO distinct device_class
+      // families (motion/occupancy and door/window) — isMotionSensor and
+      // isDoorSensor (light_codes.js) both need this to tell their own
+      // class apart post-gather; a bare domain-prefix check stopped being
+      // sufficient the moment a second binary_sensor family was admitted.
+      device_class:  states[eid].attributes?.device_class || null,
       area_name:     areaMap[eid] || null,
       // The user's word beats detection, at pro: forced class from
-      // settings.light_type_overrides. Never applies to a fan (the domain is
-      // the class) and never below pro.
-      type_override: pro && !eid.startsWith("fan.") && typeOverrides ? (typeOverrides[eid] || null) : null,
+      // settings.light_type_overrides. Never applies to a fan or a lock
+      // (the domain is the class) and never below pro.
+      type_override: pro && !eid.startsWith("fan.") && !eid.startsWith("lock.") && typeOverrides ? (typeOverrides[eid] || null) : null,
       // The fan card's inputs, present only on fan.* entities.
       pct:           eid.startsWith("fan.") ? (Number.isFinite(Number(states[eid].attributes?.percentage)) ? Number(states[eid].attributes.percentage) : null) : null,
       preset_modes:  eid.startsWith("fan.") && Array.isArray(states[eid].attributes?.preset_modes) ? states[eid].attributes.preset_modes : null,
@@ -1173,6 +1290,11 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
       // signal (see isPartitionLight). Gated like effect_list: free tier
       // never sees a strip class at all.
       platform:      paid ? ((platformMap && platformMap[eid]) || null) : null,
+      // The device registry's manufacturer string — identifying hardware,
+      // never gated. Often a raw Zigbee/Tuya firmware signature rather than
+      // a retail brand name; that is what HA itself knows, so it is what
+      // this shows.
+      brand:         (manufacturerMap && manufacturerMap[eid]) || null,
       // What the fixture is actually throwing right now. Showcase draws and
       // glows each light in its OWN colour at its OWN brightness; the working
       // map ignores both.
@@ -1201,6 +1323,13 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
     // The last dimmed level is only visible while a light is on — remember
     // it here, on the pass both views already make, so off→on can restore it.
     if (l.state === "on" && typeof l.bri === "number" && l.bri >= 1) _recordBrightness(l.entity_id, l.bri);
+    // Computed fresh on every gather (states poll), not cached on the
+    // object across polls — a device recovering or going stale needs the
+    // dot to move without waiting for something else to invalidate it.
+    // nowMs is injectable (same pattern as buildIsoSVG's opts.nowMs) so a
+    // test can pin elapsed time instead of racing the real clock.
+    const h = healthOf(l, Number(nowMs) || Date.now());
+    l.healthy = h.healthy; l.healthReason = h.reason;
   }
   return lights;
 }
@@ -1228,7 +1357,11 @@ export function lightIsTouched(l, shapeOverrides, placements) {
 // the outlines are decodable. Only the kinds actually present are listed, so
 // a house with no fans never shows a fan key.
 function buildShapeLegend(el, lights){
-  const present = new Set(lights.map(l => l.shape));
+  // "door" is deliberately never in this set: a door/window sensor never
+  // draws a point marker on this map (see the barrier-drawing pass in
+  // iso_lights.js) — a legend entry for a glyph that never appears would be
+  // its own small case of "doesn't make sense" (Garry, 2026-09-08).
+  const present = new Set(lights.map(l => l.shape).filter(k => k !== "door"));
   const row = el("div", { class: "lv-legend" });
   for (const [kind, label] of LIGHT_SHAPES) {
     if (kind === "auto" || !present.has(kind)) continue;
@@ -1319,11 +1452,20 @@ export function buildLightsMapCard(hostIn){
       { showcase: !!host.showcase, fitRooms: !!host.showcase && !!host.fitRooms,
         ambient: host.ambient, isolux: !!host.showcase && !!host.isolux,
         sceneField: host.showcase ? sceneFieldFor(host.sceneName, host.sceneAngle) : null,
-        // The use-surface ergonomics — see buildIsoSVG for each.
-        codeChip: !!host.codeChip, hideCodes: !codesShown,
+        // The use-surface ergonomics — see buildIsoSVG for each. hideCodes
+        // combines the existing zoom-driven auto-hide (preview/sidebar only)
+        // with an explicit, persisted user preference (Garry, 2026-09-08:
+        // "turn off the device identifier text") that applies everywhere,
+        // build mode included — the two never fight, either one hiding is enough.
+        codeChip: !!host.codeChip, hideCodes: !codesShown || !!host.hideDeviceCodes,
         classFilter: host.classFilter || null, hitHalo: !!host.hitHalo,
         collapseUnplaced: !!host.collapseUnplaced,
-        locateEid: host.locateEid || null, dropMarker: !!host.onDropPlace });
+        locateEid: host.locateEid || null, dropMarker: !!host.onDropPlace,
+        automorph: !!host.automorph,
+        automorphRoomPct: view.automorphLivePct !== undefined ? view.automorphLivePct : (host.automorphRoomPct || 0),
+        automorphHardness: view.automorphLiveHardness !== undefined ? view.automorphLiveHardness : (host.automorphHardness || 0),
+        automorphStyle: host.automorphStyle || "glow",
+        automorphSubtlety: view.automorphLiveSubtlety !== undefined ? view.automorphLiveSubtlety : (host.automorphSubtlety || 0) });
     applyZoom();
     host.onHexesBuilt(isoDiv, rebuildISO);
   };
@@ -1453,7 +1595,108 @@ export function buildLightsMapCard(hostIn){
       onclick: () => host.onHideUntouched(!host.hideUntouched),
     }, host.hideUntouched ? `◫ Untouched (${n})` : "◫ Hide untouched"));
   }
-  if (host.onShowcase || host.onHideUntouched) ctrlRow.appendChild(SEP());
+  // Hide device codes (Garry, 2026-09-08: "turn off the device identifier
+  // text") — a persisted preference, independent of the existing zoom-driven
+  // auto-hide in preview/sidebar mode (codesVisibleAtZoom in rebuildISO
+  // above); this toggle applies everywhere, build mode included, and either
+  // mechanism hiding is enough — see the hideCodes line in rebuildISO.
+  if (host.onHideDeviceCodes) {
+    ctrlRow.appendChild(el("button", {
+      class: "lv-tgl tone-teal" + (host.hideDeviceCodes ? " on" : ""),
+      title: "Hide the A01/M08-style code label on every marker, everywhere "
+        + "this map renders — a decluttered view when you just want the shapes.",
+      onclick: () => host.onHideDeviceCodes(!host.hideDeviceCodes),
+    }, host.hideDeviceCodes ? "▤ Codes hidden" : "▤ Hide codes"));
+  }
+  // Automorph (Garry, 2026-09-07) — its own family, independent of Showcase:
+  // it works the same in either rendering mode, so it is not nested under
+  // the Showcase gate above. An aesthetic-only aura for now (see
+  // automorphAuraSvg in iso_lights.js): the icon itself is untouched.
+  if (host.onAutomorph) {
+    ctrlRow.appendChild(el("button", {
+      class: "lv-tgl tone-pink" + (host.automorph ? " on" : ""),
+      title: "Grows a soft aura behind each placed fixture toward its own room's "
+        + "shape — an aesthetic overlay, the fixture's own icon is unchanged.",
+      onclick: () => host.onAutomorph(!host.automorph),
+    }, host.automorph ? "◈ Automorph ✓" : "◈ Automorph"));
+    if (host.automorph && host.onAutomorphRoomPct) {
+      // Live while dragging (rebuildISO directly, no network — same "fast
+      // local preview" the Floor gap slider below uses), persisted only on
+      // release, so a drag does not spam settingsSet.
+      const pctLbl = el("span", { class: "lv-val", style: "min-width:34px" }, `${host.automorphRoomPct || 0}%`);
+      const pctSlider = document.createElement("input");
+      pctSlider.type = "range"; pctSlider.min = "0"; pctSlider.max = "100";
+      pctSlider.className = "lv-range";
+      pctSlider.style.width = "90px";
+      pctSlider.value = String(host.automorphRoomPct || 0);
+      pctSlider.addEventListener("input", () => {
+        view.automorphLivePct = parseInt(pctSlider.value, 10);
+        pctLbl.textContent = `${view.automorphLivePct}%`;
+        rebuildISO();
+      });
+      pctSlider.addEventListener("change", () => host.onAutomorphRoomPct(parseInt(pctSlider.value, 10)));
+      ctrlRow.appendChild(pctSlider);
+      ctrlRow.appendChild(pctLbl);
+    }
+    // Slider 2 — hardness, centered at 0 ("this slider starts in the
+    // center" — Garry, 2026-09-06): negative sharpens the aura's edges
+    // outward into a spikier silhouette, positive smooths them into a
+    // closed spline. Same live-preview-then-persist pattern as room_pct.
+    if (host.automorph && host.onAutomorphHardness) {
+      const hardLbl = el("span", { class: "lv-val", style: "min-width:34px" }, String(host.automorphHardness || 0));
+      const hardSlider = document.createElement("input");
+      hardSlider.type = "range"; hardSlider.min = "-100"; hardSlider.max = "100";
+      hardSlider.className = "lv-range";
+      hardSlider.style.width = "90px";
+      hardSlider.title = "Edge hardness — left sharpens, right softens, centre is unchanged";
+      hardSlider.value = String(host.automorphHardness || 0);
+      hardSlider.addEventListener("input", () => {
+        view.automorphLiveHardness = parseInt(hardSlider.value, 10);
+        hardLbl.textContent = String(view.automorphLiveHardness);
+        rebuildISO();
+      });
+      hardSlider.addEventListener("change", () => host.onAutomorphHardness(parseInt(hardSlider.value, 10)));
+      ctrlRow.appendChild(hardSlider);
+      ctrlRow.appendChild(hardLbl);
+    }
+    // Style — which of several distinct visual treatments paints the same
+    // morphed ring (Garry, 2026-09-07: "add a style pulldown to build more
+    // morph concepts into the build, I can always remove them later").
+    if (host.automorph && host.onAutomorphStyle) {
+      const styleSel = document.createElement("select");
+      styleSel.className = "lv-select";
+      styleSel.title = "Automorph's visual treatment";
+      for (const [kind, label] of AUTOMORPH_STYLES) {
+        const o = el("option", { value: kind }, label);
+        if (kind === (host.automorphStyle || "glow")) o.selected = true;
+        styleSel.appendChild(o);
+      }
+      styleSel.addEventListener("change", () => host.onAutomorphStyle(styleSel.value));
+      ctrlRow.appendChild(styleSel);
+    }
+    // Subtlety, 0-100 (Garry, 2026-09-07: "a slider for subtlety, so you
+    // can dial from objects looking full, to almost completely lost in
+    // background... with shades, thinner lines"). Same live-preview-then-
+    // persist pattern as the other two sliders.
+    if (host.automorph && host.onAutomorphSubtlety) {
+      const subLbl = el("span", { class: "lv-val", style: "min-width:34px" }, `${host.automorphSubtlety || 0}%`);
+      const subSlider = document.createElement("input");
+      subSlider.type = "range"; subSlider.min = "0"; subSlider.max = "100";
+      subSlider.className = "lv-range";
+      subSlider.style.width = "90px";
+      subSlider.title = "Subtlety — how much the aura fades toward the background";
+      subSlider.value = String(host.automorphSubtlety || 0);
+      subSlider.addEventListener("input", () => {
+        view.automorphLiveSubtlety = parseInt(subSlider.value, 10);
+        subLbl.textContent = `${view.automorphLiveSubtlety}%`;
+        rebuildISO();
+      });
+      subSlider.addEventListener("change", () => host.onAutomorphSubtlety(parseInt(subSlider.value, 10)));
+      ctrlRow.appendChild(subSlider);
+      ctrlRow.appendChild(subLbl);
+    }
+  }
+  if (host.onShowcase || host.onHideUntouched || host.onAutomorph) ctrlRow.appendChild(SEP());
 
   // Reset needs to put the focus control back too — see resetFocusCtl below.
   let resetFocusCtl = () => {};
@@ -1652,6 +1895,9 @@ export function buildLightsMapCard(hostIn){
 //   callWS(msg) → Promise             for the Assign-room dropdown
 //   toast(msg, isError)
 //   onRowClick(l)                     sidebar: toggle — tab: select
+//   onSelectForPlacement(l)           optional; the code column's own click —
+//                                     always arms for map placement, bypassing
+//                                     onRowClick's per-type rules (tab only)
 //   onRowLongPress(l)                 optional; sidebar: effects popup (500ms hold)
 //   onToggleHidden(eid)               persist + re-render
 //   afterAssign()                     invalidate registry cache + re-render
@@ -1677,11 +1923,24 @@ export function buildLightsTable(host, lights){
   // picking a class here never has the side effect of changing what the
   // map shows, which nothing asked for.
   const tableFilter = host.tableClassFilter || "all";
-  const filtered = tableFilter === "all" ? lights : lights.filter(l => lightClassOf(l) === tableFilter);
+  const healthFilter = !!host.tableHealthFilter;
+  const byClass = tableFilter === "all" ? lights : lights.filter(l => lightClassOf(l) === tableFilter);
+  const filtered = healthFilter ? byClass.filter(l => !l.healthy) : byClass;
+  const unhealthyCount = lights.filter(l => !l.healthy).length;
   root.appendChild(el("div", { class: "lv-tbl-head" }, [
     el("span", { class: "lv-tbl-title" }, "Light Index"),
-    el("span", { class: "lv-count" }, tableFilter === "all" ? String(lights.length) : `${filtered.length} / ${lights.length}`),
+    el("span", { class: "lv-count" }, (tableFilter === "all" && !healthFilter) ? String(lights.length) : `${filtered.length} / ${lights.length}`),
     hiddenCount ? el("span", { class: "lv-hint" }, `${hiddenCount} hidden from map`) : null,
+    ...(host.onTableHealthFilter ? [(() => {
+      const btn = el("button", {
+        class: "lv-act" + (healthFilter ? " primary" : ""),
+        title: unhealthyCount
+          ? `${unhealthyCount} device(s) test unhealthy right now`
+          : "Every device is healthy right now",
+        onclick: () => host.onTableHealthFilter(!healthFilter),
+      }, healthFilter ? "Showing unhealthy only ✕" : `Show unhealthy only${unhealthyCount ? ` (${unhealthyCount})` : ""}`);
+      return btn;
+    })()] : []),
     ...(host.onTableClassFilter ? [(() => {
       const present = new Set(lights.map(l => lightClassOf(l)));
       // No auto right-margin: this card can be far wider than the viewport
@@ -1711,10 +1970,13 @@ export function buildLightsTable(host, lights){
     ["code", "Code", (l) => l.code || ""],
     ["name", "Light", (l) => (l.friendly_name || "").toLowerCase()],
     ["room", "Room", (l) => (l.area_name || "").toLowerCase()],
+    ["health", "Health", (l) => (l.healthy ? 1 : 0)],
+    ["brand", "Brand", (l) => (l.brand || "").toLowerCase()],
     // Sorted on exactly what the State column DISPLAYS — a temperature
     // reading numerically (so 105° sorts above 68°, not alphabetically),
     // everything else by its actual on/off.
-    ["state", "State", (l) => l.isTemp ? (Number.isFinite(l.temperature) ? l.temperature : -Infinity) : (l.state === "on" ? 1 : 0)],
+    ["state", "State", (l) => l.isTemp ? (Number.isFinite(l.temperature) ? l.temperature : -Infinity)
+      : l.isLock ? (l.state === "locked" ? 1 : 0) : (l.state === "on" ? 1 : 0)],
   ];
   const th = (key, label, extraStyle) => {
     if (!key || !host.onTableSort) return el("th", { style: extraStyle || "" }, label);
@@ -1736,7 +1998,10 @@ export function buildLightsTable(host, lights){
     th("code", "Code"),
     th("name", "Light"),
     th("room", "Room"),
+    th("health", "Health", "text-align:center"),
+    th("brand", "Brand"),
     th("state", "State"),
+    th(null, "Type", "text-align:center"),
     th(null, "Map", "width:60px;text-align:center"),
   ])));
   const tbody = el("tbody");
@@ -1754,7 +2019,7 @@ export function buildLightsTable(host, lights){
   const selected = host.selectedEids || null;
   const queued = host.placeQueue || null;
   for (const l of lights) {
-    const on = l.state === "on";
+    const on = l.isLock ? l.state === "locked" : l.state === "on";
     const isHidden = hidden.has(l.entity_id);
     // A row filtered out by the layer chips dims like its marker does; a
     // selected row (builder multi-select) is lit so the map and the index
@@ -1768,12 +2033,28 @@ export function buildLightsTable(host, lights){
       // recognisably the same object. W-series purple = WLED-class,
       // P-series blue = an ESPHome-style partition segment, F green = fan,
       // M blue = motion sensor, T orange = temperature.
-      el("td", { style: "white-space:nowrap" }, (() => {
+      // Its own click target, separate from the row's: the row click carries
+      // a per-type action (motion opens its activity history, free tier
+      // toggles), which for motion means there is otherwise NO way to
+      // re-select an already-placed sensor for map placement at all — this
+      // column exists specifically to arm a device for placement and must
+      // not be redirected by those per-type rules.
+      el("td", {
+        // A door/window has no point on the map to select FOR — it is a
+        // section of wall, configured in Rooms (see the Map column below),
+        // so this column's "arm for placement" click is switched off for it
+        // rather than arming a placement that can never mean anything.
+        style: "white-space:nowrap" + (host.onSelectForPlacement && !l.isDoor ? ";cursor:pointer" : ""),
+        title: host.onSelectForPlacement && !l.isDoor ? "Select for map placement" : undefined,
+        onclick: host.onSelectForPlacement && !l.isDoor ? (e) => { e.stopPropagation(); host.onSelectForPlacement(l); } : undefined,
+      }, (() => {
         const swatch = l.isWled ? WLED_BORDER
           : (l.isPartition ? PARTITION_BORDER
           : (l.isFan ? FAN_BORDER
           : (l.isMotion ? MOTION_BORDER
-          : (l.isTemp ? TEMP_BORDER : "#52b788"))));
+          : (l.isTemp ? TEMP_BORDER
+          : (l.isLock ? LOCK_BORDER
+          : (l.isDoor ? DOOR_BORDER : "#52b788"))))));
         const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
         svg.setAttribute("width", "15"); svg.setAttribute("height", "15");
         svg.setAttribute("viewBox", "0 0 15 15");
@@ -1811,35 +2092,36 @@ export function buildLightsTable(host, lights){
             return sel;
           })()
       ),
+      el("td", { style: "text-align:center" }, el("span", {
+        title: l.healthy ? "Healthy" : (l.healthReason || "Unhealthy"),
+        style: `display:inline-block;width:9px;height:9px;border-radius:50%;` +
+               `background:${l.healthy ? "#52b788" : "#f87171"};` +
+               (l.healthy ? "" : "box-shadow:0 0 4px #f87171bb"),
+      })),
+      el("td", { class: "muted", style: "font-size:11px" }, l.brand || "—"),
       el("td", {}, l.isTemp
         ? el("span", { class: "lv-state off" }, Number.isFinite(l.temperature) ? `${l.temperature}°` : "—")
+        : l.isLock
+        ? el("span", { class: `lv-state ${l.state === "jammed" ? "off" : (on ? "on" : "off")}` },
+             l.state === "jammed" ? "JAMMED" : (on ? "LOCKED" : "UNLOCKED"))
         : el("span", { class: `lv-state ${on ? "on" : "off"}` }, on ? "ON" : "OFF")),
-      el("td", { style: "text-align:center;white-space:nowrap" }, [
-        // The visible way to the controls (sidebar): a "⋯" that opens the
-        // card — the same card the hold opens, offered in plain sight.
-        ...(host.onRowMore && !l.isMotion && !l.isTemp ? [el("button", {
-          class: "lv-act", title: "Controls", style: "margin-right:6px",
-          onclick: (e) => { e.stopPropagation(); host.onRowMore(l); },
-        }, "⋯")] : []),
-        // The placement queue (builder): arm this light, then tap the map
-        // where it is. Only offered while it has no position of its own.
-        ...(host.onPlaceRow && !placements[l.entity_id] ? [(() => {
-          const q = !!(queued && queued.has(l.entity_id));
-          return el("button", {
-            class: "lv-act" + (q ? " primary" : ""), style: "margin-right:6px",
-            title: q ? "Queued — tap the map to place it" : "Queue it, then tap the map where it is",
-            onclick: (e) => { e.stopPropagation(); host.onPlaceRow(l.entity_id); },
-          }, q ? "Queued" : "Place");
-        })()] : []),
-        // Pro only (the Mapping tab passes onTypeOverride only at pro; the
-        // sidebar and every lower tier pass none): force the class when
-        // detection got it wrong. Lights only — a fan or sensor IS its
-        // domain, there is nothing to override.
-        ...(host.onTypeOverride && !l.isFan && !l.isMotion && !l.isTemp ? [(() => {
+      // Its own column, next to State (Garry, 2026-09-07: "we still need
+      // another option next to state... a reassign to another device type
+      // pulldown" — it used to be buried in the far-right actions column,
+      // easy to miss among Place/Revert/Hide). Pro only (the Mapping tab
+      // passes onTypeOverride only at pro; the sidebar and every lower tier
+      // pass none): force the class when detection got it wrong. light.*
+      // entities only — checked on the DOMAIN, not l.isFan/isMotion/isTemp:
+      // a genuine fan./binary_sensor. entity's class really is its domain,
+      // nothing to override, but a light.* already overridden to "fan"
+      // (Garry, 2026-09-07: "some light switches are fan switches") now
+      // reads l.isFan===true too — gating on the derived flag would hide
+      // the only way to revert it.
+      el("td", { style: "text-align:center" },
+        (host.onTypeOverride && l.entity_id.startsWith("light.")) ? (() => {
           const sel = document.createElement("select");
           sel.className = "lv-select";
           sel.title = "Override how PadSpan classes this light (Pro)";
-          sel.style.marginRight = "6px";
           const cur = (host.typeOverrides || {})[l.entity_id] || "auto";
           for (const [kind, label] of LIGHT_TYPE_OVERRIDES) {
             const o = el("option", { value: kind }, label);
@@ -1849,7 +2131,48 @@ export function buildLightsTable(host, lights){
           sel.addEventListener("click", e => e.stopPropagation());
           sel.addEventListener("change", (e) => { e.stopPropagation(); sel.disabled = true; host.onTypeOverride(l.entity_id, sel.value); });
           return sel;
-        })()] : []),
+        })() : el("span", { class: "muted" }, "—")
+      ),
+      el("td", { style: "text-align:center;white-space:nowrap" }, [
+        // The visible way to the controls (sidebar): a "⋯" that opens the
+        // card — the same card the hold opens, offered in plain sight.
+        ...(host.onRowMore && !l.isMotion && !l.isTemp ? [el("button", {
+          class: "lv-act", title: "Controls", style: "margin-right:6px",
+          onclick: (e) => { e.stopPropagation(); host.onRowMore(l); },
+        }, "⋯")] : []),
+        // A door/window is never dragged to a point — it is a section of an
+        // existing wall, configured in Rooms (docs/IDEA_DOOR_WINDOW_BARRIERS.md).
+        // This column shows its link status instead of a Place button: the
+        // same information "placed" conveys for everything else, in the
+        // terms that actually apply to a door (Garry, 2026-09-08: the
+        // point-marker "placement" here "is not making any sense").
+        ...(l.isDoor ? [
+          (host.doorLinkedIds && host.doorLinkedIds.has(l.entity_id))
+            ? el("span", { class: "lv-hint", title: "Shows open/closed on the map at the wall section it's linked to" }, "🔗 Linked")
+            : (host.onConfigureDoor ? el("button", {
+                class: "lv-act", style: "margin-right:6px",
+                title: "Pick a wall section in Rooms → RF Barriers and link it to this sensor",
+                onclick: (e) => { e.stopPropagation(); host.onConfigureDoor(l); },
+              }, "Link in Rooms →")
+              : el("span", { class: "lv-hint" }, "Not linked"))
+        ] : (host.onPlaceRow && !placements[l.entity_id] ? [(() => {
+          // The placement queue (builder): arm this light, then tap the map
+          // where it is. Only offered while it has no position of its own.
+          const q = !!(queued && queued.has(l.entity_id));
+          return el("button", {
+            class: "lv-act" + (q ? " primary" : ""), style: "margin-right:6px",
+            title: q ? "Queued — tap the map to place it" : "Queue it, then tap the map where it is",
+            onclick: (e) => { e.stopPropagation(); host.onPlaceRow(l.entity_id); },
+          }, q ? "Queued" : "Place");
+        })()] : [])),
+        // Undoes exactly what "touched" means above: a fixture with no size,
+        // rotation, colour or forced class of its own has nothing to revert,
+        // so the button only appears once there is something to step out of.
+        ...(host.onRevertUntouched && lightIsTouched(l, host.typeOverrides, placements) ? [el("button", {
+          class: "lv-act", style: "margin-right:6px",
+          title: "Clear this fixture's size, rotation, colour and class override — its position is kept",
+          onclick: (e) => { e.stopPropagation(); host.onRevertUntouched(l.entity_id); },
+        }, "Revert")] : []),
         el("button", {
           class: "lv-act",
           style: isHidden ? "opacity:0.5" : "",

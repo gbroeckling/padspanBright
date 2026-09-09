@@ -148,6 +148,9 @@ from .ws_maps import (  # noqa: F401  (re-exported: registration, tests, callers
     ws_maps_update,
     ws_maps_upload,
 )
+from .ws_floorplan_import import (  # noqa: F401  (re-exported: registration, tests, callers)
+    ws_floorplan_import_sh3d,
+)
 from .ws_objects import (  # noqa: F401  (re-exported: registration, tests, callers)
     ws_object_label_delete,
     ws_object_label_list,
@@ -167,6 +170,7 @@ from .ws_capture import (  # noqa: F401  (re-exported: registration, tests, call
     ws_capture_get,
     ws_capture_list,
     ws_capture_mark,
+    ws_capture_replay,
     ws_capture_start,
     ws_capture_status,
     ws_capture_stop,
@@ -282,6 +286,7 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_maps_delete)
     websocket_api.async_register_command(hass, ws_maps_delete_migrate)
     websocket_api.async_register_command(hass, ws_maps_revert_extend)
+    websocket_api.async_register_command(hass, ws_floorplan_import_sh3d)
     websocket_api.async_register_command(hass, ws_model_get)
     websocket_api.async_register_command(hass, ws_model_update)
     websocket_api.async_register_command(hass, ws_object_label_set)
@@ -311,8 +316,11 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_calibration_beacon_profiles)
     websocket_api.async_register_command(hass, ws_calibration_health_check)
     websocket_api.async_register_command(hass, ws_movement_history_get)
+    websocket_api.async_register_command(hass, ws_lost_and_found_get)
+    websocket_api.async_register_command(hass, ws_lost_and_found_forget)
     websocket_api.async_register_command(hass, ws_traceback_get)
     websocket_api.async_register_command(hass, ws_traceback_objects)
+    websocket_api.async_register_command(hass, ws_insights_get)
     websocket_api.async_register_command(hass, ws_notify_services_list)
     websocket_api.async_register_command(hass, ws_notify_test)
     websocket_api.async_register_command(hass, ws_adaptive_status_get)
@@ -397,6 +405,7 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_capture_list)
     websocket_api.async_register_command(hass, ws_capture_get)
     websocket_api.async_register_command(hass, ws_capture_delete)
+    websocket_api.async_register_command(hass, ws_capture_replay)
     _ensure_log_handler()
     _LOGGER.debug("PadSpan Bright websocket commands registered")
 
@@ -633,6 +642,34 @@ async def ws_movement_history_get(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], {"entries": entries})
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Lost and found (gap #10, best-in-class roadmap)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@websocket_api.websocket_command({"type": "padspan_bright/lost_and_found_get"})
+@websocket_api.async_response
+async def ws_lost_and_found_get(hass: HomeAssistant, connection, msg) -> None:
+    """Return every object's last-confirmed room + when — persisted, never
+    reset to Unknown (see lost_and_found_store.py's own header)."""
+    from .const import DATA_LOST_AND_FOUND
+    lf = hass.data.get(DOMAIN, {}).get(DATA_LOST_AND_FOUND)
+    connection.send_result(msg["id"], {"records": lf.get_all() if lf else {}})
+
+
+@websocket_api.websocket_command({
+    "type": "padspan_bright/lost_and_found_forget",
+    "key": str,
+})
+@websocket_api.async_response
+async def ws_lost_and_found_forget(hass: HomeAssistant, connection, msg) -> None:
+    """Explicitly clear one object's lost-and-found record."""
+    from .const import DATA_LOST_AND_FOUND
+    lf = hass.data.get(DOMAIN, {}).get(DATA_LOST_AND_FOUND)
+    if lf:
+        await lf.forget(msg["key"])
+    connection.send_result(msg["id"], {"ok": True})
+
+
 # Traceback playback
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -676,6 +713,41 @@ async def ws_traceback_objects(hass: HomeAssistant, connection, msg) -> None:
         "objects": tb.get_object_keys(),
         "range": tb.get_time_range(),
     })
+
+
+# Room-dwell analytics — Insights tab (gap #4, best-in-class roadmap)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@websocket_api.websocket_command({
+    "type": "padspan_bright/insights_get",
+    vol.Optional("days", default=7): vol.All(int, vol.Range(min=1, max=7)),
+})
+@websocket_api.async_response
+async def ws_insights_get(hass: HomeAssistant, connection, msg) -> None:
+    """Aggregate TracebackStore frames into time-in-room / entries / occupancy.
+
+    Days is capped at 7 — TracebackStore itself only retains 7 days
+    (traceback_store.py's MAX_AGE_S), so asking for more would silently
+    return the same data, not a longer history.
+    """
+    import time as _time
+    from .const import DATA_TRACEBACK
+    from .dwell_analytics import compute_dwell_stats
+    tb = hass.data.get(DOMAIN, {}).get(DATA_TRACEBACK)
+    if not tb:
+        connection.send_result(msg["id"], {"objects": {}, "days": [], "dwell": {}, "entries": {}, "occupancy": {}})
+        return
+    days = msg.get("days", 7)
+    end_ts = _time.time()
+    start_ts = end_ts - days * 86400
+    # No obj_key filter — every tracked object's dwell matters here, and
+    # 60480 comfortably covers the full 7-day retention window at ~10s/frame
+    # without triggering get_frames()'s downsampling (which would corrupt
+    # per-day time-in-room by dropping frames unevenly).
+    frames = tb.get_frames(start_ts=start_ts, end_ts=end_ts, max_frames=60480)
+    tz_name = getattr(hass.config, "time_zone", None) or "UTC"
+    stats = compute_dwell_stats(frames, tz_name=tz_name)
+    connection.send_result(msg["id"], stats)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

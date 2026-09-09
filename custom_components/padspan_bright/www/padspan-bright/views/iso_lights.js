@@ -18,7 +18,7 @@
 // refused to place a light. Everything the view needs is in the fabric, in
 // metres, and now that is the only thing it reads.
 
-const { WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, MOTION_PULSE, TEMP_BORDER } =
+const { WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, MOTION_PULSE, TEMP_BORDER, LOCK_BORDER, DOOR_BORDER } =
   await import(`./light_codes.js${new URL(import.meta.url).search}`);
 
 function escSVG(s){ return String(s??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
@@ -169,6 +169,746 @@ export function defaultPerimeterMarginM(frame){
   return Math.max(0.05, Math.min(DEFAULT_TRACE_MAX_M, DEFAULT_TRACE_PX / s));
 }
 
+// ── Automorph geometry: room-alignment shape morphing (Garry, 2026-09-07) ───
+// "A switch and two sliders... morph all shapes to fit room dimensions...
+// turn the cluttered overall look... into a work of art." Slider 1 (built
+// here) grows every fixture's icon outline toward its own room's shape.
+//
+// Full point-correspondence morphing between two arbitrary polygons is a
+// classical hard problem — see flubber (JS, MIT: "smoothly interpolate
+// between any two arbitrary SVG paths") for real prior art; it cannot be
+// installed here (no build step, no npm, and per this project's policy any
+// third-party code needs asking first). The hand-built scheme: resample
+// both outlines to the SAME point count at even arc-length spacing,
+// normalize both to the same winding direction (alignRingStart), then let
+// a cyclic-shift search (bestRotationalMatch below) pick which of the
+// target's start indices lines up against the icon at minimum total
+// squared point-to-point distance, and lerp corresponding points
+// straight-line. An earlier version skipped the search and trusted each
+// ring's own topmost point as a shared start reference, justified by both
+// endpoints being near-convex; that justification died when the morph
+// target became a per-fixture CELL from buildRoomFixtureCells — carved by
+// distance-field competition against neighbours, routinely concave (a
+// bite taken out by one or two neighbours) or lopsided — where "nearest my
+// own bounding-box top" on a symmetric icon and on an irregular cell land
+// at unrelated relative positions around the outline, and a straight
+// index lerp between mismatched indices visibly crosses/twists at
+// mid-slider, exactly where the morph should read cleanest.
+//
+// AUTOMORPH_N is a FLOOR on the correspondence count, not the count
+// itself: automorphRing raises it toward the target ring's own
+// pre-resample density (capped at 64) so the Chaikin-densified cell rings
+// keep their concave detail — a notch sampled by only 24 points just gets
+// rounded away, silently blunting the very non-overlap partition the cell
+// system exists to make visible. A plain 4-8 vertex room polygon still
+// resamples to exactly 24, unchanged from before.
+const AUTOMORPH_N = 24;
+
+function _polySignedArea(pts){
+  let a=0;
+  for(let i=0,j=pts.length-1;i<pts.length;j=i++) a += (pts[j][0]*pts[i][1] - pts[i][0]*pts[j][1]);
+  return a/2;
+}
+
+// `count` evenly ARC-LENGTH-spaced points around a closed polygon, in the
+// ring's own point order — the step both morph endpoints need before they
+// can be lerped index-for-index (a hex's 6 vertices and a room's dozen
+// can't otherwise line up).
+export function resamplePolygonRing(pts, count){
+  if(!pts || pts.length<2 || count<3) return pts||[];
+  const segLens=[];
+  let total=0;
+  for(let i=0;i<pts.length;i++){
+    const a=pts[i], b=pts[(i+1)%pts.length];
+    const d=Math.hypot(b[0]-a[0], b[1]-a[1]);
+    segLens.push(d); total+=d;
+  }
+  if(total<=0) return pts.slice(0,count);
+  const out=[];
+  for(let k=0;k<count;k++){
+    let target=(total*k)/count;
+    let i=0;
+    while(i<segLens.length-1 && target>segLens[i]){ target-=segLens[i]; i++; }
+    const a=pts[i], b=pts[(i+1)%pts.length];
+    const segLen=segLens[i]||1e-9;
+    const t=target/segLen;
+    out.push([a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t]);
+  }
+  return out;
+}
+
+// Winds a ring to a consistent handedness and rotates its start to the
+// point nearest the top of its own bounding box. Two rings built by
+// completely different code (a hand-written icon outline, the room trace's
+// own vertex order) need a SHARED, deterministic starting reference before
+// lerping them index-for-index, or the interpolation twists through itself
+// whenever the two happened to start at unrelated angles around their
+// respective centroids.
+export function alignRingStart(pts){
+  if(!pts || pts.length<3) return pts||[];
+  let ring=pts;
+  if(_polySignedArea(ring) < 0) ring=[...ring].reverse();
+  const cx=ring.reduce((a,p)=>a+p[0],0)/ring.length;
+  const cy=ring.reduce((a,p)=>a+p[1],0)/ring.length;
+  let bestI=0, bestD=Infinity;
+  for(let i=0;i<ring.length;i++){
+    const ang=Math.atan2(ring[i][1]-cy, ring[i][0]-cx);
+    const d=Math.abs(ang-(-Math.PI/2));
+    if(d<bestD){ bestD=d; bestI=i; }
+  }
+  return ring.slice(bestI).concat(ring.slice(0,bestI));
+}
+
+// A small icon's own outline, LOCAL space centred on (0,0), at the same
+// radius shapeSvg's own glyphs use — v1 covers only the simple, roughly
+// convex families the design doc scopes for a first pass (circle, bar,
+// square); every other kind (fan, pendant, lock, hex itself, ...) falls
+// back to the plain hexagon every unstyled fixture already draws as, so an
+// unrecognised shape still morphs into something rather than nothing.
+export function iconRingLocal(shape, r){
+  const HW=r*0.866;
+  if(shape==="circle"){
+    const pts=[];
+    for(let i=0;i<AUTOMORPH_N;i++){ const a=i/AUTOMORPH_N*2*Math.PI; pts.push([Math.cos(a)*HW, Math.sin(a)*HW]); }
+    return pts;
+  }
+  if(shape==="bar" || shape==="square"){
+    const h=shape==="bar" ? r*0.55 : HW;
+    return [[-HW,-h],[HW,-h],[HW,h],[-HW,h]];
+  }
+  const pts=[];
+  for(let k=0;k<6;k++){ const a=(90+k*60)*Math.PI/180; pts.push([r*Math.cos(a), r*Math.sin(a)]); }
+  return pts;
+}
+
+// The morph's STARTING point should be the fixture's REAL manually-set
+// footprint, not the generic default-radius glyph iconRingLocal alone draws
+// (Garry, 2026-09-07: "the existing manual shapes are still meant to be a
+// guide for the overall look, don't throw that info away"). Reuses
+// markerScale verbatim — the SAME function the real (non-automorph) glyph's
+// own `translate(hx,hy) rotate(rot) scale(sx,sy)` transform already scales
+// and rotates with — so a 240cm strip at 30° starts the morph as its own
+// real long, angled shape instead of snapping to a small hex the instant
+// Automorph turns on, and the two stay visually consistent with each other.
+// With no manual size recorded, markerScale returns identity {sx:1,sy:1},
+// so this is a byte-for-byte no-op for every fixture that has none —
+// exactly today's iconRingLocal(shape, hexR) output, unchanged.
+export function automorphIconRing(shape, wCm, hCm, rotDeg, scale, hexR){
+  const local=iconRingLocal(shape, hexR);
+  const {sx,sy}=markerScale(wCm, hCm, scale, hexR);
+  const rot=(Number(rotDeg)||0)*Math.PI/180;
+  const cos=Math.cos(rot), sin=Math.sin(rot);
+  return local.map(([x,y])=>{
+    const sxp=x*sx, syp=y*sy;
+    return [sxp*cos-syp*sin, sxp*sin+syp*cos];
+  });
+}
+
+// Cyclic-shift correspondence search: returns `b` rotated so its points
+// pair with `a`'s index-for-index at minimum total squared distance.
+// alignRingStart already normalized both rings' winding and gave each a
+// deterministic start, but its "topmost point" is a per-ring guess — on a
+// symmetric icon and an irregular concave cell those two tops have no
+// reason to sit at the same relative position around the outline, and a
+// lerp between mismatched indices twists through itself (see the design
+// comment above AUTOMORPH_N). O(N^2) — ~4096 ops at the N=64 cap, once
+// per fixture per render, trivial even at ~100 fixtures. Ties break
+// toward the smallest shift (strict <), so the result is fully
+// deterministic — a render must be reproducible from the fabric alone.
+export function bestRotationalMatch(a, b){
+  if(!a || !a.length || !b || !b.length) return b||[];
+  let bestShift=0, bestCost=Infinity;
+  for(let s=0;s<b.length;s++){
+    let c=0;
+    for(let i=0;i<a.length;i++){
+      const bp=b[(i+s)%b.length];
+      const dx=a[i][0]-bp[0], dy=a[i][1]-bp[1];
+      c+=dx*dx+dy*dy;
+    }
+    if(c<bestCost){ bestCost=c; bestShift=s; }
+  }
+  if(!bestShift) return b;
+  return b.map((_,i)=>b[(i+bestShift)%b.length]);
+}
+
+// The morph itself. `iconLocal` is centred on (0,0) (iconRingLocal's own
+// output); `iconCx,iconCy` places it at the fixture's real drawn position.
+// `roomRingAbs` is the room's own outline in the SAME space (whatever space
+// the caller already projected both into — this function is unit-agnostic,
+// pure point arithmetic). t=0 returns the icon's own outline completely
+// untouched (no resampling, no alignment) — the "off = current behaviour
+// exactly" guarantee the switch and the slider's own rest position both
+// depend on.
+export function automorphRing(iconLocal, iconCx, iconCy, roomRingAbs, t){
+  const iconAbs=iconLocal.map(p=>[p[0]+iconCx, p[1]+iconCy]);
+  const clampT=Math.max(0, Math.min(1, t||0));
+  if(clampT<=0 || !roomRingAbs || roomRingAbs.length<3) return iconAbs;
+  // Adaptive count — AUTOMORPH_N is the floor (see its own comment): a
+  // sparse hand-traced polygon still gets exactly 24, a Chaikin-densified
+  // cell ring gets its own density up to 64 so concave detail survives.
+  const N=Math.max(AUTOMORPH_N, Math.min(64, roomRingAbs.length));
+  const a=alignRingStart(resamplePolygonRing(iconAbs, N));
+  const b=bestRotationalMatch(a, alignRingStart(resamplePolygonRing(roomRingAbs, N)));
+  return a.map((p,i)=>[p[0]+(b[i][0]-p[0])*clampT, p[1]+(b[i][1]-p[1])*clampT]);
+}
+
+// Hand-inked finish: a small deterministic per-vertex radial jitter on the
+// FINAL morphed ring — the same never-Math.random() discipline the cell
+// wobble established one level down (buildRoomFixtureCells seeds a sine
+// from the fixture's own position, because the fabric alone must reproduce
+// a render), extended upward: the partition BOUNDARY already reads organic
+// thanks to that wobble, but the perfectly clean ring sitting on top of it
+// read slightly too plastic/CAD-perfect next to its own bisector. Each
+// point slides along its own ray from the fixture (seedX,seedY — the
+// aura's true anchor) by a sine of its own position, low spatial frequency
+// so neighbouring points move together as a gentle waviness rather than
+// per-point noise.
+//
+// Amplitude discipline — why this can never fight the passes around it:
+//  - scales with t, so at the morph slider's low end the offsets vanish
+//    smoothly and the icon-outline identity contract is untouched;
+//  - fades linearly to ZERO on the negative-hardness side (gone entirely
+//    at -100): jitter on a "hard, geometrically aligned" shape reads as
+//    dirt, not craft;
+//  - capped at ~1px — far below the Chaikin/spike scale, so it decorates
+//    the deliberately smooth curve instead of competing with it, and far
+//    inside the marginM non-overlap gap, so it can never spend what the
+//    inset created between neighbouring cells.
+// Zero amplitude returns the SAME array untouched — the exact-passthrough
+// convention applyHardness's non-negative side already sets.
+// The caller skips this entirely for the nebula style (the mask already
+// fades that edge to nothing — the jitter would be invisible effort).
+export function automorphRingJitter(ring, seedX, seedY, t, hardness){
+  if(!ring || ring.length<3) return ring||[];
+  const h=Math.max(-100, Math.min(100, hardness||0));
+  const clampT=Math.max(0, Math.min(1, t||0));
+  const amp=1.1*clampT*(h<0 ? 1+h/100 : 1);
+  if(!(amp>0)) return ring;
+  const seed=seedX*37.1+seedY*91.7;
+  return ring.map(p=>{
+    const dx=p[0]-seedX, dy=p[1]-seedY;
+    const len=Math.hypot(dx, dy);
+    if(!(len>0)) return p;
+    const wob=Math.sin(seed + p[0]*0.16 + p[1]*0.12)*amp;
+    return [p[0]+dx/len*wob, p[1]+dy/len*wob];
+  });
+}
+
+// Slider 2 (edge hardness): centered at 0 — Garry's own spec, "this slider
+// starts in the center" and 0 is today's unchanged straight-edged treatment
+// either direction. Positive is handled separately, at path-build time
+// (ringPathD below), since softening needs the RAW points; every
+// non-negative input is therefore an EXACT passthrough here (the same array,
+// untouched — the rest-position contract the tests pin).
+//
+// The negative ("hard, geometrically aligned") side is the vector-tool
+// Pucker-and-Bloat operator, keyed to LOCAL structure: each point is pushed
+// away from the midpoint of its own two neighbours, so a point sitting on a
+// straight run (zero deviation from its neighbours' chord) does not move at
+// all, while a point that already IS a corner has that corner exaggerated
+// into a real spike. The first version was a uniform scale about the ring's
+// vertex-average centroid, and it failed twice over once the ring became a
+// fixture's own non-overlap CELL: a rounded cell scaled up is exactly as
+// rounded, just bigger — no angularity added, contradicting the slider's
+// "sharp, precise geometric angles" spec — and on a lopsided cell (fixture
+// near a wall, cell reaching much farther one way than the other) the
+// vertex average sits well away from the fixture itself, so "sharpen" read
+// as the whole aura ballooning off to one side of the light. The local
+// operator has no global centre at all, so there is nothing left to drift
+// off-anchor.
+//
+// The push is `gain * local deviation` with gain up to 2 at -100 — rings
+// arriving here are densely resampled (24-64 points at even arc spacing),
+// so per-point deviations are small and the old fractional factor would be
+// invisible; tripling the deviation reads as a real spike at corners while
+// leaving straight runs mathematically untouched. Two clamps then bound it,
+// because unbounded outward growth breaks real constraints:
+//  - `maxOutPx` (3rd arg, same units as the ring's own coordinates — the
+//    aura call site passes screen px): a HARD cap on each point's total
+//    displacement. The ring was just inset by marginM to create the
+//    deliberate gap between neighbouring cells and to the room's own
+//    walls; a push proportional to the ring's own size blows through that
+//    small fixed gap on any normal-sized cell, silently defeating the
+//    non-overlap partition with a control that was never meant to touch
+//    spacing. The call site derives the cap from the SAME margin it inset
+//    by, so very hard settings on tight cells plateau (intentional) but
+//    can never eat the gap or cross a wall. Omitted/null = uncapped, for
+//    unit-space callers.
+//  - 75% of the shorter adjacent edge: at -100 an already-sharp corner's
+//    amplified deviation could overshoot its own neighbours and locally
+//    self-intersect; a spike kept shorter than its own edges cannot fold
+//    over them.
+export function applyHardness(ring, hardness, maxOutPx){
+  const h=Math.max(-100, Math.min(100, hardness||0));
+  if(h>=0 || ring.length<3) return ring;
+  const n=ring.length;
+  const gain=(-h/100)*2; // push = gain * local deviation, before the clamps
+  const cap=(maxOutPx===undefined||maxOutPx===null)?Infinity:Math.max(0, maxOutPx);
+  return ring.map((p,i)=>{
+    const a=ring[(i-1+n)%n], b=ring[(i+1)%n];
+    const mx=(a[0]+b[0])/2, my=(a[1]+b[1])/2;
+    const dx=p[0]-mx, dy=p[1]-my;
+    const dev=Math.hypot(dx, dy);
+    if(!(dev>0)) return p; // exactly on the chord — no direction to spike in
+    const edge=Math.min(Math.hypot(p[0]-a[0], p[1]-a[1]), Math.hypot(b[0]-p[0], b[1]-p[1]));
+    const push=Math.min(dev*gain, edge*0.75, cap);
+    return [p[0]+dx/dev*push, p[1]+dy/dev*push];
+  });
+}
+
+// Builds the SVG path `d` for a closed ring, honouring hardness's SOFT side
+// (hardness>0) — the hard side is already baked into `ring` by
+// applyHardness above, so a straight polygon through those points is all
+// this needs at hardness<=0. Soft is a closed Catmull-Rom spline through
+// every point (every point still on the curve, unlike a Bezier fit that
+// would drift off them) converted to cubic Beziers — the standard
+// construction, each segment's two control points derived from its
+// neighbours with a fixed 1/6 tension factor — scaled continuously by
+// hardness/100 so the dial softens gradually rather than snapping at some
+// threshold. hardness<=0 returns byte-identical output to before this
+// slider existed (plain M/L/Z), which is the "centered = unchanged"
+// contract the switch and both sliders all share.
+export function ringPathD(ring, hardness){
+  if(ring.length<3) return "";
+  const h=Math.max(0, Math.min(100, hardness||0));
+  if(h<=0) return ring.map((p,i)=>`${i?"L":"M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ")+"Z";
+  const n=ring.length;
+  const at=(i)=>ring[(i%n+n)%n];
+  let d=`M${ring[0][0].toFixed(1)},${ring[0][1].toFixed(1)}`;
+  for(let i=0;i<n;i++){
+    const p0=at(i-1), p1=at(i), p2=at(i+1), p3=at(i+2);
+    const c1=[p1[0]+(p2[0]-p0[0])/6*h/100, p1[1]+(p2[1]-p0[1])/6*h/100];
+    const c2=[p2[0]-(p3[0]-p1[0])/6*h/100, p2[1]-(p3[1]-p1[1])/6*h/100];
+    d+=` C${c1[0].toFixed(1)},${c1[1].toFixed(1)} ${c2[0].toFixed(1)},${c2[1].toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+  }
+  return d+"Z";
+}
+
+// ── Automorph colour ────────────────────────────────────────────────────────
+// The aura's two state greys (Garry, 2026-09-07: "follow the grey shaded
+// type visual you used before" — "on" is a brighter grey, never a different
+// hue). Module consts because the SAME two values must agree in two places:
+// automorphAuraSvg's flat ink, and the shared duotone gradient defs whose
+// rim stop each fill interior fades to.
+const AUTOMORPH_BASE_ON="#94a3b8", AUTOMORPH_BASE_OFF="#475569";
+
+// Lightness offset for a #rrggbb colour: pct>0 moves every channel toward
+// white, pct<0 toward black, and pct=0 returns the INPUT STRING untouched.
+// That exact identity at 0 is load-bearing, not an optimisation: the
+// per-fixture weight offset derived from automorphFixtureWeight is exactly
+// 0 for every default-weight fixture (no recorded manual size — the common
+// case), and those must keep today's byte-identical ink so two ordinary
+// neighbours stay essentially indistinguishable apart from edge and gap.
+// The offset is a bonus presence cue, never the primary separator.
+export function lighten(hex, pct){
+  if(!pct) return hex;
+  const f=Math.max(-100, Math.min(100, pct))/100;
+  const v=parseInt(hex.slice(1), 16);
+  const ch=(x)=>Math.round(f>0 ? x+(255-x)*f : x*(1+f));
+  return "#"+((1<<24)|(ch(v>>16&255)<<16)|(ch(v>>8&255)<<8)|ch(v&255)).toString(16).slice(1);
+}
+
+// ── Automorph non-overlap partitioning (Garry, 2026-09-07): "you have not
+// built in a complex and attractive non overlap of devices visually into the
+// morph... give a thorough rethink to complete the logic of this feature".
+// Before this, every fixture in a room morphed toward the SAME target — the
+// room's own full inset shape — so two lights sharing a room piled their
+// auras on top of each other instead of dividing the space. Each fixture now
+// gets its OWN cell within the room: the set of points closest to it among
+// every fixture sharing that room, found with a masked approximate-geodesic
+// flood (8-connected Dijkstra that only steps through room-interior cells) —
+// masking is what makes this correct on a concave (L-shaped) room, where a
+// straight-line Voronoi split would cut clean through a wall into the other
+// arm. A real Voronoi diagram (Fortune's algorithm) plus polygon clipping was
+// the other option researched for this; rejected because it is concavity-
+// blind (needs a separate, fragile clip pass to fix that up after the fact)
+// and because per-fixture SIZE weighting — the next paragraph — folds into a
+// distance-grid field for free but has no clean equivalent in exact-geometry
+// Voronoi without moving to power diagrams.
+//
+// Each fixture also carries a WEIGHT and a REACH CAP derived from its own
+// manual footprint (automorphFixtureWeight — 1 when no width_cm/height_cm is
+// recorded). The cap alone, not a hand-written N===1 branch, is what gives
+// "common sense" sizing when a fixture happens to be the ONLY one in its
+// room (Garry: "if the existing manual shape is something very small in the
+// corner, don't make the morph take up the majority of the room" — with no
+// other fixture to compete against, min-over-others is +Infinity and the cap
+// is the only thing left deciding membership, so a lone tiny fixture still
+// gets a small cell). Cells are also given a small deterministic wobble
+// (seeded from the fixture's own position — never Math.random(): the fabric
+// alone must reproduce a render) so a bisector between two ordinary fixtures
+// reads as a soft organic curve rather than a ruler-straight cut.
+const AUTOMORPH_BASELINE_DIAG_M = 0.5;
+export function automorphFixtureWeight(wCm, hCm){
+  const wM=(Number(wCm)||0)/100, hM=(Number(hCm)||0)/100;
+  if(!(wM>0) && !(hM>0)) return 1;
+  const diag=Math.hypot(wM, hM);
+  return Math.max(0.25, Math.min(2.5, diag/AUTOMORPH_BASELINE_DIAG_M));
+}
+
+// Small binary min-heap: Dijkstra needs a priority queue and nothing in this
+// file already provides one (no build step here to reach for a package).
+function _heapPush(heap, item){
+  heap.push(item);
+  let i=heap.length-1;
+  while(i>0){
+    const p=(i-1)>>1;
+    if(heap[p][0]<=heap[i][0]) break;
+    [heap[p],heap[i]]=[heap[i],heap[p]]; i=p;
+  }
+}
+function _heapPop(heap){
+  const top=heap[0], last=heap.pop();
+  if(heap.length){
+    heap[0]=last;
+    let i=0;
+    for(;;){
+      const l=i*2+1, r=i*2+2; let s=i;
+      if(l<heap.length && heap[l][0]<heap[s][0]) s=l;
+      if(r<heap.length && heap[r][0]<heap[s][0]) s=r;
+      if(s===i) break;
+      [heap[s],heap[i]]=[heap[i],heap[s]]; i=s;
+    }
+  }
+  return top;
+}
+
+// Single-source approximate geodesic distance over a masked grid — the
+// "masked" half of "masked flood": a cell outside the room mask is never
+// expanded THROUGH, so a source in one arm of an L-shaped room cannot
+// shortcut across the missing corner into the other arm. 8-connected with a
+// √2 diagonal cost so the field is isotropic rather than city-block.
+function _floodFrom(sx, sy, nx, ny, step, mask){
+  const dist=new Float64Array(nx*ny).fill(Infinity);
+  const si=Math.round(sx), sj=Math.round(sy);
+  if(si<0||si>=nx||sj<0||sj>=ny||!mask[sj*nx+si]) return dist;
+  dist[sj*nx+si]=0;
+  const heap=[[0, si, sj]];
+  const NB=[[1,0,1],[-1,0,1],[0,1,1],[0,-1,1],[1,1,Math.SQRT2],[1,-1,Math.SQRT2],[-1,1,Math.SQRT2],[-1,-1,Math.SQRT2]];
+  while(heap.length){
+    const [d,i,j]=_heapPop(heap);
+    if(d>dist[j*nx+i]) continue;
+    for(const [di,dj,cost] of NB){
+      const ni=i+di, nj=j+dj;
+      if(ni<0||ni>=nx||nj<0||nj>=ny||!mask[nj*nx+ni]) continue;
+      const nd=d+cost*step;
+      if(nd<dist[nj*nx+ni]){ dist[nj*nx+ni]=nd; _heapPush(heap,[nd,ni,nj]); }
+    }
+  }
+  return dist;
+}
+
+// Chains marching-squares' disconnected [x1,y1,x2,y2] segments into a closed
+// ring by matching shared endpoints. Isolux (see buildIsoSVG's own ISOLUX
+// block) never needed this — a stroked contour draws fine as disjoint
+// segments — but a FILLED cell polygon does. Endpoints are rounded before
+// keying so the same crossing point, computed independently from each of its
+// two adjacent cells, still matches despite float drift. Returns every ring
+// found, largest-area first: a cell only rarely splits into more than one
+// piece (a fixture pinched off from part of its own region by neighbours on
+// both sides in a narrow room), and the fixture itself always sits inside
+// the largest one.
+export function stitchSegmentsToRing(segments){
+  if(!segments || !segments.length) return [];
+  const key=(x,y)=>`${Math.round(x*64)},${Math.round(y*64)}`;
+  const adj=new Map();
+  const pointOf=new Map();
+  for(const [x1,y1,x2,y2] of segments){
+    const ka=key(x1,y1), kb=key(x2,y2);
+    if(ka===kb) continue;
+    if(!adj.has(ka)) adj.set(ka, []);
+    if(!adj.has(kb)) adj.set(kb, []);
+    adj.get(ka).push(kb); adj.get(kb).push(ka);
+    pointOf.set(ka,[x1,y1]); pointOf.set(kb,[x2,y2]);
+  }
+  const visited=new Set();
+  const rings=[];
+  for(const start of adj.keys()){
+    if(visited.has(start)) continue;
+    const ring=[]; let prev=null, cur=start;
+    while(cur && !visited.has(cur)){
+      visited.add(cur); ring.push(pointOf.get(cur));
+      const nbrs=adj.get(cur)||[];
+      const next=nbrs.find(k=>k!==prev && !visited.has(k));
+      prev=cur; cur=next||null;
+    }
+    if(ring.length>=3) rings.push(ring);
+  }
+  rings.sort((a,b)=>Math.abs(_polySignedArea(b))-Math.abs(_polySignedArea(a)));
+  return rings;
+}
+
+// Chaikin corner-cutting: each pass replaces every edge (a,b) with its 25%
+// and 75% points, so every corner is cut by a chord and every OUTPUT point
+// lies ON an edge of that pass's INPUT ring — the property that makes this
+// safe next to the non-overlap partition: sliding points along their own
+// edges can never change a ring's topology or push it broadly into a
+// neighbour's cell the way a blur/inflate could.
+//
+// WHY it exists: the marching-squares cell rings (buildRoomFixtureCells) are
+// quantized to a coarse grid (step = dimM/48) over an only-approximately-
+// isotropic 8-connected Dijkstra field, and at the hardness slider's rest
+// position (0) ringPathD draws its points as a raw M/L/Z polygon — so the
+// grid's stairstep noise renders directly as small zig-zags along what
+// should read as a soft, deliberate bisector. That noise is a NEW artifact
+// the cell partition introduced; "hardness 0 = today's clean straight
+// treatment" never meant "show the sampling grid". The room-trace fallback
+// has the same class of artifact from the other side (hand-trace
+// digitization noise, offsetPolygonInward's occasional flat MITER bevels).
+// This pass is pure grid/trace-noise cleanup, always on regardless of
+// AUTOMORPH_HARDNESS — mechanically separate from ringPathD's Catmull-Rom,
+// which stays the aesthetic hard/soft dial.
+//
+// WHERE it is applied — exactly ONCE, at automorphAuraSvg's targetPts
+// choice, so the cell path and the room.pts fallback share one corner
+// language and nothing is ever smoothed twice; never on the already-
+// resampled AUTOMORPH_N ring and never on the icon endpoint, which would
+// break the "t=0 = icon outline byte-identical" contract. Iterations are
+// CLAMPED at 2 here rather than trusted to callers: beyond that, corner
+// cutting starts eating the real concave corners of an L-shaped trace
+// instead of the grid noise it exists to remove.
+//
+// Scope guardrail (this is the "metaball-style" borrow, so be precise about
+// which half): only the SMOOTHING half of metaball rendering — post-process
+// one fixture's marching-squares boundary into a soft curve — is taken.
+// The MERGING half (blending two blobs' fields so their silhouettes fuse)
+// is the exact opposite of the partition's purpose: never blend two
+// fixtures' weighted() fields before marching squares.
+export function chaikinSmooth(ring, iterations){
+  const passes=Math.max(0, Math.min(2, Math.floor(iterations!==undefined?iterations:1)));
+  let pts=ring||[];
+  for(let it=0; it<passes; it++){
+    if(pts.length<3) break;
+    const out=[];
+    const n=pts.length;
+    for(let i=0;i<n;i++){
+      const a=pts[i], b=pts[(i+1)%n];
+      out.push([a[0]+(b[0]-a[0])*0.25, a[1]+(b[1]-a[1])*0.25]);
+      out.push([a[0]+(b[0]-a[0])*0.75, a[1]+(b[1]-a[1])*0.75]);
+    }
+    pts=out;
+  }
+  return pts;
+}
+
+// Chaikin's cut scales with INPUT EDGE LENGTH — the same two passes that
+// give a ~0.1m-edged marching-squares cell ring the cm-scale noise cleanup
+// they exist for gave the sparse 4-8-vertex room.pts fallback METRE-scale
+// corner rounding instead (measured: a 6x4m room's smoothed fallback passed
+// 0.83m inside its own corner — reshaping the room, on input that had no
+// grid noise to remove). Splitting long edges first, with every ORIGINAL
+// vertex kept exact, hands Chaikin the same edge scale for both target
+// kinds, so the fallback gets the cells' corner language instead of an
+// orders-of-magnitude heavier one. Pure subdivision — points only ever
+// added ON existing edges, the traced shape itself untouched.
+export function densifyRing(pts, maxEdgeM){
+  if(!pts || pts.length<3 || !(maxEdgeM>0)) return pts||[];
+  const out=[];
+  const n=pts.length;
+  for(let i=0;i<n;i++){
+    const a=pts[i], b=pts[(i+1)%n];
+    out.push(a);
+    const cuts=Math.ceil(Math.hypot(b[0]-a[0], b[1]-a[1])/maxEdgeM);
+    for(let k=1;k<cuts;k++){
+      const t=k/cuts;
+      out.push([a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t]);
+    }
+  }
+  return out;
+}
+
+// Removes the inverted fold loops an inward offset leaves wherever the
+// margin exceeds the local radius of curvature. That folding is intrinsic
+// to per-vertex offsetting, not a bug in offsetPolygonInward: the TRUE
+// eroded region simply has no boundary there any more, and the standard
+// cure is exactly this — cut the ring at each self-intersection and keep
+// the dominant loop, dropping the small inverted one (measured on real
+// Chaikin-smoothed cell rings: 4-8 bowtie loops per cell at the aura's own
+// 1.6x margin, with bounding boxes up to 63x28px — plainly visible
+// self-crossing strokes at the hardness slider's REST position). Each
+// found crossing splits the ring into two candidate loops; the shorter
+// vertex run is the fold, so it is replaced by the intersection point
+// itself and the scan restarts. Deterministic (fixed scan order, no
+// randomness), and the guard bound only exists so a pathological ring
+// degrades to "some crossings survive" rather than looping forever.
+export function pruneRingFolds(ring){
+  if(!ring || ring.length<4) return ring||[];
+  const segX=(a,b,c,d)=>{
+    const d1x=b[0]-a[0], d1y=b[1]-a[1], d2x=d[0]-c[0], d2y=d[1]-c[1];
+    const den=d1x*d2y-d1y*d2x;
+    if(Math.abs(den)<1e-12) return null;
+    const t=((c[0]-a[0])*d2y-(c[1]-a[1])*d2x)/den;
+    const u=((c[0]-a[0])*d1y-(c[1]-a[1])*d1x)/den;
+    if(t<=1e-9 || t>=1-1e-9 || u<=1e-9 || u>=1-1e-9) return null;
+    return [a[0]+d1x*t, a[1]+d1y*t];
+  };
+  let pts=ring.slice();
+  for(let guard=0; guard<12; guard++){
+    const n=pts.length;
+    let found=false;
+    for(let i=0;i<n && !found;i++){
+      for(let j=i+1;j<n;j++){
+        if((j+1)%n===i || (i+1)%n===j) continue;
+        const X=segX(pts[i], pts[(i+1)%n], pts[j], pts[(j+1)%n]);
+        if(!X) continue;
+        const innerLen=j-i;
+        if(innerLen<=n-innerLen) pts=pts.slice(0,i+1).concat([X], pts.slice(j+1));
+        else pts=[X].concat(pts.slice(i+1, j+1));
+        found=true;
+        break;
+      }
+    }
+    if(!found || pts.length<4) return pts;
+  }
+  return pts;
+}
+
+// Containment pass over an inset ring: every vertex must sit INSIDE
+// `boundary` with at least `clearM` of clearance to it, or it is projected
+// back to exactly that clearance depth off its nearest boundary point.
+// This enforces the invariant the whole aura pipeline's safety argument
+// rests on — offsetPolygonInward's miter construction is trusted to leave
+// the inset ring a full margin inside its source ring, and hardCapPx then
+// spends a capped fraction of that margin on hardness spikes; when the
+// offset instead leaves a vertex ON the boundary (measured on real
+// Chaikin-densified cell rings: 61 of 400 vertices closer than HALF the
+// margin, minimum 0.001m), the "can never eat the gap" proof is void and
+// neighbouring fixtures' rendered rings genuinely cross. The projection
+// direction comes from the vertex's own nearest-point ray (inward for an
+// interior vertex, reversed for an escapee); a vertex exactly ON the
+// boundary has no ray, so it aims at the ring's own vertex average — good
+// enough for a point that pathological, and deterministic.
+export function containRingInside(ring, boundary, clearM){
+  if(!ring || ring.length<3 || !boundary || boundary.length<3 || !(clearM>0)) return ring||[];
+  const bn=boundary.length;
+  const ctr=[ring.reduce((a,p)=>a+p[0],0)/ring.length, ring.reduce((a,p)=>a+p[1],0)/ring.length];
+  return ring.map(p=>{
+    let bd=Infinity, bx=p[0], by=p[1];
+    for(let i=0;i<bn;i++){
+      const a=boundary[i], b=boundary[(i+1)%bn];
+      const dx=b[0]-a[0], dy=b[1]-a[1];
+      const L2=dx*dx+dy*dy;
+      let t=L2>0 ? ((p[0]-a[0])*dx+(p[1]-a[1])*dy)/L2 : 0;
+      if(t<0)t=0; else if(t>1)t=1;
+      const qx=a[0]+dx*t, qy=a[1]+dy*t;
+      const d=Math.hypot(p[0]-qx, p[1]-qy);
+      if(d<bd){ bd=d; bx=qx; by=qy; }
+    }
+    const inside=pointInPolygon(boundary, p[0], p[1]);
+    if(inside && bd>=clearM) return p;
+    let ux, uy;
+    if(bd>1e-9){
+      ux=(p[0]-bx)/bd; uy=(p[1]-by)/bd;
+      if(!inside){ ux=-ux; uy=-uy; }
+    } else {
+      const cl=Math.hypot(ctr[0]-bx, ctr[1]-by)||1e-9;
+      ux=(ctr[0]-bx)/cl; uy=(ctr[1]-by)/cl;
+    }
+    return [bx+ux*clearM, by+uy*clearM];
+  });
+}
+
+// Builds every fixture's own non-overlapping cell within one room, in the
+// ROOM'S OWN metre space (the same space room.pts already lives in) —
+// callers project to pixels the same way offsetPolygonInward's output
+// already is, via iso(). `fixtures` is [{id,x,y,weight}], weight from
+// automorphFixtureWeight. Returns a Map id -> ring ([x,y] metres, closed,
+// room-local) for every fixture whose cell resolved to a real polygon; a
+// fixture ABSENT from the result (a pathological room, or a cell squeezed to
+// nothing by its neighbours) is the caller's cue to fall back to today's
+// full-room shape for that one fixture rather than draw nothing.
+export function buildRoomFixtureCells(roomPts, fixtures){
+  const cells=new Map();
+  if(!roomPts || roomPts.length<3 || !fixtures || !fixtures.length) return cells;
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  for(const [x,y] of roomPts){ if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y; }
+  const dimM=Math.max(x1-x0, y1-y0, 0.5);
+  const step=Math.max(0.05, dimM/48);
+  const pad=step*2;
+  const nx=Math.max(3, Math.ceil((x1-x0+2*pad)/step)+1);
+  const ny=Math.max(3, Math.ceil((y1-y0+2*pad)/step)+1);
+  const gx=(i)=>x0-pad+i*step, gy=(j)=>y0-pad+j*step;
+  const mask=new Uint8Array(nx*ny);
+  for(let j=0;j<ny;j++) for(let i=0;i<nx;i++) mask[j*nx+i]=pointInPolygon(roomPts, gx(i), gy(j)) ? 1 : 0;
+
+  const fields=fixtures.map((f,idx)=>{
+    const fi=(f.x-gx(0))/step, fj=(f.y-gy(0))/step;
+    const dist=_floodFrom(fi, fj, nx, ny, step, mask);
+    const w=Math.max(0.1, f.weight||1);
+    // The cap is relative to THIS fixture's own worst-case distance across
+    // the room — the farthest ROOM VERTEX from its position — not a fixed
+    // fraction of the room's half-min-dimension. A fixture off in a corner
+    // is farther from the opposite corner than roomHalfMinDim ever accounts
+    // for; anchoring the cap there instead means weight=1 (no recorded
+    // manual size) reliably still covers the WHOLE room from anywhere
+    // inside it — today's original v1 behaviour for the common case — while
+    // a smaller weight shrinks the very same cap proportionally, which is
+    // what actually produces "common sense" sizing for a lone tiny fixture.
+    // The farthest point of a convex room from any interior point is always
+    // one of its own vertices; the ×1.5 buffer covers ordinary concave
+    // (L-shaped) rooms too, where a masked geodesic path can run a little
+    // longer than the straight-line distance this is measured with.
+    let maxVertexDist=0;
+    for(const [px,py] of roomPts) maxVertexDist=Math.max(maxVertexDist, Math.hypot(px-f.x, py-f.y));
+    const maxReach=Math.max(0.5, maxVertexDist*1.5)*w;
+    const seed=f.x*37.1+f.y*91.7+idx*13.37;
+    const amp=step*1.6;
+    return {
+      id:f.id, maxReach,
+      weighted:(i,j)=>{
+        const d=dist[j*nx+i];
+        if(!isFinite(d)) return Infinity;
+        const wob=amp*Math.sin(seed+gx(i)*2.3+gy(j)*1.7);
+        return d/w + wob;
+      },
+    };
+  });
+
+  const lerpAt=(ax,ay,fa,bx,by,fb)=>{
+    const t=(0-fa)/((fb-fa)||1e-9);
+    return [ax+(bx-ax)*t, ay+(by-ay)*t];
+  };
+  const segsById=new Map(fixtures.map(f=>[f.id,[]]));
+  for(const me of fields){
+    const F=new Float64Array(nx*ny);
+    for(let j=0;j<ny;j++) for(let i=0;i<nx;i++){
+      const idx2=j*nx+i;
+      if(!mask[idx2]){ F[idx2]=-1e9; continue; }
+      const myD=me.weighted(i,j);
+      if(!(myD<=me.maxReach)){ F[idx2]=-1e9; continue; }
+      let best=Infinity;
+      for(const other of fields){
+        if(other===me) continue;
+        const od=other.weighted(i,j);
+        if(od<best) best=od;
+      }
+      F[idx2]=(best===Infinity ? me.maxReach*2 : best) - myD;
+    }
+    // Marching squares at threshold 0 — the exact cell-case table isolux
+    // uses, over this fixture's own field, in room-local metres.
+    const segs=segsById.get(me.id);
+    for(let j=0;j<ny-1;j++) for(let i=0;i<nx-1;i++){
+      const e00=F[j*nx+i], e10=F[j*nx+i+1], e01=F[(j+1)*nx+i], e11=F[(j+1)*nx+i+1];
+      const c=(e00>0?1:0)|(e10>0?2:0)|(e11>0?4:0)|(e01>0?8:0);
+      if(c===0||c===15) continue;
+      const gx0=gx(i), gx1=gx(i+1), gy0=gy(j), gy1=gy(j+1);
+      const T=()=>lerpAt(gx0,gy0,e00,gx1,gy0,e10), R=()=>lerpAt(gx1,gy0,e10,gx1,gy1,e11);
+      const B=()=>lerpAt(gx0,gy1,e01,gx1,gy1,e11), L=()=>lerpAt(gx0,gy0,e00,gx0,gy1,e01);
+      const cellSegs={1:[[L,T]],2:[[T,R]],3:[[L,R]],4:[[R,B]],5:[[L,T],[R,B]],6:[[T,B]],7:[[L,B]],
+                  8:[[B,L]],9:[[T,B]],10:[[T,R],[B,L]],11:[[R,B]],12:[[L,R]],13:[[T,R]],14:[[L,T]]}[c];
+      for(const [f1,f2] of cellSegs){
+        const p1=f1(), p2=f2();
+        segs.push([p1[0],p1[1],p2[0],p2[1]]);
+      }
+    }
+  }
+  for(const [id,segs] of segsById){
+    const rings=stitchSegmentsToRing(segs);
+    if(rings.length) cells.set(id, rings[0]);
+  }
+  return cells;
+}
+
 export function shapeSvg(kind, cx, cy, r, attrs){
   const poly=(pts)=>`<polygon points="${pts}" ${attrs}/>`;
   // Every shape stays within the hexagon's own width (r*√3 ≈ 1.73r), because
@@ -290,6 +1030,34 @@ export function shapeSvg(kind, cx, cy, r, attrs){
         `height="${n(stemBot-stemTop)}" rx="${n(stemW/2)}" ${attrs}/>`+
         `<circle cx="${n(cx)}" cy="${n(cy+HW*0.55)}" r="${n(bulbR)}" ${attrs}/>`;
     }
+    // A padlock: solid shackle arch over a solid body — the universal
+    // access-control symbol, so a lock reads as a lock even to someone
+    // who has never seen this map before. Solid, like every glyph here
+    // (the code label is drawn across it — a hollow ring would leave dark
+    // text on the dark map, same reason "tempreadout" is a filled bulb).
+    case "lock": {
+      const bodyW=HW*1.3, bodyH=HW*0.9, bodyTop=cy+HW*0.15;
+      const shackleTop=bodyTop-HW*0.12, outerR=HW*0.62, innerR=HW*0.32;
+      const shackleD=sub([
+        ...arcPts(cx,shackleTop,outerR,outerR,180,360,12),
+        ...arcPts(cx,shackleTop,innerR,innerR,360,180,12),
+      ]);
+      return `<path d="${shackleD}" ${attrs}/>`+
+        `<rect x="${n(cx-bodyW/2)}" y="${n(bodyTop)}" width="${n(bodyW)}" `+
+        `height="${n(bodyH)}" rx="${n(bodyW*0.12)}" ${attrs}/>`;
+    }
+    // A door leaf with its handle — the reflected-ceiling-plan symbol for
+    // an opening, portrait-proportioned (taller than wide) unlike every
+    // other glyph here so it reads as "a door" and not another fixture.
+    // Solid, like lock's body+shackle: a handle dot layered on the same
+    // fill reads as one silhouette, not a cutout (a true hole would need a
+    // mask against a background colour this glyph never actually sits on).
+    case "door": {
+      const bodyW=HW*0.9, bodyH=r*1.5, bodyTop=cy-bodyH/2;
+      return `<rect x="${n(cx-bodyW/2)}" y="${n(bodyTop)}" width="${n(bodyW)}" `+
+        `height="${n(bodyH)}" rx="${n(bodyW*0.16)}" ${attrs}/>`+
+        `<circle cx="${n(cx+bodyW/2-HW*0.18)}" cy="${n(cy)}" r="${n(HW*0.12)}" ${attrs}/>`;
+    }
     case "triangle":
       return poly([[cx,cy-r],[cx+HW,cy+r*0.62],[cx-HW,cy+r*0.62]]
         .map(p=>`${n(p[0])},${n(p[1])}`).join(" "));
@@ -373,6 +1141,12 @@ export function shapeDetailSvg(kind, cx, cy, r, ink, sw){
     case "triangle": return ring(cx,cy+r*0.26,HW*0.32)+
                             line(cx-HW*0.4,cy+r*0.55,cx+HW*0.4,cy+r*0.55);
     case "diamond":  return ring(cx,cy,HW*0.42)+dot(cx,cy,HW*0.15);
+    // The keyhole — the one detail that says "lock" unambiguously at any size.
+    case "lock":     return dot(cx,cy+HW*0.08,HW*0.14)+line(cx,cy+HW*0.08,cx,cy+HW*0.42);
+    // A single panel line, offset toward the handle side — the door leaf's
+    // own echo of a real panelled door, same spirit as perimeter's inset
+    // frame below.
+    case "door":     return line(cx-HW*0.2,cy-r*0.5,cx-HW*0.2,cy+r*0.5);
     // An inset frame — the glyph's own echo of what it actually draws
     // full-size on the floor: a boundary, traced inside another boundary.
     case "perimeter": return `<rect x="${n(cx-HW*0.62)}" y="${n(cy-HW*0.62)}" `+
@@ -409,7 +1183,9 @@ export function lightClassOf(l){
   if(!l) return "light";
   if(l.isFan) return "fan";
   if(l.isMotion) return "motion";
+  if(l.isDoor) return "door";
   if(l.isTemp) return "temp";
+  if(l.isLock) return "lock";
   if(l.isWled||l.isPartition) return "strip";
   return "light";
 }
@@ -895,6 +1671,26 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   const CLASSF    = opts.classFilter && opts.classFilter!=="all" ? String(opts.classFilter) : null;
   const HALO      = !!opts.hitHalo;
   const COLLAPSE  = !!opts.collapseUnplaced;
+  // Automorph (Garry, 2026-09-07): 0 disables it outright — see
+  // automorphAuraSvg/automorphRing below, near perimeterSvg.
+  const AUTOMORPH_PCT = opts.automorph ? Math.max(0, Math.min(100, Number(opts.automorphRoomPct) || 0)) : 0;
+  // Slider 2 — edge hardness, centered at 0 (today's straight-edged look,
+  // either direction) — see applyHardness/ringPathD.
+  const AUTOMORPH_HARDNESS = opts.automorph ? Math.max(-100, Math.min(100, Number(opts.automorphHardness) || 0)) : 0;
+  // Style — which of several distinct visual TREATMENTS paints the same
+  // morphed ring (see automorphAuraSvg). "glow" is the shipped default;
+  // the others are exploratory, kept behind this dropdown so any of them
+  // can be dropped later without touching the geometry underneath.
+  const AUTOMORPH_STYLE = ["glow","blueprint","nebula"].includes(opts.automorphStyle) ? opts.automorphStyle : "glow";
+  // Subtlety, 0-100 (Garry, 2026-09-07: "a slider for subtlety, so you can
+  // dial from objects looking full, to almost completely lost in
+  // background... with shades, thinner lines"). 0 = today's opacity/line-
+  // weight exactly; 100 thins every stroke to 40% width and caps every
+  // opacity at 15% of its normal value — never fully zero, so the control
+  // still reads as "very subtle" rather than "silently did nothing".
+  const AUTOMORPH_SUBTLETY = opts.automorph ? Math.max(0, Math.min(100, Number(opts.automorphSubtlety) || 0)) : 0;
+  const _automorphOpacityMult = 1 - (AUTOMORPH_SUBTLETY/100)*0.85;
+  const _automorphStrokeMult = 1 - (AUTOMORPH_SUBTLETY/100)*0.6;
   const dimmed=(l)=>!!CLASSF && lightClassOf(l)!==CLASSF;
   // The builder, choosing a light from the INDEX rather than the map: "make
   // it easy to find" — one big ring flashes outward from wherever that light
@@ -918,7 +1714,13 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   const LAYER_PAL = ["#52b788","#f59e0b","#60a5fa","#e879f9","#fb923c","#34d399","#f87171","#a78bfa"];
 
   const frame = fabricFrame(model, floors, floorGap, horizGap);
-  const { iso, rooms, lights, levels, rankOf } = frame;
+  const { iso, rooms, lights: rawLights, levels, rankOf } = frame;
+  // A door/window's real position is a SECTION OF WALL, not a point (see
+  // docs/IDEA_DOOR_WINDOW_BARRIERS.md) — so even a legacy light_positions_m
+  // entry for one is never drawn as a freestanding marker here. The barrier
+  // pass below, keyed off rf_barriers_m's own linked_entity_id, is the only
+  // thing that ever marks where a door/window actually is on this map.
+  const lights = rawLights.filter(l => !(lightsByEid[l.eid] && lightsByEid[l.eid].isDoor));
   // Markers are sized from the fabric's own scale, not a fixed pixel count.
   const HEX_R = markerRadiusPx(frame.scale);
   // The label must FIT INSIDE its marker. A monospace glyph is about 0.6 em
@@ -939,7 +1741,10 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   const pts = cs=>cs.map(pt).join(" ");
 
   const levelColor=(z)=>LAYER_PAL[levels.indexOf(z)%LAYER_PAL.length];
-  const LEGEND_H=Math.max(1,levels.length)*30+24;
+  // +1 row: the motion colour-index strip below the floor rows (Garry,
+  // 2026-09-08) reuses this exact same growing-row layout, one row past
+  // the last floor.
+  const LEGEND_H=(Math.max(1,levels.length)+1)*30+24;
   // Top of the stack in DRAWN storeys, not level numbers — otherwise a gap in
   // the numbering reserved empty canvas above the building.
   const maxIsoZ = levels.length ? rankOf(levels[levels.length-1]) : 0;
@@ -1024,20 +1829,44 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     const b=Number(l&&l.bri);
     return isFinite(b)&&b>0 ? Math.max(0.12, Math.min(1, b/255)) : 0.8;
   };
+  // Slab tint from blended live rgb/brightness (gap #15, best-in-class
+  // roadmap): a room with its lights actually glowing magenta should read
+  // as tinted magenta on the floor, not just wear its assigned display
+  // colour. Brightness-weighted average of the SAME on/visible/non-utility
+  // fixtures glowIds already walks for this room's light pools, so a room
+  // with no fixture literally lit (a hallway, or every light off) keeps
+  // its ordinary static colour rather than reading as unlit black.
+  const liveRoomColor=(rname,fallback)=>{
+    if(!SHOW) return fallback;
+    const onLights=(byRoom[rname]||[]).filter(li=>
+      li.state==="on" && !hiddenEids.has(li.entity_id) && !li.isFan && !li.isMotion && !li.isTemp && !li.isLock);
+    if(!onLights.length) return fallback;
+    let rSum=0,gSum=0,bSum=0,wSum=0;
+    for(const li of onLights){
+      const m=/^#?([0-9a-f]{6})$/i.exec(glowCol(li,null));
+      if(!m) continue;
+      const v=parseInt(m[1],16), w=briOf(li);
+      rSum+=((v>>16)&255)*w; gSum+=((v>>8)&255)*w; bSum+=(v&255)*w; wSum+=w;
+    }
+    if(wSum<=0) return fallback;
+    const q=(x)=>Math.max(0,Math.min(255,Math.round(x/wSum)));
+    return `#${[q(rSum),q(gSum),q(bSum)].map(v=>v.toString(16).padStart(2,"0")).join("")}`;
+  };
   // One gradient per DISTINCT colour in use (quantised above), collected before
   // the defs are written. A per-light gradient would be one def per fixture.
   const glowIds=new Map();
-  // room record -> clipPath id, filled while the defs are written (SHOW only).
+  // room record -> clipPath id, filled while the defs are written (both
+  // modes — see the UNGATED clipPath block below).
   const roomClip=new Map();
   if(SHOW){
     for(const l of lights){
       const li=lightsByEid[l.eid];
-      if(!li || li.state!=="on" || hiddenEids.has(l.eid) || li.isFan || li.isMotion || li.isTemp) continue;
+      if(!li || li.state!=="on" || hiddenEids.has(l.eid) || li.isFan || li.isMotion || li.isTemp || li.isLock) continue;
       const c=(FIELD ? fieldColOf(l.x,l.y,l.z) : null) || glowCol(li,l.lp);
       if(!glowIds.has(c)) glowIds.set(c, `psglow_${glowIds.size}`);
     }
     for(const rname of Object.keys(byRoom||{})) for(const li of byRoom[rname]||[]){
-      if(li.state!=="on" || hiddenEids.has(li.entity_id) || li.isFan || li.isMotion || li.isTemp) continue;
+      if(li.state!=="on" || hiddenEids.has(li.entity_id) || li.isFan || li.isMotion || li.isTemp || li.isLock) continue;
       const rc=FIELD && roomCentre.get(rname);
       const c=(rc ? fieldColOf(rc[0],rc[1],rc[2]) : null) || glowCol(li, null);
       if(!glowIds.has(c)) glowIds.set(c, `psglow_${glowIds.size}`);
@@ -1117,14 +1946,136 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
              hCm:(Number(entry&&entry.height_cm)||0)*k };
   };
 
+  // A sensor that has GONE QUIET still says how long ago, at a glance.
+  // Revised three times against variations of the same complaint. First:
+  // a smooth sweep is invisible at a glance, and the milestones must
+  // actually be reachable in the window that matters — fixed by a STEP
+  // function, held stages, front-loaded (fine resolution early, coarse
+  // once it has been a while). Then (2026-09-05): the first three stops
+  // — blue/violet/magenta, all "cool" blue-purple-pink tones — read as
+  // one colour to a glance even though they are 40deg apart on paper, so
+  // in practice most rooms (re-triggered inside 20min, or quiet for
+  // hours) only ever LOOKED like two states, blue and green. Every stop
+  // below is now a classic, immediately-nameable colour-wheel colour
+  // (blue/cyan/green/yellow/orange/red/magenta), evenly spaced by eye
+  // rather than by degree count, still travelling the long way round the
+  // wheel so it passes through every colour family exactly once on the
+  // way to the held end colour (magenta, reached at 2h). Timings
+  // unchanged from the original spec — only which colour lands at each one.
+  // The one hold duration every sensor class shares: how long the ACTIVE
+  // flashing treatment lasts from a sensor's most recent transition,
+  // whatever its own hardware hold-timer does — and, identically, where
+  // the quiet-state colour fade begins. One constant so the two can
+  // never disagree about where "recently active" ends. Hoisted above the
+  // defs block (originally declared down with motionActive/
+  // motionRecentHue, which still read it fine from here — same function
+  // scope) so the legend strip below can build itself from this ONE real
+  // array instead of a second, hand-copied list of hues.
+  const MOTION_HOLD_MS=5*60*1000;
+  const MOTION_COLOR_STOPS=[
+    [0,             240],  // blue — the active colour, holds firm for the whole hold window
+    [MOTION_HOLD_MS,180],  // cyan
+    [20*60*1000,    120],  // green
+    [40*60*1000,     60],  // yellow
+    [65*60*1000,     30],  // orange
+    [90*60*1000,      0],  // red
+    [120*60*1000,   300],  // magenta — reached at 2h, held from there
+  ];
+  // The legend strip's own stop offsets (Garry, 2026-09-08: "make sure
+  // that's actually aligned with what is happening on the map" — the
+  // first version spaced all colours evenly by INDEX, which does not
+  // match the real fade at all: cyan's real window is 15 minutes, red's
+  // is 30). Every band's WIDTH is proportional to its real held duration
+  // (a smooth <linearGradient> blend would misrepresent the fade too —
+  // the real thing is hard STEPS, held stages, never a blend between two
+  // colours — so each colour gets two same-offset-adjacent stops, a hard
+  // edge, not a gradient). Magenta has no finite duration (held forever
+  // past 2h), so it gets a fixed terminal band rather than a proportional
+  // one no finite width could honestly represent.
+  const MOTION_LEGEND_HELD_PCT=10;
+  const MOTION_LEGEND_SPAN_MS=MOTION_COLOR_STOPS[MOTION_COLOR_STOPS.length-1][0];
+  let motionLegendStops="";
+  for(let mi=0; mi<MOTION_COLOR_STOPS.length; mi++){
+    // Named degSweep, not "hue" — see motionRecentPulseSvg's own comment:
+    // a guard test greps for an inline hue-templated HSL colour string as
+    // the shape a second, drifting copy of room_color.js's own colour
+    // deriver would take, and a variable spelled "hue" trips that same
+    // pattern by starting with "h" right after the interpolation brace.
+    const [atMs,degSweep]=MOTION_COLOR_STOPS[mi];
+    const isLast=mi===MOTION_COLOR_STOPS.length-1;
+    const p0=isLast ? (100-MOTION_LEGEND_HELD_PCT) : (atMs/MOTION_LEGEND_SPAN_MS)*(100-MOTION_LEGEND_HELD_PCT);
+    const p1=isLast ? 100 : (MOTION_COLOR_STOPS[mi+1][0]/MOTION_LEGEND_SPAN_MS)*(100-MOTION_LEGEND_HELD_PCT);
+    const col=`hsl(${degSweep},75%,58%)`;
+    motionLegendStops+=`<stop offset="${p0.toFixed(2)}%" stop-color="${col}"/>`+
+      `<stop offset="${p1.toFixed(2)}%" stop-color="${col}"/>`;
+  }
+
   // Floor surface patterns
   s+=`<defs>`;
   // Motion pulse gradient — UNGATED (both modes): a triggered sensor is
   // status, not presentation, and it has to read on the working map too.
+  // The motion legend strip's colour index (Garry, 2026-09-08 — first
+  // "a small line at the bottom... starting at blue, and thru the colors
+  // to ending on green", then "I ask for all the colors in the shift
+  // from blue to green for motion. Every color in the rainbow" — every
+  // stop MOTION_COLOR_STOPS actually has, not just the first three) —
+  // built from motionLegendStops above so this can never become a second,
+  // drifting copy of the real colours or their real timing.
+  s+=`<linearGradient id="psmotionlegend" x1="0" y1="0" x2="1" y2="0">${motionLegendStops}</linearGradient>`;
   s+=`<radialGradient id="psmotion">`+
     `<stop offset="0%" stop-color="${MOTION_PULSE}" stop-opacity="0.55"/>`+
     `<stop offset="60%" stop-color="${MOTION_PULSE}" stop-opacity="0.18"/>`+
     `<stop offset="100%" stop-color="${MOTION_PULSE}" stop-opacity="0"/></radialGradient>`;
+  // Automorph's "Nebula" style — a colour-agnostic soft-edge MASK (white
+  // fading to transparent) rather than a per-fixture gradient: any number
+  // of fixtures can share this ONE definition regardless of their own
+  // colour, so this stays cheap no matter how many auras are on screen —
+  // a true per-colour gradient would need one <radialGradient> per
+  // distinct colour in play, which is the defs-bloat a mask sidesteps.
+  s+=`<radialGradient id="psautomorphgrad">`+
+    `<stop offset="0%" stop-color="#fff" stop-opacity="1"/>`+
+    `<stop offset="55%" stop-color="#fff" stop-opacity="0.55"/>`+
+    `<stop offset="100%" stop-color="#fff" stop-opacity="0"/></radialGradient>`;
+  // maskContentUnits="objectBoundingBox" with FRACTION coordinates is what
+  // makes the shared def per-fixture at all. Mask content defaults to
+  // userSpaceOnUse, where percentage lengths resolve against the VIEWPORT
+  // (SVG 1.1 §7.10/§14.4) — so the original -20%..140% rect spanned the
+  // whole canvas and the fade was one canvas-centred vignette: bloom and
+  // nebula strength varied with where the room sat on the canvas
+  // (rasterized, identical shapes read ~0.11 alpha at a canvas corner vs
+  // 1.0 at its centre), and the ring's own edge had no fade anywhere. In
+  // bbox units the same -0.2..1.4 rect hugs each REFERENCING ring instead,
+  // and psautomorphgrad (objectBoundingBox itself) centres on it — light
+  // welling up from inside, identical wherever the fixture sits. This def
+  // is also part of the automorph-off output (it predates the aura-defs
+  // slider gate), so fixing it moved those bytes deliberately: nothing in
+  // an automorph-off render references the mask, dead-DOM bytes only.
+  s+=`<mask id="psautomorphmask" maskContentUnits="objectBoundingBox"><rect x="-0.2" y="-0.2" width="1.4" height="1.4" fill="url(#psautomorphgrad)"/></mask>`;
+  // Automorph duotone interiors — exactly TWO shared radialGradients, one
+  // per state, NEVER per fixture (the same O(2) defs discipline as
+  // psautomorphgrad above). A flat two-value grey ignored the one signal
+  // the cell partition computes per fixture — how far a point is from its
+  // own light — so every aura fill interior now runs lighter at the centre
+  // and fades to the state's base tone at the rim, the classic
+  // hypsometric-duotone depth cue keyed to that distance. The stops carry
+  // COLOUR only (full stop opacity): the referencing path's own
+  // fill-opacity, routed through the subtlety multipliers, stays the
+  // single authority on layer weight, so the rebalanced fill ceilings and
+  // the subtlety slider keep their exact contracts. objectBoundingBox (the
+  // default) centres each fill on whatever ring references it —
+  // per-fixture geometry for free. Being SHARED, these can carry no
+  // per-fixture offset by construction — that cue lives in the flat ink
+  // instead (see automorphAuraSvg's colour-ownership comment). GATED on
+  // the slider, unlike psmotion (whose consumer exists in both modes):
+  // only the aura ever references these, so with Automorph off they were
+  // pure dead DOM — and the automorph-off render is contractually
+  // byte-identical to the pre-Automorph output.
+  if(AUTOMORPH_PCT>0) for(const [duoId,duoBase] of [["psautomorphduo_on",AUTOMORPH_BASE_ON],["psautomorphduo_off",AUTOMORPH_BASE_OFF]]){
+    s+=`<radialGradient id="${duoId}">`+
+      `<stop offset="0%" stop-color="${lighten(duoBase,18)}"/>`+
+      `<stop offset="55%" stop-color="${lighten(duoBase,8)}"/>`+
+      `<stop offset="100%" stop-color="${duoBase}"/></radialGradient>`;
+  }
   // Garry: "that cool look you have inside the [light glow]... can the shape
   // built by the room shape also have some of that, a bit less intense, but
   // the same shaded look" — the same near-quadratic radial falloff the light
@@ -1136,7 +2087,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   // One gradient per distinct room colour, same dedup as glowIds.
   const roomGlowIds=new Map();
   for(const r of rooms){
-    const rc=roomColor(r.room, model);
+    const rc=liveRoomColor(r.room, roomColor(r.room, model));
     if(!roomGlowIds.has(rc)) roomGlowIds.set(rc, `psroomglow_${roomGlowIds.size}`);
   }
   for(const [rc,rid] of roomGlowIds){
@@ -1145,6 +2096,82 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       `<stop offset="45%" stop-color="${rc}" stop-opacity="0.05"/>`+
       `<stop offset="100%" stop-color="${rc}" stop-opacity="0"/>`+
       `</radialGradient>`;
+  }
+  // Softens the wall cut on a clipped pool: applied OUTSIDE the clip, so a
+  // couple of pixels of light feather over the boundary the way a doorway
+  // leaks. A hard polygon edge is the one artifact every hand-built
+  // floor-plan thread complains about. Only Showcase surfaces (pools, the
+  // perimeter cove glow) reference this def now — the Automorph aura,
+  // which used to share it, blurs through its own clone psaurasoft just
+  // below, whose region is sized for the aura's shadow-bearing blur
+  // group.
+  const emitClipSoft=()=>{
+    s+=`<filter id="psclipsoft" x="-8%" y="-8%" width="116%" height="116%">`+
+      `<feGaussianBlur stdDeviation="1.6"/></filter>`;
+  };
+  // One clip path per room, so a fixture's pool — and its Automorph aura —
+  // can be stopped at its own walls. Light crossing a wall polygon reads as
+  // a rendering error the moment the drawing is good enough for anything
+  // else to read as real — and the fabric has known these polygons in
+  // metres all along. O(rooms) defs, not O(fixtures), so still cheap at
+  // any fixture count.
+  const emitRoomClips=()=>{
+    for(let ri=0; ri<rooms.length; ri++){
+      const r=rooms[ri];
+      roomClip.set(r, `psclip_${ri}`);
+      s+=`<clipPath id="psclip_${ri}"><polygon points="${r.pts.map(p=>pt(iso(p[0],p[1],r.z))).join(" ")}"/></clipPath>`;
+    }
+  };
+  // Emitters rather than inline defs because these two are needed at
+  // DIFFERENT positions depending on who can reference them. The aura is
+  // gated on the Automorph slider alone, never on Showcase, so with
+  // Automorph on the room clips must exist on the working map too — while
+  // this loop lived inside if(SHOW), roomClip stayed EMPTY for the whole
+  // working-mode render and a blurred or hardness-spiked aura had nothing
+  // stopping it at its own room's wall. With Automorph OFF nothing outside
+  // if(SHOW) can reference either def, and the automorph-off render is
+  // contractually byte-identical to the pre-Automorph output — def ORDER
+  // included, which is why the showcase-only emission happens at the defs'
+  // pre-Automorph spot inside if(SHOW) below rather than up here.
+  if(AUTOMORPH_PCT>0){
+    emitClipSoft();
+    // Automorph's aura blur — a clone of psclipsoft with a WIDER region,
+    // and deliberately its own def. The aura's soft layers (cast shadow,
+    // ambient occlusion, wash, bloom) blur as ONE group per fixture, and
+    // that group's bbox includes the shadow's offset copy; a filter's
+    // default region is relative to the bbox of whatever it filters, and
+    // psclipsoft's -8% margin stops covering the blur's ~3-sigma bleed
+    // (~5px at stdDeviation 1.6) once the filtered bbox is small — the
+    // icon-sized low-t aura, and the shadow's trailing lower-right edge is
+    // the first thing a too-tight region visibly shears off. 12% covers
+    // the bleed for any group upwards of ~40px across; smaller than that,
+    // the clipped tail sits under ~2% alpha — invisible. Cloning rather
+    // than widening psclipsoft itself keeps the Showcase pools' raster
+    // area (region size IS raster cost) exactly what it was. Gated with
+    // the rest of the aura defs: only the aura references it.
+    s+=`<filter id="psaurasoft" x="-12%" y="-12%" width="124%" height="124%">`+
+      `<feGaussianBlur stdDeviation="1.6"/></filter>`;
+    // The aura rim's OWN sheen ramp — psgloss's exact stops, on the default
+    // objectBoundingBox units, cloned because the rim can use neither
+    // existing ramp: psgloss is Showcase-gated (an invalid paint ref makes
+    // SVG drop the element, so the rim would silently vanish on the
+    // working map), and the floor-wide userSpaceOnUse psglossauto decided
+    // bright-vs-dark by the fixture's POSITION on the slab — a fixture on
+    // a floor's lower-right had its entire rim past the ramp's 45% stop
+    // (max white opacity ~0.1): no bright arc anywhere, the exact
+    // flat-sticker outline the rim exists to kill. A rim's job is
+    // per-shape — "which side of THIS shape faces the light" — so it
+    // sweeps each referencing shape's own bbox: bright upper-left arc,
+    // dark lower-right, on every shape, still agreeing with the drawing's
+    // one upper-left sun. The stretched-per-cell spread that pushed the
+    // gloss FILL to psglossauto is harmless on a ~1px stroke with no
+    // visible interior. ONE shared def (O(1) at any fixture count), gated
+    // with the rest of the aura-only defs: only edgeRim references it.
+    s+=`<linearGradient id="psglossrim" x1="0.15" y1="0" x2="0.6" y2="1">`+
+      `<stop offset="0%" stop-color="#fff" stop-opacity="0.5"/>`+
+      `<stop offset="45%" stop-color="#fff" stop-opacity="0.1"/>`+
+      `<stop offset="100%" stop-color="#000" stop-opacity="0.18"/></linearGradient>`;
+    emitRoomClips();
   }
   if(SHOW){
     // Light pools. Four stops, not two: a linear ramp reads as a flat disc with
@@ -1158,20 +2185,13 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         `<stop offset="100%" stop-color="${col}" stop-opacity="0"/>`+
         `</radialGradient>`;
     }
-    // Softens the wall cut on a clipped pool: applied OUTSIDE the clip, so a
-    // couple of pixels of light feather over the boundary the way a doorway
-    // leaks. A hard polygon edge is the one artifact every hand-built
-    // floor-plan thread complains about.
-    s+=`<filter id="psclipsoft" x="-8%" y="-8%" width="116%" height="116%">`+
-      `<feGaussianBlur stdDeviation="1.6"/></filter>`;
-    // One clip path per room, so a fixture's pool can be stopped at its own
-    // walls. Light crossing a wall polygon reads as a rendering error the
-    // moment the drawing is good enough for anything else to read as real —
-    // and the fabric has known these polygons in metres all along.
-    for(let ri=0; ri<rooms.length; ri++){
-      const r=rooms[ri];
-      roomClip.set(r, `psclip_${ri}`);
-      s+=`<clipPath id="psclip_${ri}"><polygon points="${r.pts.map(p=>pt(iso(p[0],p[1],r.z))).join(" ")}"/></clipPath>`;
+    // With Automorph off, psclipsoft and the room clips are emitted HERE —
+    // their pre-Automorph home between the pool gradients and psshade — so
+    // the showcase render stays byte-identical to that era in def order,
+    // not merely def set.
+    if(!(AUTOMORPH_PCT>0)){
+      emitClipSoft();
+      emitRoomClips();
     }
     // Contact shadow under a fixture — what actually sells a marker as an
     // object sitting in the room rather than a sticker on the glass.
@@ -1282,6 +2302,42 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       }
     }
 
+    // Automorph non-overlap partitioning: one pass per floor, before any
+    // fixture is drawn, grouping this floor's placed lights by the room
+    // their POSITION falls in (same ray-cast the FIT block above already
+    // uses) and handing each room's group to buildRoomFixtureCells once.
+    // room -> Map(eid -> cell ring, room-local metres). A perimeter light
+    // draws its own trace (perimeterSvg — Automorph restyles it in place,
+    // see perimeterAuraSvg — never a cell aura), so it never enters this
+    // grouping or competes for room space against fixtures that do.
+    const roomFixtureCells=new Map();
+    if(AUTOMORPH_PCT>0){
+      const byRoomFixtures=new Map();
+      for(const pl of hereLights){
+        if(hiddenEids.has(pl.eid)) continue;
+        const l=lightsByEid[pl.eid];
+        // Motion/fan/temp fixtures are on the map but are not the "lights"
+        // Automorph was built for (docs/IDEA_AUTOMORPH_LIGHTS.md) — they
+        // carry their own established visual language (the pulse ring and
+        // border colour for motion, isFan's own treatment, a temp readout)
+        // that has nothing to do with a room-alignment aura. Left
+        // unexcluded here they still competed for and won a real partition
+        // cell purely by sharing a room with a real light, which then
+        // suppressed their own glyph body via automorphAuraSvg's aura-
+        // painted flag below — the exact live bug Garry reported ("the
+        // center not activating on motion... only some sensors"): the
+        // pulse ring is a separate code path and kept firing, but the
+        // glyph itself had been swapped for a transparent hit rect.
+        if(!l || l.shape==="perimeter" || l.isMotion || l.isFan || l.isTemp) continue;
+        const r=hereRooms.find(rr=>pointInRoom(rr.pts, pl.x, pl.y));
+        if(!r || r.pts.length<3) continue;
+        const weight=automorphFixtureWeight(pl.lp&&pl.lp.width_cm, pl.lp&&pl.lp.height_cm);
+        if(!byRoomFixtures.has(r)) byRoomFixtures.set(r, []);
+        byRoomFixtures.get(r).push({id:pl.eid, x:pl.x, y:pl.y, weight});
+      }
+      for(const [r,fixtures] of byRoomFixtures) roomFixtureCells.set(r, buildRoomFixtureCells(r.pts, fixtures));
+    }
+
     // Every slab is the SAME SIZE, centred on the floor it belongs to.
     // Sizing each slab to its own contents made the stack look like the floors
     // were drawn at different scales — this basement legitimately reaches
@@ -1310,7 +2366,40 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     const x0=ccx-halfW, x1=ccx+halfW, y0_=ccy-halfH, y1_=ccy+halfH;
 
     const TL=iso(x0,y0_,z), TR=iso(x1,y0_,z), BR=iso(x1,y1_,z), BL=iso(x0,y1_,z);
-    const TR_b=iso(x1,y0_,z-slabWZ), BR_b=iso(x1,y1_,z-slabWZ), BL_b=iso(x0,y1_,z-slabWZ);
+    const TR_b=iso(x1,y0_,rankOf(z)-slabWZ), BR_b=iso(x1,y1_,rankOf(z)-slabWZ), BL_b=iso(x0,y1_,rankOf(z)-slabWZ);
+
+    // One gloss ramp per FLOOR for the Automorph aura's gloss FILL (the
+    // rim is per-shape by design — see psglossrim in the aura defs):
+    // psgloss's stops and diagonal, but gradientUnits=
+    // userSpaceOnUse spanning this floor's own projected slab bbox instead
+    // of each shape's bounding box. psgloss leans on objectBoundingBox —
+    // cheap and correct while every shape sharing it is a near-uniform
+    // hexagon, but Automorph cells range from thin wedges to room-sized
+    // blobs, and the "same" 0.15,0 -> 0.6,1 ramp stretched per cell lands
+    // the highlight at a visibly different angle/spread on each one — the
+    // exact "two suns" outcome psgloss's own comment exists to prevent,
+    // compounding at the ~100-fixture scale. One def per floor (O(floors),
+    // free at any fixture count), every cell on the slab lit from the same
+    // upper-left. Gated on the SLIDER, not on Showcase: Automorph runs on
+    // the working map, and while the aura pointed at Showcase-gated
+    // psgloss its rim and gloss silently vanished there (invalid paint
+    // ref = element dropped) — but with Automorph off nothing references
+    // this ramp, and the render stays byte-identical to the pre-Automorph
+    // output. psgloss itself is untouched — markers and rooms keep exactly
+    // what they have. A gradient element renders nothing on its own, so it
+    // is safe outside <defs>; url() references resolve document-wide.
+    const glossAutoId=`psglossauto_${lidx}`;
+    if(AUTOMORPH_PCT>0){
+      const gxs=[TL[0],TR[0],BR[0],BL[0]], gys=[TL[1],TR[1],BR[1],BL[1]];
+      const gx0=Math.min(...gxs), gw=Math.max(...gxs)-gx0;
+      const gy0=Math.min(...gys), gh=Math.max(...gys)-gy0;
+      s+=`<linearGradient id="${glossAutoId}" gradientUnits="userSpaceOnUse" `+
+        `x1="${(gx0+gw*0.15).toFixed(1)}" y1="${gy0.toFixed(1)}" `+
+        `x2="${(gx0+gw*0.6).toFixed(1)}" y2="${(gy0+gh).toFixed(1)}">`+
+        `<stop offset="0%" stop-color="#fff" stop-opacity="0.5"/>`+
+        `<stop offset="45%" stop-color="#fff" stop-opacity="0.1"/>`+
+        `<stop offset="100%" stop-color="#000" stop-opacity="0.18"/></linearGradient>`;
+    }
 
     s+=`<g opacity="${go}"${gpe}>`;
     // Slab sides
@@ -1350,8 +2439,27 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         `font-family="ui-monospace,monospace" font-size="${fs.toFixed(1)}" font-weight="700" `+
         `letter-spacing="0.06em" fill="${tCol}" pointer-events="none">${escSVG(l.code)}</text></g>`;
     };
-    const markerSvg=(l,hx,hy,entry,extra="")=>{
-      const on=l.state==="on";
+    // suppressGlyph (Garry, 2026-09-07: "why do you keep all the old non
+    // morphed stuff showing... weird choice?"): when this fixture's
+    // Automorph aura is actively painting, the old glyph body stops
+    // drawing — mirroring the perimeter shape's own precedent below
+    // ("keep the glow, and the click space..., but hide the square").
+    // Only the BODY goes; the hit region (same silhouette, same
+    // rotate/scale transform, via the same layer() the body used),
+    // the code label/chip and the <g data-eid/cx/cy> wrapper all stay,
+    // so click/drag/tap and identity are untouched.
+    const markerSvg=(l,hx,hy,entry,extra="",suppressGlyph=false)=>{
+      // A motion sensor's icon lights for the SAME window its pulse
+      // flashes (motionActive — state, or the shared hold window), never
+      // the raw state alone: an alarm zone's hardware clears in ~5s and
+      // the icon used to go dark then, mid-flash. Every other class is the
+      // raw state, as always.
+      // A lock has no "on"/"off" state at all — "locked" is its normal,
+      // secure state, so that is what reads as lit here, the same way a
+      // light being on is its normal active state. "unlocked" and
+      // "jammed" both read as dim/attention, same treatment as a light
+      // that's off.
+      const on=l.isMotion ? motionActive(l) : (l.isLock ? l.state==="locked" : l.state==="on");
       // A custom pin colour applies to the LIT state only. Using it while the
       // light is off made every placed light look permanently on, which breaks
       // the one thing the sidebar exists for.
@@ -1363,7 +2471,9 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         :(l.isPartition?PARTITION_BORDER
         :(l.isFan?FAN_BORDER
         :(l.isMotion?MOTION_BORDER
-        :(l.isTemp?TEMP_BORDER:null))));
+        :(l.isDoor?DOOR_BORDER
+        :(l.isTemp?TEMP_BORDER
+        :(l.isLock?LOCK_BORDER:null))))));
       const stroke=SHOW
         ? (on?(stripBorder||"#f8fafc"):"#3f5165")
         : (stripBorder||"#60a5fa");
@@ -1426,6 +2536,10 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // The outline scales and rotates; the CODE never does. A rotated or
       // stretched label is the thing that stops the map being readable at a
       // glance, which is the entire point of the view.
+      // Divide by the MAX of sx/sy, not min or average: the scale() transform
+      // multiplies stroke-width by whichever axis a point moves along, so the
+      // larger factor is what would balloon the line — countering the smaller
+      // one instead would still leave the stretched axis too thick.
       const sw=t.length?(2/Math.max(sx,sy)):2;
       // One helper for every layer of the marker, so the halo, the body and the
       // gloss are the SAME silhouette at the SAME transform — the whole point
@@ -1435,7 +2549,16 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         : shapeSvg(l.shape, hx, hy, HEX_R, a);
 
       let body;
-      if(SHOW){
+      if(suppressGlyph){
+        // The aura is this fixture's visual now; what remains here is the
+        // SAME silhouette at the SAME transform, painted transparent —
+        // fill="transparent", never "none": SVG's default pointer-events
+        // (visiblePainted) hit-tests a transparent fill but not a none
+        // fill, so this is exactly what keeps the fixture clickable and
+        // draggable while invisible (the same deliberate choice
+        // perimeter's own hit rect makes below).
+        body=layer(`data-hit="1" fill="transparent" stroke="none" pointer-events="all"`);
+      } else if(SHOW){
         // Bloom hugging the silhouette (a stroke, so it follows any shape),
         // then the body, then the fixture's own detail, then a single
         // upper-left gloss over the lot. objectBoundingBox gradients mean one
@@ -1531,19 +2654,121 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         `pointer-events="none">${escSVG(label)}</text></g>`;
     };
 
+    // ── Shared Automorph rendering stages ───────────────────────────────────
+    // Split out of automorphAuraSvg (2026-09-08) so the perimeter trace can
+    // ride the IDENTICAL pipeline (Garry: the room-boundary shapes were left
+    // out of "the whole morph thing... and now is a serious mismatch"): one
+    // authority each for the smoothing/offset/containment maths and for the
+    // jitter/hardness/path chain, so the aura and the trace can never drift
+    // apart corner-language-first. Pure extractions — the aura's own output
+    // is byte-identical through them.
+    //
+    // Subtlety scales every opacity and stroke-width the Automorph
+    // treatments compute — one multiplier applied at the point of use,
+    // rather than threading it through each style's own formula, so a
+    // future 4th style gets it for free by using these same two helpers.
+    // opac() floors its OUTPUT at 0.01: the slider's contract is "almost
+    // completely lost", never gone, and after the composition re-budget the
+    // quiet fills (0.02-0.05) times the 0.15 floor multiplier would
+    // otherwise round to an exactly-invisible 0.00 through toFixed(2). At
+    // subtlety 0 the multiplier is 1 and every input is >=0.01, so rest
+    // positions are byte-untouched.
+    const opac=(v)=>Math.max(v*_automorphOpacityMult, 0.01).toFixed(2);
+    const swid=(v)=>(v*_automorphStrokeMult).toFixed(2);
+    // The inset stage. Two Chaikin passes over WHICHEVER target the caller
+    // chose — smoothing lives only here so the cell path, the room-trace
+    // fallback and the perimeter trace get the identical corner language,
+    // nothing upstream (the stored cells) or downstream (the AUTOMORPH_N
+    // resample, the icon endpoint) is ever smoothed twice — see
+    // chaikinSmooth's own comment for the grid-noise rationale and the
+    // metaball scope guardrail. densifyRing first, because "identical
+    // corner language" has to hold at the SCALE of the cut too: Chaikin's
+    // cut rides its input's edge length, so sparse traced polygons fed in
+    // raw got metre-scale corner rounding where a ~0.1m-edged cell ring got
+    // the intended cm-scale cleanup — see the helper's own comment for the
+    // measured failure.
+    //
+    // The ring handed back must honour TWO invariants everything after it
+    // silently trusts: it is SIMPLE (no self-intersections) and it sits at
+    // least 0.9*marginM inside its source ring EVERYWHERE — hardCapPx's
+    // whole safety argument ("a spike can never eat the non-overlap gap")
+    // assumes the gap actually exists before hardness runs. Feeding
+    // offsetPolygonInward the raw Chaikin output broke both: its miter
+    // construction — documented for sparse room traces — folds on a
+    // 270-520-point ring's tightly-spaced vertices (bowtie loops the
+    // adaptive 64-point resample then faithfully kept, where the old fixed
+    // 24 aliased them away), and left vertices essentially ON the
+    // pre-offset boundary, so at negative hardness neighbouring fixtures'
+    // rendered rings genuinely crossed. So: resample the smoothed target
+    // down to the SAME 64-point count automorphRing caps at BEFORE the
+    // offset (well-spaced input, and no detail lost that the final resample
+    // would have kept anyway), pruneRingFolds the inverted loops the offset
+    // intrinsically leaves where the margin exceeds the local curvature
+    // radius, then containRingInside projects any vertex still outside, or
+    // closer than 0.9*marginM to, the source ring back to clearance depth —
+    // with a final prune in case a projection itself crossed the ring.
+    // Measured on the scenes that exposed this: pruning alone already
+    // restores the full-margin clearance, so containment is the guarantee
+    // for the shapes nobody measured, not the workhorse.
+    //
+    // hardCapPx rides along because it must derive from the SAME margin the
+    // ring was just inset by. Hardness's negative side pushes ring points
+    // OUTWARD (applyHardness) — cap that push so it can never spend the gap
+    // this very inset just created between neighbouring cells and to the
+    // room's own walls. Units: marginM is metres, but the ring applyHardness
+    // receives is screen px. frame.scale is px-per-metre for an axis-aligned
+    // metre step, and the iso projection is anisotropic — a metre maps to
+    // between ~0.71x (SQRT1_2, the metre-space diagonal) and ~1.22x
+    // frame.scale px depending on direction — so the cap takes the
+    // conservative floor: whichever direction a spike happens to point, 85%
+    // of the projected gap is the most it can ever spend.
+    const automorphInsetRing=(rawPts, baseMarginM)=>{
+      const targetPts=chaikinSmooth(densifyRing(rawPts, 0.1), 2);
+      const marginM=Math.max(0, Math.min(baseMarginM, roomHalfMinDim(targetPts)*0.85));
+      const coarsePts=resamplePolygonRing(targetPts, 64);
+      const insetPts=pruneRingFolds(containRingInside(
+        pruneRingFolds(offsetPolygonInward(coarsePts, marginM)), coarsePts, marginM*0.9));
+      const hardCapPx=marginM*frame.scale*Math.SQRT1_2*0.85;
+      return {insetPts, hardCapPx};
+    };
+    // The ink/hardness/path chain. Order is deliberate: the hand-inked
+    // jitter, then hardness, then the path builder — so the spike operator
+    // grows its spikes from the inked points and the soft Catmull-Rom runs
+    // through them, instead of the jitter roughing up an already-built
+    // curve. Nebula skips the jitter entirely (its treatments fade or blur
+    // the edge to softness — invisible effort); its amplitude already
+    // scales with t and dies on the negative-hardness side (see the
+    // helper's own comment for the amplitude discipline). hx,hy seed the
+    // jitter — the shape's own anchor, whatever the caller anchors on.
+    const automorphInkedRing=(morphed, hx, hy, hardCapPx)=>{
+      const inked=(AUTOMORPH_STYLE==="nebula") ? morphed
+        : automorphRingJitter(morphed, hx, hy, AUTOMORPH_PCT/100, AUTOMORPH_HARDNESS);
+      const ring=applyHardness(inked, AUTOMORPH_HARDNESS, hardCapPx);
+      return {ring, d:ringPathD(ring, AUTOMORPH_HARDNESS)};
+    };
+    // The trace's requested margin in metres. Nullish, not ||: an explicit
+    // margin of 0 (right on the wall) is a real, meaningful choice and must
+    // not fall back to the default just because 0 is falsy — that would
+    // make a true zero unreachable (that bug shipped once). One authority
+    // because BOTH perimeter paths — the byte-stable legacy trace below and
+    // the Automorph treatment (perimeterAuraSvg) — must agree on it.
+    const perimeterWantM=(entry)=>{
+      const rawCm=entry&&entry.margin_cm;
+      return (rawCm===undefined||rawCm===null) ? defaultPerimeterMarginM(frame) : (Number(rawCm)||0)/100;
+    };
+
     // A "perimeter" light's real extent: the room it is dropped in, traced
     // inward by its own margin_cm. Drawn for BOTH modes — this is the
     // fixture's shape, not a Showcase presentation effect — under everything
     // else on the floor, same reasoning as the room fills it sits just above.
     // entry is the fixture's placement record (pl.lp) — margin_cm lives there
     // alongside width_cm/height_cm/rotation, same storage, same draft path.
+    // With Automorph up this legacy treatment stands down and
+    // perimeterAuraSvg below draws the trace instead; with the slider at 0
+    // this output is contractually BYTE-IDENTICAL to the pre-Automorph era.
     const perimeterSvg=(l,room,entry)=>{
       if(!room || room.pts.length<3) return "";
-      // Nullish, not ||: an explicit margin of 0 (right on the wall) is a
-      // real, meaningful choice and must not fall back to the default just
-      // because 0 is falsy — that would make a true zero unreachable.
-      const rawCm=entry&&entry.margin_cm;
-      const wantM=(rawCm===undefined||rawCm===null) ? defaultPerimeterMarginM(frame) : (Number(rawCm)||0)/100;
+      const wantM=perimeterWantM(entry);
       // Clamped so a margin typed larger than the room cannot fold the
       // offset polygon back on itself — see offsetPolygonInward's own note.
       const marginM=Math.max(0, Math.min(wantM, roomHalfMinDim(room.pts)*0.85));
@@ -1574,6 +2799,375 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       return s2;
     };
 
+    // The perimeter trace in Automorph's design language (Garry, 2026-09-07:
+    // "why did you not include the shapes generated by room boundaries in
+    // the whole morph thing? That looked bad before, and now is a serious
+    // mismatch"). V1 skipped perimeter lights as redundant — right for the
+    // MORPH (the trace already IS the room shape, there is nothing to grow
+    // toward, so no automorphRing here and the pct slider only scales the
+    // treatment's presence) but wrong for the STYLING: the flat
+    // single-colour polygon above sat beside auras with smoothed corners
+    // and a lit-material stack. So with the slider up the trace is rebuilt
+    // through the SAME automorphInsetRing pipeline the auras use, at the
+    // fixture's OWN margin (perimeterWantM — margin_cm honoured exactly as
+    // the legacy trace honours it), reshaped by the same
+    // jitter+hardness+path chain (automorphInkedRing, seeded from the
+    // ring's own centroid: the trace is a room-anchored object, and an
+    // UNPLACED perimeter light has no fixture position to seed from), and
+    // restyled per AUTOMORPH_STYLE in each style's own language. A cove
+    // line is a LINE, not a cell, so NO style fills the interior:
+    //   glow — stroke-centric material: AO and the lit cove's colour glow
+    //     in the soft tier (the "working-mode glow" the legacy trace only
+    //     had in Showcase), ink core + psglossrim bevel in the crisp tier.
+    //     On/off is the aura's own MATERIAL split, never a hex swap: lit
+    //     gets the glow and the brighter rim, off gets no glow and the
+    //     deeper AO.
+    //   blueprint — the dashed wireframe + vertex nodes, state riding
+    //     linework brightness exactly like the aura's blueprint.
+    //   nebula — one soft wide glow through the shared blur, state read as
+    //     intensity. Stroked with the shared duotone so the orb language's
+    //     colour ownership holds (no mask: psautomorphmask fades a FILL
+    //     across its bbox — on a boundary-hugging line it would just eat
+    //     the line).
+    // No weight offset on the ink: automorphFixtureWeight is a manual-
+    // FOOTPRINT cue and a trace's extent is the room, not a footprint.
+    // Everything routes through opac()/swid() so subtlety fades it, the
+    // tiers are clipped to the room like every aura, and the markup joins
+    // the floor-wide glow/edge buffers so labels stay above it. Only
+    // automorph-gated defs are referenced (psaurasoft, psglossrim, the
+    // duotone pair, psclip_N) — the F2 gating contract — and this function
+    // is only ever called with AUTOMORPH_PCT>0. data-eid rides on every
+    // path, same tooling contract as the legacy polygons.
+    const perimeterAuraSvg=(l,room,entry)=>{
+      if(!(AUTOMORPH_PCT>0) || !room || room.pts.length<3) return null;
+      const {insetPts, hardCapPx}=automorphInsetRing(room.pts, perimeterWantM(entry));
+      const ringPx=insetPts.map(p=>iso(p[0],p[1],room.z));
+      let scx=0, scy=0;
+      for(const [px,py] of ringPx){ scx+=px; scy+=py; }
+      scx/=ringPx.length; scy/=ringPx.length;
+      const {ring, d}=automorphInkedRing(ringPx, scx, scy, hardCapPx);
+      const on=l.state==="on";
+      const t=AUTOMORPH_PCT/100;
+      const ink=on?AUTOMORPH_BASE_ON:AUTOMORPH_BASE_OFF;
+      const col=bodyCol(l,entry);
+      const eidAttr=`data-eid="${escSVG(l.entity_id)}"`;
+      const clip=roomClip.get(room);
+      const clipWrap=(m)=>(m&&clip)?`<g clip-path="url(#${clip})" pointer-events="none">${m}</g>`:m;
+      if(AUTOMORPH_STYLE==="blueprint"){
+        const dashOp=opac((on?0.45:0.30)+0.40*t);
+        let nodes="";
+        for(const [px,py] of ring) nodes+=`<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="1.6" `+
+          `fill="${ink}" fill-opacity="${dashOp}" pointer-events="none"/>`;
+        return {glow:"", edge: clipWrap(
+          `<path ${eidAttr} d="${d}" fill="none" stroke="${ink}" stroke-opacity="${dashOp}" stroke-width="${swid(1.1)}" `+
+          `stroke-dasharray="4,3" stroke-linejoin="round" pointer-events="none"/>`+nodes)};
+      }
+      if(AUTOMORPH_STYLE==="nebula"){
+        return {glow: `<g filter="url(#psaurasoft)">`+clipWrap(
+          `<path ${eidAttr} d="${d}" fill="none" stroke="url(#psautomorphduo_${on?"on":"off"})" `+
+          `stroke-opacity="${opac((on?0.13:0.09)+0.22*t)}" stroke-width="${swid(6)}" `+
+          `stroke-linejoin="round" pointer-events="none"/>`)+`</g>`, edge:""};
+      }
+      // "glow": the aura's material stack minus every fill. The colour glow
+      // peaks at 0.28 at pct=100 — the exact weight the legacy Showcase
+      // cove glow carried, so a full slider lands on the familiar look.
+      const ao=`<path ${eidAttr} d="${d}" fill="none" stroke="#020617" stroke-opacity="${opac(on?0.10:0.18)}" `+
+        `stroke-width="${swid(3.5)}" pointer-events="none"/>`;
+      const coveGlow=on ? `<path ${eidAttr} d="${d}" fill="none" stroke="${col}" `+
+        `stroke-opacity="${opac(0.08+0.20*t)}" stroke-width="${swid(4.5)}" `+
+        `stroke-linejoin="round" pointer-events="none"/>` : "";
+      const edgeCore=`<path ${eidAttr} d="${d}" fill="none" stroke="${ink}" `+
+        `stroke-opacity="${opac(0.28+0.32*t)}" stroke-width="${swid(1.3)}" `+
+        `stroke-linejoin="round" pointer-events="none"/>`;
+      const edgeRim=`<path ${eidAttr} d="${d}" fill="none" stroke="url(#psglossrim)" `+
+        `stroke-opacity="${opac(on?0.55:0.35)}" stroke-width="${swid(0.9)}" `+
+        `stroke-linejoin="round" pointer-events="none"/>`;
+      return {glow: `<g filter="url(#psaurasoft)">${clipWrap(ao+coveGlow)}</g>`,
+              edge: clipWrap(edgeCore+edgeRim)};
+    };
+
+    // Automorph's rendering (Garry, 2026-09-07): a soft, neutral-grey aura
+    // drawn BEHIND the ordinary icon, growing from a tight outline at the
+    // fixture toward a target shape as AUTOMORPH_PCT rises. That target is
+    // this fixture's own NON-OVERLAPPING CELL (cellPtsM, room-local metres,
+    // from buildRoomFixtureCells) when one was computed for it — every
+    // fixture sharing a room morphs toward its own share of the room instead
+    // of every fixture piling onto the same full-room shape. Falls back to
+    // the room's own full inset (today's original v1 target) when no cell
+    // exists for this fixture — a room with only one OTHER fixture placed via
+    // an area assignment rather than a real position, or any other case the
+    // partition couldn't resolve — so a fixture never silently loses its aura
+    // over an edge case in the newer geometry.
+    // Deliberately does NOT touch markerSvg's own output — that function
+    // already carries a lot of interdependent state (health dot, hit-test
+    // rect, code chip placement, rotation) a first pass shouldn't risk
+    // breaking. This is the smaller, reviewable step: the real morph maths
+    // (automorphRing) proven and shipped, with "replace the icon's own
+    // outline" left as a deliberate follow-up once this reads well live.
+    //
+    // Returns null when no aura paints, else the markup split into TWO
+    // tiers — {glow, edge} — which the floor-wide aura pass (above the
+    // labelJobs flush) accumulates across every fixture and appends
+    // glow-tier-first: all blurred washes land under all crisp edges, so
+    // one fixture's blur can never muddy the crisp bisector edge a
+    // neighbouring cell already drew. Same two-pass discipline the pool
+    // underlay establishes for markers ("drawn for the whole floor BEFORE
+    // any marker, so one light's glow can never wash over another's
+    // glyph") — per-fixture interleaving was the one draw order that
+    // convention exists to forbid.
+    const automorphAuraSvg=(l,hx,hy,room,z,cellPtsM,entry)=>{
+      // Defensive twin of the exclusion in the partition-grouping pass
+      // above — motion/fan/temp never get a cell there any more, but this
+      // function must refuse to aura them even if ever called directly.
+      if(!(AUTOMORPH_PCT>0) || !room || room.pts.length<3 || l.isMotion || l.isFan || l.isTemp) return null;
+      // Inset stage — the shared automorphInsetRing above (smoothing,
+      // well-spaced offset, fold pruning, containment, and the hardness cap
+      // derived from the same margin). One inset constant was serving two
+      // different composition jobs. defaultPerimeterMarginM is tuned for
+      // exactly one of them: a shape sitting a plausible cove-distance off
+      // a static WALL. A resolved cell's inset does the OTHER job —
+      // separating two comparably-weighted aura objects from each other —
+      // and there 2x a wall-tuned margin between neighbours read as tiles
+      // laid nearly edge-to-edge. So the interior (fixture-vs-fixture) case
+      // gets a distinctly larger multiple of the same frame-scaled base —
+      // still pixel-constant at any zoom, by the same construction as the
+      // base — while the room-outline fallback keeps 1x, the wall-distance
+      // job the constant was actually tuned for. The roomHalfMinDim clamp
+      // stays inside the helper, outside the multiplier, so a tight cell
+      // can never be inset past its own middle.
+      const hasCell=!!(cellPtsM && cellPtsM.length>=3);
+      const {insetPts, hardCapPx}=automorphInsetRing(hasCell?cellPtsM:room.pts,
+        defaultPerimeterMarginM(frame)*(hasCell?1.6:1));
+      const roomPx=insetPts.map(p=>iso(p[0],p[1],z));
+      const iconLocal=automorphIconRing(l.shape, entry&&entry.width_cm, entry&&entry.height_cm,
+        entry&&entry.rotation, frame.scale, HEX_R);
+      // Morph toward the inset target, then the shared ink/hardness/path
+      // chain (jitter before spikes, spikes before pathing — see
+      // automorphInkedRing's own comment), seeded from the fixture's
+      // position, the aura's true anchor.
+      const morphed=automorphRing(iconLocal, hx, hy, roomPx, AUTOMORPH_PCT/100);
+      const {ring, d}=automorphInkedRing(morphed, hx, hy, hardCapPx);
+      const on=l.isMotion ? motionActive(l) : (l.isLock ? l.state==="locked" : l.state==="on");
+      // Neutral, colourless shading (Garry, 2026-09-07: "all these colors
+      // now are doing the exact opposite of keeping the visuals clean and
+      // aesthetic, the border of the rooms are already a bit much...
+      // follow the grey shaded type visual you used before"). No per-room
+      // or per-fixture hue — "on" reads as brighter, never as a different
+      // colour, so this stays quiet next to the room borders' own colour
+      // instead of competing with them. The gloss FILL's sheen ramp is
+      // psglossauto — the SAME white-to-black diagonal psgloss gives every
+      // marker and room ("one light source, upper-left, for the whole
+      // drawing"), but defined once per floor in user space across the
+      // slab's own bbox, so every differently-proportioned cell's interior
+      // is lit from the one sun instead of each stretching its own copy of
+      // the ramp; the RIM sweeps each shape's own bbox through psglossrim
+      // instead — see both gradients' comments at their defs.
+      const base=on?AUTOMORPH_BASE_ON:AUTOMORPH_BASE_OFF;
+      const t=AUTOMORPH_PCT/100;
+      // COLOUR OWNERSHIP — two features pull the fill attribute in
+      // opposite directions, reconciled by splitting the channels:
+      //  - the two SHARED duotone radialGradients (psautomorphduo_on/off —
+      //    exactly two defs however many fixtures are on screen) own every
+      //    fill INTERIOR: lighter at the centre fading to the state's base
+      //    tone at the rim, the distance-from-the-light depth cue a flat
+      //    fill can never give. Shared defs cannot carry a per-fixture
+      //    offset by construction — expected and correct.
+      //  - the per-fixture WEIGHT offset therefore expresses only through
+      //    the flat-colour INK: automorphFixtureWeight (0.25-2.5, 1 with
+      //    no recorded manual size) maps to a deterministic ±7% lightness
+      //    band — edgeCore's stroke here, blueprint's linework and nodes,
+      //    and, because nebula has no ink at all, a narrow fill-opacity
+      //    delta (±0.028 ceiling) on its single wash. A bigger manually-
+      //    sized fixture reads very slightly more present, a small one
+      //    recedes. The band sits far inside the on/off gap (the darkest
+      //    on-ink stays well lighter than the lightest off-ink), so state
+      //    stays unambiguous, and weight 1 gives exactly today's ink
+      //    (lighten() returns the hex untouched at 0), so two default-
+      //    weight neighbours — the common case — stay essentially
+      //    identical apart from edge and gap. Deterministic from the
+      //    entry the call already receives — same no-Math.random()
+      //    discipline as the cell wobble, no new seed scheme.
+      const weightOffPct=Math.max(-7, Math.min(7,
+        (automorphFixtureWeight(entry&&entry.width_cm, entry&&entry.height_cm)-1)*6));
+      const ink=lighten(base, weightOffPct);
+      const duo=`url(#psautomorphduo_${on?"on":"off"})`;
+      // opac()/swid() — the shared subtlety multipliers — live with the
+      // shared Automorph stages above, so the perimeter treatment fades
+      // through the very same two helpers.
+      // Every tier is clipped to the fixture's own room — the identical
+      // mechanism the Showcase pools use, and the reason the clipPath defs
+      // are UNGATED now (see the defs block): the wash's blur bleeds past
+      // the ring, and negative hardness spikes outward on purpose, so a
+      // wall-adjacent aura otherwise has a clear path across its room's
+      // own boundary line — worst in exactly the small rooms
+      // defaultPerimeterMarginM's own comment flags (the 1.57m bedroom
+      // arm). roomClip covers every room in both modes, but a missing id
+      // still degrades to unclipped rather than to an invalid reference,
+      // which SVG would answer by not drawing the aura at all.
+      const clip=roomClip.get(room);
+      const clipWrap=(m)=>(m&&clip)?`<g clip-path="url(#${clip})" pointer-events="none">${m}</g>`:m;
+      // Exploratory alternate treatments (Garry, 2026-09-07: "add a style
+      // pulldown to build more morph concepts... I can always remove them
+      // later") — same ring/path every style paints, only HOW it's drawn
+      // differs, so dropping one later never touches the geometry above.
+      if(AUTOMORPH_STYLE==="blueprint"){
+        // Technical/architectural linework: no fill at all, a dashed
+        // outline plus a small node at every vertex — reads as a wireframe
+        // draft of the room shape rather than a glow.
+        // State rides the one channel this style has — linework
+        // brightness: lit linework runs a step brighter than unlit at
+        // every t (0.45..0.85 vs 0.30..0.70), so on/off never comes down
+        // to the ink hex alone (the "hex swap on a static sticker" tell
+        // the other styles' material splits exist to kill). Width, dash
+        // pattern and node radius stay state-independent on purpose:
+        // heavier lit linework would read as a different pen, not a lit
+        // fixture.
+        const dashOp=opac((on?0.45:0.30)+0.40*t);
+        let nodes="";
+        for(const [px,py] of ring) nodes+=`<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="1.6" `+
+          `fill="${ink}" fill-opacity="${dashOp}" pointer-events="none"/>`;
+        // All crisp linework, no blur anywhere — the whole style rides in
+        // the edge tier so it sits above every other fixture's wash. Flat
+        // INK throughout (dashes and nodes both), so this style carries
+        // the per-fixture weight offset in its only channel; no fill
+        // interior exists here for the duotone to own.
+        return {glow:"", edge: clipWrap(
+          `<path d="${d}" fill="none" stroke="${ink}" stroke-opacity="${dashOp}" stroke-width="${swid(1.1)}" `+
+          `stroke-dasharray="4,3" stroke-linejoin="round" pointer-events="none"/>`+nodes)};
+      }
+      if(AUTOMORPH_STYLE==="nebula"){
+        // A single soft-edged wash: the mask (defined once, shared by
+        // every fixture — see psautomorphmask) fades the fill to nothing
+        // at the ring's own edge, reading as a glowing orb rather than a
+        // bounded shape with a stroke. A wash with no crisp linework at
+        // all, so it rides entirely in the glow tier. Of the glow style's
+        // material stack, only the on/off MATERIAL split fits here: the
+        // orb language has no crisp bevel to hang a rim or AO ring on, a
+        // cast shadow is gated to the glow style on purpose, and the
+        // wash already draws through psautomorphmask, so adding the
+        // masked bloom would run the same fill through the same mask
+        // twice. A lit orb simply glows heavier than an inert one —
+        // state read as intensity, not as a swapped grey alone. The fill
+        // is the shared duotone (interior depth cue, like every other fill
+        // interior); with no ink channel at all in this style, the
+        // per-fixture weight offset rides a narrow fill-opacity delta
+        // instead (±0.028 at the weight clamps — a nudge in presence,
+        // nowhere near the ~0.09 on/off intensity split, so state stays
+        // unambiguous).
+        return {glow: clipWrap(
+          `<path d="${d}" fill="${duo}" fill-opacity="${opac((on?0.26:0.17)+0.45*t+weightOffPct*0.004)}" `+
+          `stroke="none" mask="url(#psautomorphmask)" pointer-events="none"/>`), edge:""};
+      }
+      // "glow" (default): a material stack, every layer the SAME path `d`
+      // — no second geometry anywhere, so hardness/wobble/cell shape stay
+      // correct in every layer for free. Bottom to top: cast shadow,
+      // ambient-occlusion ring, wash, inner bloom (lit only) — the soft
+      // layers, blurred ONCE as a group — then crisp edgeCore, edgeRim
+      // and gloss. What each buys, and the constraint it protects:
+      //
+      //   shadow — a copy of `d` displaced along psgloss's own light-to-
+      //     dark diagonal (0.45,1.0 normalized -> 0.41,0.91), ~5% of the
+      //     ring's OWN bbox diagonal so it stays proportionate from
+      //     icon-small (t=0) to room-large (t=1). Without a displaced
+      //     dark shape nothing separates "object" from "floor it rests
+      //     on" and the aura floats as a decal — every marker already
+      //     earns its seat this way (psshade); the aura was the one
+      //     shaded surface that didn't. The ink is a flat near-black,
+      //     NOT url(#psshade): that gradient's def is Showcase-gated,
+      //     and an invalid paint reference makes SVG drop the element
+      //     entirely — the shadow would silently vanish on the working
+      //     map, where Automorph also runs. Its weight rides t like
+      //     every fill: the old flat 0.16 out-shadowed an icon-sized
+      //     low-t aura (whose own wash was half that), and was the
+      //     single heaviest slice of the over-budget stack the
+      //     wash/bloom bullet re-sums below.
+      //   ao — one wide dark stroke under the wash: the wash's fill
+      //     mutes its outer half, leaving the inner half reading as
+      //     contact darkening just inside the boundary, so the interior
+      //     reads as a form with a cross-section instead of a uniformly
+      //     lit cutout. Off fixtures get more of it — matte, inert
+      //     surfaces show deeper contact shadow — lit ones push light
+      //     out instead (the on/off split below).
+      //   wash / bloom — the room-scale presence. The five FILLS are
+      //     budgeted TOGETHER against the room's own colour — room fill
+      //     0.16 + psroomglow's 0.16 centre stop = 0.32 at its centre,
+      //     and the grey stays QUIET next to that hue — so the whole
+      //     stack (shadow 0.04 + wash 0.04 + bloom 0.04 + edgeCore fill
+      //     0.02 + gloss 0.05 x its ramp's 0.5 max stop) composites to
+      //     1-PROD(1-o) = 0.155 <= 0.16, under half the room's own at
+      //     t=1/subtlety 0. Cutting layers one at a time doesn't keep
+      //     that: the first rebalance trimmed wash/gloss while the same
+      //     edit series added bloom, the duotone edge fill and an
+      //     untapered shadow back on top, and nobody re-summed — the
+      //     stack composited to ~0.58-0.64 at centre, ~4x the ceiling,
+      //     grey OVER the hue. The thin edge, not the fills, is what
+      //     signals "distinct shape". Both fill through
+      //     the shared duotone (see the colour-ownership comment above):
+      //     lighter at the centre, base tone at the rim. The bloom (lit
+      //     fixtures only) reuses nebula's shared psautomorphmask to
+      //     fade its fill toward the ring's edge: light welling up from
+      //     inside, the one cue a re-tinted flat fill can never give.
+      //   edgeCore / edgeRim — one flat stroke all the way around was
+      //     the "flat sticker" tell: it outlines the silhouette without
+      //     saying which way the surface turns. edgeCore keeps the flat
+      //     role (in the per-fixture INK, the weight offset's channel),
+      //     dialed back for headroom; edgeRim strokes the same `d` with
+      //     psglossrim — psgloss's stops swept across this shape's OWN
+      //     bbox — landing bright on the upper-left arc and dark on the
+      //     lower-right of every shape: a lit bevel with one shared def
+      //     and zero new geometry. NOT the floor-wide psglossauto: that
+      //     ramp decided bright-vs-dark by position on the slab (a
+      //     lower-right fixture's whole rim fell past the 45% stop — no
+      //     bright arc at all), while a bevel must say which way EACH
+      //     shape's surface turns; the per-bbox sweep still points every
+      //     bright arc at the same upper-left sun. The gloss FILL below
+      //     keeps the floor ramp — that is the layer the one-sun rule
+      //     was moved for.
+      //
+      // ON vs OFF is a MATERIAL split, not a hex swap: lit gets the
+      // bloom plus a slightly heavier wash/gloss/rim; off gets no bloom,
+      // lighter fills and the deeper AO — the two states differ in how
+      // the surface behaves, not merely in which grey it wears.
+      let minX=ring[0][0], minY=ring[0][1], maxX=minX, maxY=minY;
+      for(const [px,py] of ring){
+        if(px<minX)minX=px; if(px>maxX)maxX=px;
+        if(py<minY)minY=py; if(py>maxY)maxY=py;
+      }
+      const diag=Math.hypot(maxX-minX, maxY-minY);
+      const sdx=diag*0.05*0.41, sdy=diag*0.05*0.91;
+      const shadow=`<g transform="translate(${sdx.toFixed(1)},${sdy.toFixed(1)})">`+
+        `<path d="${d}" fill="#020617" fill-opacity="${opac(0.02+0.02*t)}" stroke="none" pointer-events="none"/></g>`;
+      const ao=`<path d="${d}" fill="none" stroke="#020617" stroke-opacity="${opac(on?0.10:0.18)}" `+
+        `stroke-width="${swid(3.5)}" pointer-events="none"/>`;
+      const wash=`<path d="${d}" fill="${duo}" fill-opacity="${opac((on?0.02:0.01)+0.02*t)}" `+
+        `stroke="none" pointer-events="none"/>`;
+      const bloom=on ? `<path d="${d}" fill="${duo}" fill-opacity="${opac(0.02+0.02*t)}" `+
+        `stroke="none" mask="url(#psautomorphmask)" pointer-events="none"/>` : "";
+      const edgeCore=`<path d="${d}" fill="${duo}" fill-opacity="${opac(0.01+0.01*t)}" `+
+        `stroke="${ink}" stroke-opacity="${opac(0.28+0.32*t)}" stroke-width="${swid(1.3)}" `+
+        `stroke-linejoin="round" pointer-events="none"/>`;
+      const edgeRim=`<path d="${d}" fill="none" stroke="url(#psglossrim)" `+
+        `stroke-opacity="${opac(on?0.55:0.35)}" stroke-width="${swid(0.9)}" `+
+        `stroke-linejoin="round" pointer-events="none"/>`;
+      const gloss=`<path d="${d}" fill="url(#${glossAutoId})" fill-opacity="${opac((on?0.02:0.01)+0.03*t)}" `+
+        `stroke="none" pointer-events="none"/>`;
+      // ALL the soft layers share ONE blur: the filter sits on the outer
+      // group, so the renderer blurs a single composited raster instead
+      // of rasterizing up to four separate feGaussianBlur passes per
+      // fixture — done the obvious way (one filter attribute per path)
+      // that would be ~400 blur passes at the ~100-fixture scale this
+      // feature targets, for an effect whose whole brief is "cheap".
+      // The blur is OUTSIDE the clip — filter on the outer group, clip
+      // on the inner — so the cut edge feathers a couple of pixels over
+      // the wall exactly the way the clipped pools already do, instead
+      // of stopping in a razor line. psaurasoft, not psclipsoft: the
+      // shadow's offset copy grows this group's bbox, so the aura owns a
+      // clone with a wider filter region (see the def's comment) while
+      // the pools keep their tighter, cheaper one untouched.
+      return {glow: `<g filter="url(#psaurasoft)">${clipWrap(shadow+ao+wash+bloom)}</g>`,
+              edge: clipWrap(edgeCore+edgeRim+gloss)};
+    };
+
     // Showcase underlay for one fixture: the pool it throws on the floor, and
     // the shadow it casts under itself. Both are drawn for the whole floor
     // BEFORE any marker, so one light's glow can never wash over another's
@@ -1598,45 +3192,71 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     // coordinates and room polygons are in scope — {col} overrides the pool
     // colour (scene preview), {spill} is wall-spill line segments already
     // projected to px: [[x1,y1,x2,y2,fade], ...].
-    // The blue pulse a triggered motion sensor throws — both modes, drawn
-    // in the same underlay pass as the light pools so it sits beneath every
-    // marker. Two layers: a breathing soft disc, and a ring that expands
-    // and fades, radar-style, on a shared 1.6s clock.
-    const motionPulseSvg=(hx,hy,eid)=>{
+    // The pulse a CURRENTLY TRIGGERED motion sensor throws — drawn in the
+    // same underlay pass as the light pools so it sits beneath every marker.
+    // Two layers: a breathing soft disc, and a ring that expands and fades,
+    // radar-style, on a shared 1.6s clock.
+    //
+    // Drawn while a sensor is genuinely "on" OR still inside the shared
+    // hold window since its last transition (MOTION_HOLD_MS — see the call
+    // site), and its colour is ALWAYS the fixed active hue
+    // (MOTION_COLOR_STOPS[0][1]) — never elapsed-shifted, whatever the
+    // device class or how long it has been "on". Three things this fixes,
+    // all from Garry's own live reports:
+    //   0. (2026-09-05, round three) An alarm panel's PIR zone self-clears
+    //      back to "off" ~5 seconds after triggering, so a flash tied to
+    //      the raw state alone lasted five SECONDS there while other
+    //      sensors' firmware held it for minutes — the hold window gives
+    //      every class the same minimum flash from the same real event.
+    //   1. (2026-09-03, the original problem this pulse exists to solve)
+    //      A short-hold PIR, a long-retrigger PIR and a sustained
+    //      occupancy/radar unit used to each look different simply because
+    //      their hardware holds "on" for a different length of time. A
+    //      fixed colour while triggered is the most direct fix — three
+    //      different pieces of hardware now look IDENTICAL while active,
+    //      which a shared elapsed clock (tried first, see git history)
+    //      does not actually guarantee.
+    //   2. (2026-09-05) That EARLIER fix — one continuous elapsed-since-
+    //      last-changed clock running whether "on" or "off" — swapped in a
+    //      worse inconsistency: a genuine occupancy/radar sensor that
+    //      stays "on" for hours while someone is continuously present has
+    //      a last_changed that is also hours old, so its pulse faded all
+    //      the way to the "long since quiet" colour while the room was
+    //      still actively occupied — backwards for "simple occupancy
+    //      viewing" (Garry: "I need consistent behaviour regardless of the
+    //      sensor type"). Triggered now always means the same thing, on
+    //      sight, for every sensor class: something is happening HERE,
+    //      RIGHT NOW. The elapsed clock still runs, but only once a sensor
+    //      goes QUIET (motionRecentPulseSvg, below) — that is genuinely a
+    //      "how long ago" question, and every class starts that clock at
+    //      the same place (last_changed, the moment it went quiet).
+    const motionPulseSvg=(hx,hy,eid,degSweep)=>{
       const r0=HEX_R*1.15;
+      const col=`hsl(${degSweep.toFixed(0)},75%,58%)`;
       return `<g class="lpulse" data-eid="${escSVG(eid)}" pointer-events="none">`+
         `<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${(r0*1.6).toFixed(1)}" fill="url(#psmotion)" opacity="0.55">`+
         `<animate attributeName="opacity" values="0.55;0.2;0.55" dur="1.6s" repeatCount="indefinite"/>`+
         `</circle>`+
-        `<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${r0.toFixed(1)}" fill="none" stroke="${MOTION_PULSE}" stroke-width="1.6">`+
+        `<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${r0.toFixed(1)}" fill="none" stroke="${col}" stroke-width="1.6">`+
         `<animate attributeName="r" values="${(r0*0.7).toFixed(1)};${(r0*2.4).toFixed(1)}" dur="1.6s" repeatCount="indefinite"/>`+
         `<animate attributeName="opacity" values="0.8;0" dur="1.6s" repeatCount="indefinite"/>`+
         `</circle></g>`;
     };
 
-    // A sensor that has GONE QUIET still says how long ago, at a glance.
-    // Revised twice against the same complaint, both times about the SAME
-    // thing: a smooth sweep is invisible at a glance, and the milestones
-    // must actually be reachable in the window that matters. Garry's final
-    // spec: "start blue, stay blue for 5 minutes, and then cycle thru all
-    // colors and end on green after 2 hours." A STEP function, held stages,
-    // front-loaded (blue gets a firm 5-minute hold, then a big jump) because
-    // "how long ago, roughly" needs fine resolution early and only coarse
-    // resolution once it has been a while — the last stage (green) is
-    // reached at the 2-hour mark and held from there, not swept to at the
-    // edge of some much longer cutoff. The sweep runs the LONG way round
-    // the wheel (through violet/magenta/red/orange/yellow), not the short
-    // way through cyan/teal, so it actually passes through every colour
-    // family on the way to green rather than just the two hues nearest blue.
-    const MOTION_COLOR_STOPS=[
-      [0,          240],  // blue — the active colour, holds firm for 5 min
-      [5*60*1000,  280],  // violet — the first, deliberately obvious jump
-      [20*60*1000, 320],  // magenta
-      [40*60*1000,   0],  // red
-      [65*60*1000,  40],  // orange
-      [90*60*1000,  80],  // yellow
-      [120*60*1000,120],  // green — reached at 2h, held from there
-    ];
+    // The ONE shared answer to "is this motion sensor active right now":
+    // genuinely "on", or within the hold window of its last transition.
+    // Every element that lights up for activity — the marker ICON's lit
+    // body and the flashing pulse beneath it — must go through this, or
+    // they drift apart: round four (Garry) was exactly that, "the blue
+    // solid flash for the motion icon still goes out ... The ring might
+    // be OK, but not the icon" — the pulse had the hold window, the icon
+    // was still keyed to the raw 5-second hardware hold.
+    const motionActive=(l)=>{
+      if(l.state==="on") return true;
+      const lastMs=l.last_changed ? Date.parse(l.last_changed) : NaN;
+      const e=NOW_MS-lastMs;
+      return e>=0 && e<MOTION_HOLD_MS;
+    };
     const motionRecentHue=(elapsedMs)=>{
       let hue=MOTION_COLOR_STOPS[0][1];
       for(const [atMs,h] of MOTION_COLOR_STOPS){ if(elapsedMs>=atMs) hue=h; else break; }
@@ -1751,10 +3371,20 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     const jobs=[];
     // Collapsed piles of unplaced devices (use-mode), flushed with the markers.
     const stacks=[];
+    // Everything from a room's own NAME onward (label, provisional pile,
+    // unplaced count) is deferred the same way, into its own pass run only
+    // after every room's polygon on this floor is drawn (Garry, 2026-09-07:
+    // a name near a shared wall was landing under a NEIGHBOURING room's
+    // boundary whenever that room happened to iterate later — this was
+    // arbitrary array order, not geometry, so it read as "sometimes on top,
+    // sometimes under" with no visible pattern). Labels now paint over every
+    // boundary line on the floor, always, the same way markers already paint
+    // over every room.
+    const labelJobs=[];
 
     // Rooms, straight from the metre fabric.
     for(const r of hereRooms){
-      const color=roomColor(r.room, model);
+      const color=liveRoomColor(r.room, roomColor(r.room, model));
       const ipts=r.pts.map(p=>iso(p[0],p[1],z));
       const pp=ipts.map(pt).join(" ");
       const cx=r.pts.reduce((a,p)=>a+p[0],0)/r.pts.length;
@@ -1772,8 +3402,24 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       let liy=Math.min(...ipts.map(p=>p[1]))+8;
       // The label's own rendered footprint, computed here (not down by the
       // <text> itself) because the collision check below needs it.
-      const rfs=SHOW?6.6:7.4;
+      // Trimmed ~10% (Garry, 2026-09-07: room names were "too much space" —
+      // shrink-to-fit below only ever shrinks further from here, never grows).
+      const rfsBase=SHOW?5.9:6.7;
       const rtxt=SHOW?String(r.room).toUpperCase():String(r.room);
+      // Shrink to fit the room's own isometric width — a fixed size read
+      // fine in an average room but visibly overflowed a small one, live on
+      // Garry's house: "PowderRoom" drew 61.5px wide inside a room only
+      // 48px wide. Only ever shrinks, never grows past the base size for a
+      // room with room to spare — a small gap (FIT_MARGIN) to the room's
+      // own edges keeps the label from touching them exactly, and MIN_RFS
+      // is the same small-text floor CODE_PX and the unplaced-cluster count
+      // already use elsewhere on this map.
+      const roomIsoW=Math.max(...ipts.map(p=>p[0]))-Math.min(...ipts.map(p=>p[0]));
+      const naturalW=rtxt.length*rfsBase*(SHOW?0.78:0.6)+10;
+      const FIT_MARGIN=0.88, MIN_RFS=4.5;
+      const rfs=(roomIsoW>0 && naturalW>roomIsoW*FIT_MARGIN)
+        ? Math.max(MIN_RFS, rfsBase*(roomIsoW*FIT_MARGIN)/naturalW)
+        : rfsBase;
       const rw=rtxt.length*rfs*(SHOW?0.78:0.6)+10, rh=rfs*1.9;
       // ...and if a fixture happens to sit on that spot anyway, the name steps
       // up out of the way rather than being drawn through. The halo keeps it
@@ -1807,75 +3453,200 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         s+=`<polygon points="${pp}" fill="${color}" fill-opacity="0.16" stroke="${color}" stroke-width="1.6" opacity="1"/>`;
         s+=`<polygon points="${pp}" fill="url(#${roomGlowIds.get(color)})" stroke="none" pointer-events="none"/>`;
       }
-      // paint-order puts the dark stroke UNDER the glyphs, so the name stays
-      // legible over the floor hatch and over a slab edge it happens to cross.
-      // Showcase sets it in tracked small caps — the convention every printed
-      // plan uses for a room name, and it stops competing with the fixture codes.
-      // The room's name is a TAP TARGET (data-role="room"): the sidebar opens
-      // the room's sheet from it — every light in the room, all off, all on —
-      // and the builder selects the room's lights. A transparent box behind
-      // the text takes the tap; the glyph strokes alone would be a needle.
-      {
-        s+=`<g class="lroom" data-role="room" data-room="${escSVG(r.room)}" data-z="${z}" style="cursor:pointer">`+
-          `<rect x="${(lix-rw/2).toFixed(1)}" y="${(liy-rh/2).toFixed(1)}" width="${rw.toFixed(1)}" height="${rh.toFixed(1)}" `+
-          `rx="3" fill="transparent" stroke="none" pointer-events="all"/>`;
-      }
-      s+=`<text x="${Math.round(lix)}" y="${Math.round(liy)}" text-anchor="middle" dominant-baseline="middle" `+
-        `fill="${color}" font-size="${SHOW?"6.6":"7.4"}" font-family="system-ui,sans-serif" font-weight="600" `+
-        (SHOW?`letter-spacing="0.16em" `:``)+
-        `paint-order="stroke" stroke="#071008" stroke-width="2.5" stroke-linejoin="round" `+
-        `opacity="${SHOW?"0.72":"0.95"}" pointer-events="none">`+
-        `${escSVG(SHOW?String(r.room).toUpperCase():r.room)}</text></g>`;
-      // Room assignment isn't known yet (registry still loading) — show a
-      // single pulsing placeholder instead of blocking the whole map on
-      // a multi-MB registry fetch; real hexes replace it once it lands.
-      if(lightsLoading){
-        s+=`<polygon points="${hexPts(ccx,ccy,HEX_R)}" fill="#374151" stroke="#60a5fa" stroke-width="2" opacity="0.5">`+
-          `<animate attributeName="opacity" values="0.25;0.65;0.25" dur="1.2s" repeatCount="indefinite"/>`+
-          `</polygon>`;
-        continue;
-      }
-      // Hexagon cluster for this room's unplaced lights — a light with a real
-      // position was already drawn at it.
-      const roomLights=(byRoom[r.room]||[]).filter(l=>!hiddenEids.has(l.entity_id) && !placed[l.entity_id]);
-      if(!roomLights.length) continue;
-      // A perimeter light traces its ROOM, which is already known here —
-      // no placement needed to see it. Unplaced means no entry, so this
-      // draws at the default margin; dragging it onto the map is only for
-      // adjusting margin, not for making the trace appear at all.
-      for(const l of roomLights) if(l.shape==="perimeter") s+=perimeterSvg(l, r, null);
-      // Use-mode: the pile becomes one chip. The chip is drawn with the
-      // markers (a job with no light) so it sits above the pools and the
-      // room fill like a marker would.
-      if(COLLAPSE){
-        const eids=roomLights.map(l=>l.entity_id);
-        const anyOn=roomLights.some(l=>l.state==="on");
-        stacks.push([r.room, eids, anyOn, ccx, ccy, z]);
-        continue;
-      }
-      const offsets=hexCluster(roomLights.length, HEX_R);
-      // Build-mode: the pile stays a pile (drag one out to place it), but it
-      // is VISIBLY provisional — a dashed ring round the cluster says "these
-      // are inferred from the room, not measured", and how many there are.
-      {
-        let rr=0;
-        for(const [dx,dy] of offsets) rr=Math.max(rr, Math.hypot(dx,dy));
-        rr+=HEX_R+3;
-        s+=`<circle class="lprov" cx="${ccx.toFixed(1)}" cy="${ccy.toFixed(1)}" r="${rr.toFixed(1)}" fill="none" `+
-          `stroke="#94a3b8" stroke-width="0.7" stroke-dasharray="3,2.5" opacity="${SHOW?0.28:0.45}" pointer-events="none"/>`;
-        if(!SHOW && !HIDECODES){
-          const pfs=Math.max(4.5, CODE_PX*0.85);
-          s+=`<text x="${ccx.toFixed(1)}" y="${(ccy+rr+pfs*0.9).toFixed(1)}" text-anchor="middle" dominant-baseline="middle" `+
-            `font-family="system-ui,sans-serif" font-size="${pfs.toFixed(1)}" fill="#94a3b8" opacity="0.7" `+
-            `pointer-events="none">${roomLights.length} unplaced</text>`;
+      // Deferred to labelJobs (see above): the name itself, plus everything
+      // that was drawn right after it — the loop below runs these only once
+      // every room's polygon on this floor is already painted.
+      labelJobs.push(() => {
+        // paint-order puts the dark stroke UNDER the glyphs, so the name
+        // stays legible over the floor hatch and over a slab edge it happens
+        // to cross. Showcase sets it in tracked small caps — the convention
+        // every printed plan uses for a room name, and it stops competing
+        // with the fixture codes. The room's name is a TAP TARGET
+        // (data-role="room"): the sidebar opens the room's sheet from it —
+        // every light in the room, all off, all on — and the builder selects
+        // the room's lights. A transparent box behind the text takes the
+        // tap; the glyph strokes alone would be a needle.
+        {
+          s+=`<g class="lroom" data-role="room" data-room="${escSVG(r.room)}" data-z="${z}" style="cursor:pointer">`+
+            `<rect x="${(lix-rw/2).toFixed(1)}" y="${(liy-rh/2).toFixed(1)}" width="${rw.toFixed(1)}" height="${rh.toFixed(1)}" `+
+            `rx="3" fill="transparent" stroke="none" pointer-events="all"/>`;
         }
-      }
-      roomLights.forEach((l,idx)=>{
-        const [dx,dy]=offsets[idx];
-        const fx=SHOW&&FIELD ? {col: fieldColOf(cx,cy,z)} : undefined;
-        jobs.push([l, ccx+dx, ccy+dy, null, `data-z="${z}"`, roomClip.get(r), fx]);
+        // Lighter and smaller than before (Garry, 2026-09-07: "takes up too
+        // much space" and needs to stay "somewhat transparent" over whatever
+        // it crosses) — a thinner halo and a lower opacity so a marker or
+        // boundary line underneath still reads through it.
+        s+=`<text x="${Math.round(lix)}" y="${Math.round(liy)}" text-anchor="middle" dominant-baseline="middle" `+
+          `fill="${color}" font-size="${rfs.toFixed(2)}" font-family="system-ui,sans-serif" font-weight="600" `+
+          (SHOW?`letter-spacing="0.16em" `:``)+
+          `paint-order="stroke" stroke="#071008" stroke-width="1.8" stroke-linejoin="round" `+
+          `opacity="${SHOW?"0.6":"0.78"}" pointer-events="none">`+
+          `${escSVG(SHOW?String(r.room).toUpperCase():r.room)}</text></g>`;
+        // Room assignment isn't known yet (registry still loading) — show a
+        // single pulsing placeholder instead of blocking the whole map on
+        // a multi-MB registry fetch; real hexes replace it once it lands.
+        if(lightsLoading){
+          s+=`<polygon points="${hexPts(ccx,ccy,HEX_R)}" fill="#374151" stroke="#60a5fa" stroke-width="2" opacity="0.5">`+
+            `<animate attributeName="opacity" values="0.25;0.65;0.25" dur="1.2s" repeatCount="indefinite"/>`+
+            `</polygon>`;
+          return;
+        }
+        // Hexagon cluster for this room's unplaced lights — a light with a
+        // real position was already drawn at it. A door/window never joins
+        // this pile: dragging one out of a room-centre cluster to "place" it
+        // is exactly the meaningless interaction this class was pulled out
+        // of (see the `lights` filter above and the barrier pass below).
+        const roomLights=(byRoom[r.room]||[]).filter(l=>!hiddenEids.has(l.entity_id) && !placed[l.entity_id] && !l.isDoor);
+        if(!roomLights.length) return;
+        // A perimeter light traces its ROOM, which is already known here —
+        // no placement needed to see it. Unplaced means no entry, so this
+        // draws at the default margin; dragging it onto the map is only for
+        // adjusting margin, not for making the trace appear at all. With
+        // Automorph up the floor-wide tier pass draws these instead (same
+        // fixtures, same filter — see its unplaced-perimeter loop), so the
+        // legacy call stands down rather than double-drawing.
+        for(const l of roomLights) if(l.shape==="perimeter" && !(AUTOMORPH_PCT>0)) s+=perimeterSvg(l, r, null);
+        // Use-mode: the pile becomes one chip. The chip is drawn with the
+        // markers (a job with no light) so it sits above the pools and the
+        // room fill like a marker would.
+        if(COLLAPSE){
+          const eids=roomLights.map(l=>l.entity_id);
+          const anyOn=roomLights.some(l=>l.state==="on");
+          stacks.push([r.room, eids, anyOn, ccx, ccy, z]);
+          return;
+        }
+        const offsets=hexCluster(roomLights.length, HEX_R);
+        // Build-mode: the pile stays a pile (drag one out to place it), but
+        // it is VISIBLY provisional — a dashed ring round the cluster says
+        // "these are inferred from the room, not measured", and how many
+        // there are.
+        {
+          let rr=0;
+          for(const [dx,dy] of offsets) rr=Math.max(rr, Math.hypot(dx,dy));
+          rr+=HEX_R+3;
+          s+=`<circle class="lprov" cx="${ccx.toFixed(1)}" cy="${ccy.toFixed(1)}" r="${rr.toFixed(1)}" fill="none" `+
+            `stroke="#94a3b8" stroke-width="0.7" stroke-dasharray="3,2.5" opacity="${SHOW?0.28:0.45}" pointer-events="none"/>`;
+          if(!SHOW && !HIDECODES){
+            const pfs=Math.max(4.5, CODE_PX*0.85);
+            s+=`<text x="${ccx.toFixed(1)}" y="${(ccy+rr+pfs*0.9).toFixed(1)}" text-anchor="middle" dominant-baseline="middle" `+
+              `font-family="system-ui,sans-serif" font-size="${pfs.toFixed(1)}" fill="#94a3b8" opacity="0.7" `+
+              `pointer-events="none">${roomLights.length} unplaced</text>`;
+          }
+        }
+        roomLights.forEach((l,idx)=>{
+          const [dx,dy]=offsets[idx];
+          const fx=SHOW&&FIELD ? {col: fieldColOf(cx,cy,z)} : undefined;
+          // Trailing false: the unplaced/room-cluster path never gets an
+          // aura (only the floor-wide aura pass over PLACED lights calls
+          // automorphAuraSvg), so its glyph must never be suppressed —
+          // hiding it here would leave nothing drawn at all.
+          jobs.push([l, ccx+dx, ccy+dy, null, `data-z="${z}"`, roomClip.get(r), fx, false]);
+        });
       });
     }
+    // ── Door/window barriers: the one wall this map ever draws, and only a
+    // LINKED opening — an ordinary rf_barriers_m wall stays Rooms-tab-only;
+    // this is narrowly the open/closed indicator the whole feature is for
+    // (docs/IDEA_DOOR_WINDOW_BARRIERS.md, step 5; Garry, 2026-09-08: "I want
+    // the lighting map to clearly show when a door or window is left open").
+    {
+      const barDim = CLASSF && CLASSF!=="door" ? 0.22 : 1;
+      for(const bar of ((model && model.rf_barriers_m) || [])){
+        if(!bar.linked_entity_id || hiddenEids.has(bar.linked_entity_id)) continue;
+        if(frame.levelOf(String(bar.floor_id || "main"))!==z) continue;
+        const bpts=(bar.points_m||[]).map(p=>[Number(p[0]), Number(p[1])]);
+        if(bpts.length<2 || bpts.some(p=>!Number.isFinite(p[0])||!Number.isFinite(p[1]))) continue;
+        const dl=lightsByEid[bar.linked_entity_id];
+        const isOpen=!!(dl && dl.state==="on");
+        const ppx=bpts.map(p=>pt(iso(p[0],p[1],z))).join(" ");
+        s+=isOpen
+          ? `<polyline points="${ppx}" fill="none" stroke="${DOOR_BORDER}" stroke-width="2" `+
+            `stroke-dasharray="3,5" stroke-linecap="round" opacity="${(0.55*barDim).toFixed(2)}" pointer-events="none"/>`
+          : `<polyline points="${ppx}" fill="none" stroke="#94a3b8" stroke-width="2.6" `+
+            `stroke-linecap="round" opacity="${(0.85*barDim).toFixed(2)}" pointer-events="none"/>`;
+        // The two points where this opening meets the rest of the wall it
+        // was split from — Garry, 2026-09-08: "a small purple dot showing on
+        // the two sides where the opening starts and ends", in BOTH states
+        // (it marks WHERE the door is, not whether it's open). #9333ea is
+        // deliberately not maps.js's _MAT_COLORS.custom purple (#a855f7) —
+        // checked, not assumed, per the design doc's own warning.
+        for(const p of [bpts[0], bpts[bpts.length-1]]){
+          const [dx,dy]=iso(p[0],p[1],z);
+          s+=`<circle cx="${dx.toFixed(1)}" cy="${dy.toFixed(1)}" r="2.6" fill="#9333ea" `+
+            `stroke="#1b0f24" stroke-width="0.8" opacity="${barDim.toFixed(2)}" pointer-events="none"/>`;
+        }
+      }
+    }
+    // ── Automorph auras: the whole floor's, in two tiers, under the labels.
+    // Computed HERE — after every room's fill/border above is already in s,
+    // before the deferred label pass below runs — because the auras used to
+    // be appended from the placed-lights loop, which runs after the labels:
+    // every aura painted OVER its own room's name, the exact opposite of
+    // the convention documented above labelJobs ("Labels now paint over
+    // every boundary line on the floor, always"), and worst precisely where
+    // the name always sits — a cell reaching the room's top edge. Fixture
+    // CODE chips never had the problem (they defer into the marker pass);
+    // this ends the inconsistent treatment between the two label kinds.
+    //
+    // Two floor-wide buffers, not per-fixture concatenation: every
+    // fixture's blurred glow flushes before any fixture's crisp edge, so a
+    // later neighbour's wash can never muddy the shared cell bisector an
+    // earlier fixture's edge already drew — the same underlay discipline
+    // the light pools document for markers. Final floor order, bottom to
+    // top: room fills/borders, all aura glow, all aura edges, labels,
+    // markers/glyphs.
+    //
+    // auraByEid records which fixtures REALLY painted: the placed-lights
+    // loop below no longer generates the aura, but its suppressGlyph
+    // decision (hide the old glyph body only when an aura replaced it)
+    // still has to be per-fixture and true to what was emitted — a hallway
+    // fixture outside every room polygon gets no aura here, so hiding its
+    // glyph too would leave nothing drawn there at all.
+    const auraByEid=new Map();
+    if(AUTOMORPH_PCT>0){
+      let auraGlow="", auraEdge="";
+      for(const pl of hereLights){
+        if(hiddenEids.has(pl.eid)) continue;
+        const l=lightsByEid[pl.eid];
+        if(!l) continue;
+        // Same position ray-cast the partition pass above used to group
+        // this floor's fixtures, so the aura and its cell agree on the room.
+        let room=null;
+        for(const r of hereRooms){ if(pointInRoom(r.pts, pl.x, pl.y)){ room=r; break; } }
+        // A perimeter light's trace joins these SAME tiers while the
+        // slider is up (restyled, never morphed — see perimeterAuraSvg);
+        // the legacy trace call in the placed loop below stands down then.
+        // auraByEid stays out of it: the suppressGlyph decision is about
+        // hiding a glyph BODY an aura replaced, and a perimeter marker
+        // hides its own body by its own precedent already.
+        if(l.shape==="perimeter"){
+          const tiers=perimeterAuraSvg(l, room, pl.lp);
+          if(tiers){ auraGlow+=tiers.glow; auraEdge+=tiers.edge; }
+          continue;
+        }
+        const cellsInRoom=room && roomFixtureCells.get(room);
+        const cellPtsM=cellsInRoom && cellsInRoom.get(pl.eid);
+        const [hx,hy]=iso(pl.x, pl.y, z);
+        const tiers=automorphAuraSvg(l, hx, hy, room, z, cellPtsM, pl.lp);
+        if(!tiers) continue;
+        auraByEid.set(pl.eid, true);
+        auraGlow+=tiers.glow; auraEdge+=tiers.edge;
+      }
+      // Unplaced perimeter lights (room via HA area only, no placement
+      // entry) trace their room too — the same set the label job's legacy
+      // call walks, filtered the same way — but with Automorph up the
+      // trace belongs in these tiers, under the labels, with every other
+      // aura. Same lightsLoading gate as that job: no traces while the
+      // registry is still loading.
+      if(!lightsLoading) for(const r of hereRooms){
+        for(const l of (byRoom[r.room]||[])){
+          if(hiddenEids.has(l.entity_id) || placed[l.entity_id] || l.shape!=="perimeter") continue;
+          const tiers=perimeterAuraSvg(l, r, null);
+          if(tiers){ auraGlow+=tiers.glow; auraEdge+=tiers.edge; }
+        }
+      }
+      s+=auraGlow+auraEdge;
+    }
+    for(const fn of labelJobs) fn();
 
     // Placed lights — metres from the fabric, through the same projection the
     // rooms just used.
@@ -1887,12 +3658,25 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // Which room this fixture sits in — from its POSITION, the same
       // ray-cast the fit cap uses. Outside every polygon (a hallway, the
       // garden) it is left unclipped/untraced. Needed in BOTH modes now: a
-      // perimeter light's shape depends on it, not only Showcase's pool clip.
+      // perimeter light's shape depends on it, not only Showcase's pool
+      // clip. (The aura resolves its own room in the floor-wide tier pass
+      // above, so it no longer forces this ray-cast here.)
       let room=null;
       if(SHOW || l.shape==="perimeter"){
         for(const r of hereRooms){ if(pointInRoom(r.pts, pl.x, pl.y)){ room=r; break; } }
       }
-      if(l.shape==="perimeter") s+=perimeterSvg(l, room, pl.lp);
+      // With Automorph up the floor-wide tier pass above already drew this
+      // fixture's trace (perimeterAuraSvg) under the labels; the legacy
+      // call stands down rather than double-drawing.
+      if(l.shape==="perimeter" && !(AUTOMORPH_PCT>0)) s+=perimeterSvg(l, room, pl.lp);
+      // Whether an aura ACTUALLY painted for this fixture — consulted from
+      // the floor-wide tier pass, which recorded every fixture it emitted
+      // markup for. The markup itself now lands up there (two tiers under
+      // the labels), but THIS per-fixture record, not the bare slider
+      // value, is still what may suppress the old glyph: a hallway fixture
+      // outside every room polygon gets no aura, so hiding its glyph too
+      // would leave nothing drawn there at all.
+      const auraPainted=!!auraByEid.get(pl.eid);
       let clip, fx;
       if(SHOW){
         clip=room?roomClip.get(room):undefined;
@@ -1912,7 +3696,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         }
         if(col||spillSegs) fx={col, spill:spillSegs};
       }
-      jobs.push([l, hx, hy, pl.lp, `data-z="${z}" data-placed="1"`, clip, fx]);
+      jobs.push([l, hx, hy, pl.lp, `data-z="${z}" data-placed="1"`, clip, fx, auraPainted]);
     }
 
     if(SHOW){
@@ -1925,7 +3709,10 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // A contact shadow seats a MARKER on the floor; a perimeter light's
       // marker is hidden (only its hit space and code remain), so a shadow
       // there would be a smudge under nothing.
-      for(const [l2,hx,hy] of jobs) if(l2.shape!=="perimeter") s+=shadeSvg(hx,hy);
+      // ...and the same reasoning excludes an aura-suppressed glyph (the
+      // tuple's trailing flag): its marker is hidden too, so a shadow
+      // there would equally be a smudge under nothing.
+      for(const j2 of jobs) if(j2[0].shape!=="perimeter" && !j2[7]) s+=shadeSvg(j2[1],j2[2]);
 
       // ── Isolux contours — the engineer's view, honest because the grid is
       // real metres and the sources are the fixtures' real positions and
@@ -1982,29 +3769,63 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         }
       }
     }
-    // Triggered motion sensors pulse blue beneath their markers — BOTH
-    // modes, unlike the light pools above: a tripped sensor is live status,
-    // not a presentation effect.
+    // Motion sensors pulse beneath their markers — live status, not a
+    // presentation effect. Elapsed since the ENTITY'S OWN last_changed
+    // still runs on ONE clock whichever state a sensor is in (the moment
+    // it started triggering while "on", the moment it stopped while
+    // "off") — that part stays: it is still what decides when a stuck-"on"
+    // sensor should vanish rather than being drawn forever. What no longer
+    // depends on that elapsed value is the ACTIVE colour itself — see
+    // motionPulseSvg's own comment for why a fixed hue while triggered, not
+    // an elapsed-shifted one, is what actually makes a five-second-hold
+    // PIR, a twenty-minute one, and a sustained occupancy sensor read the
+    // same. Past the outer cutoff nothing is drawn at all, on or off: a
+    // sensor still reporting "on" six hours later is a stuck sensor, not
+    // six hours of continuous fresh motion.
     if(LOCATE_EID){
       const found=jobs.find(j=>j[0].entity_id===LOCATE_EID);
       if(found) s+=locateSvg(found[1],found[2]);
     }
     for(const [l2,hx,hy] of jobs){
       if(!l2.isMotion) continue;
-      if(l2.state==="on"){ s+=motionPulseSvg(hx,hy,l2.entity_id); continue; }
-      // Quiet now — was it quiet RECENTLY? last_changed is when it last
-      // flipped state, so while off that IS when it stopped tripping. No
-      // timestamp (or an unparsable one) makes elapsed NaN, and every
-      // comparison below is false for NaN — that's the bail-out, nothing
-      // extra needed for a missing last_changed.
+      // No timestamp (or an unparsable one) makes rawElapsed NaN. While OFF
+      // that is a genuine bail-out — with no known quiet-since time there is
+      // no recency to show. While ON it is not: the sensor is demonstrably
+      // active RIGHT NOW regardless of whether last_changed happened to
+      // come through, so a missing/bad timestamp there falls back to
+      // elapsed 0 rather than drawing nothing and silently losing the one
+      // signal ("this sensor just tripped") the marker exists to show.
       const lastMs=l2.last_changed ? Date.parse(l2.last_changed) : NaN;
-      const elapsed=NOW_MS-lastMs;
-      if(elapsed>=0 && elapsed<MOTION_RECENT_MS) s+=motionRecentPulseSvg(hx,hy, motionRecentHue(elapsed), l2.entity_id);
+      const rawElapsed=NOW_MS-lastMs;
+      const elapsed=(l2.state==="on" && !(rawElapsed>=0)) ? 0 : rawElapsed;
+      if(!(elapsed>=0) || elapsed>=MOTION_RECENT_MS) continue;
+      // The FLASHING treatment runs while a sensor is genuinely "on" OR is
+      // still inside the shared hold window since its last transition —
+      // NOT merely while the raw state is "on". The raw "on" duration is a
+      // hardware artefact: an alarm panel's PIR zone clears itself after
+      // ~5 seconds, a standalone PIR's retrigger timer holds for minutes,
+      // a radar unit holds for as long as someone is present. Tying the
+      // flash to the raw flag alone meant the alarm zones flashed for five
+      // SECONDS while other sensors flashed for minutes, for the identical
+      // real-world event (Garry: "Make them all behave the same way").
+      // Because last_changed also resets on the on→off transition, a
+      // short-hold sensor's off-flip lands within seconds of the trigger
+      // itself, so "within the hold window of the last transition" gives
+      // every class the same minimum flash — and a sensor whose hardware
+      // honestly still claims "on" (sustained presence) keeps flashing for
+      // as long as it does, which is the one difference that reflects the
+      // ROOM rather than the firmware.
+      if(motionActive(l2)) s+=motionPulseSvg(hx,hy,l2.entity_id,MOTION_COLOR_STOPS[0][1]);
+      else s+=motionRecentPulseSvg(hx,hy,motionRecentHue(elapsed),l2.entity_id);
     }
     // Halos go under EVERY marker on the floor (see haloSvg); then the
     // markers; then the use-mode stack chips, which stand in for markers.
     if(HALO) for(const [l2,hx,hy] of jobs) s+=haloSvg(l2,hx,hy);
-    for(const j of jobs) s+=markerSvg(...j);
+    // Explicit arguments, not a blind spread: the tuple's positions 5/6
+    // are clip/fx (consumed by the glow/shade passes above, not by
+    // markerSvg), and position 7 is the aura-painted flag — a spread would
+    // silently hand markerSvg the clip id as its suppressGlyph parameter.
+    for(const j of jobs) s+=markerSvg(j[0], j[1], j[2], j[3], j[4], !!j[7]);
     for(const st of stacks) s+=stackChipSvg(...st);
 
     // Floor level badge
@@ -2031,10 +3852,16 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   // interactive element here is rebuilt fresh each time.
   if(opts.dropMarker){
     const dx=W-40, dy=BASE_H-40;
+    // Flashes (Garry, 2026-09-07): a static pin in a corner is easy to select
+    // a light and then never notice — the outer ring breathes to draw the eye
+    // there for as long as something is actually armed and waiting for a tap.
     s+=`<g class="ldropmarker" data-role="dropmarker" style="cursor:grab" pointer-events="all">`+
       `<title>Drag onto the map to place the selected light</title>`+
       `<circle cx="${dx}" cy="${dy}" r="17" fill="#1b0f24" fill-opacity="0.92" stroke="#e879f9" stroke-width="2"/>`+
-      `<circle cx="${dx}" cy="${dy}" r="17" fill="none" stroke="#e879f9" stroke-width="6" stroke-opacity="0.18"/>`+
+      `<circle cx="${dx}" cy="${dy}" r="17" fill="none" stroke="#e879f9" stroke-width="6" stroke-opacity="0.18">`+
+        `<animate attributeName="stroke-opacity" values="0.15;0.6;0.15" dur="1.4s" repeatCount="indefinite"/>`+
+        `<animate attributeName="r" values="17;23;17" dur="1.4s" repeatCount="indefinite"/>`+
+      `</circle>`+
       `<line x1="${dx-7}" y1="${dy}" x2="${dx+7}" y2="${dy}" stroke="#f0abfc" stroke-width="2.2" stroke-linecap="round"/>`+
       `<line x1="${dx}" y1="${dy-7}" x2="${dx}" y2="${dy+7}" stroke="#f0abfc" stroke-width="2.2" stroke-linecap="round"/>`+
       `</g>`;
@@ -2050,6 +3877,15 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     s+=`<text x="18" y="${ly+15}" text-anchor="middle" fill="#071008" font-size="12" font-weight="700">${i+1}</text>`;
     s+=`<text x="36" y="${ly+15}" fill="${color}" font-size="18" font-weight="500">${escSVG(groupLabel)}</text>`;
   });
+  // Motion colour index (Garry, 2026-09-08) — one row past the last floor,
+  // in the space LEGEND_H's +1 above reserved. "Thin, all in one row, 1/4
+  // of the size you have now, and no extra row of text for no reason" —
+  // label and strip share the SAME line, no caption row beneath it.
+  {
+    const my=BASE_H+10+levels.length*30;
+    s+=`<text x="18" y="${my+11}" fill="#9fb0a8" font-size="13" font-weight="500">Motion</text>`+
+      `<rect x="70" y="${my+7}" width="140" height="1.5" rx="0.75" fill="url(#psmotionlegend)"/>`;
+  }
 
   s+=`</svg>`;
   return s;

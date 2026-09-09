@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 _HA_MODULE_NAMES: list[str] = [
     "homeassistant",
     "homeassistant.components",
+    "homeassistant.components.device_tracker",
     "homeassistant.components.sensor",
     "homeassistant.components.websocket_api",
     "homeassistant.config_entries",
@@ -37,6 +38,9 @@ _HA_MODULE_NAMES: list[str] = [
     "homeassistant.helpers.storage",
     "homeassistant.helpers.typing",
     "homeassistant.helpers.update_coordinator",
+    "homeassistant.helpers.recorder",
+    "homeassistant.components.recorder",
+    "homeassistant.components.recorder.history",
     "homeassistant.util",
     "homeassistant.util.dt",
 ]
@@ -125,8 +129,15 @@ class _FakeDataUpdateCoordinator(_SubscriptableBase):
 
 
 class _FakeCoordinatorEntity(_SubscriptableBase):
-    """Stand-in for CoordinatorEntity that is subscriptable."""
-    pass
+    """Stand-in for CoordinatorEntity that is subscriptable.
+
+    Sets self.coordinator like the real base class — needed the moment any
+    subclass's properties read self.coordinator (e.g. device_tracker.py's
+    PadSpanDeviceTracker), not just the ones already exercised by tests.
+    """
+
+    def __init__(self, coordinator: Any, *args: Any, **kwargs: Any) -> None:
+        self.coordinator = coordinator
 
 
 _uc.DataUpdateCoordinator = _FakeDataUpdateCoordinator  # type: ignore[attr-defined]
@@ -143,6 +154,26 @@ for _reg in ("area_registry", "device_registry", "entity_registry"):
 
 # homeassistant.helpers.aiohttp_client
 _ha_mods["homeassistant.helpers.aiohttp_client"].async_get_clientsession = MagicMock  # type: ignore[attr-defined]
+
+# homeassistant.components.device_tracker
+_dt = _ha_mods["homeassistant.components.device_tracker"]
+
+
+class _FakeSourceType:
+    """Stand-in for device_tracker.SourceType (a StrEnum in real HA)."""
+    GPS = "gps"
+    ROUTER = "router"
+    BLUETOOTH = "bluetooth"
+    BLUETOOTH_LE = "bluetooth_le"
+
+
+class _FakeTrackerEntity:
+    """Stand-in for device_tracker.TrackerEntity (subclassed in device_tracker.py)."""
+    pass
+
+
+_dt.SourceType = _FakeSourceType      # type: ignore[attr-defined]
+_dt.TrackerEntity = _FakeTrackerEntity  # type: ignore[attr-defined]
 
 # homeassistant.components.sensor
 _sensor = _ha_mods["homeassistant.components.sensor"]
@@ -182,6 +213,32 @@ def _fake_utcnow() -> datetime:
 
 
 _ha_mods["homeassistant.util.dt"].utcnow = _fake_utcnow  # type: ignore[attr-defined]
+
+# homeassistant.helpers.recorder / homeassistant.components.recorder(.history)
+# Default: a healthy recorder with no history for anything (tests override
+# get_instance/get_last_state_changes per-scenario via monkeypatch on these
+# SAME stub module attributes — production code imports both names locally,
+# inside the function, every call, so a monkeypatch here is always seen).
+class FakeRecorderInstance:
+    def __init__(self, recording: bool = True, backlog: int = 0, migration_in_progress: bool = False) -> None:
+        self.recording = recording
+        self.backlog = backlog
+        self.migration_in_progress = migration_in_progress
+
+    async def async_add_executor_job(self, target, *args):
+        return target(*args)
+
+
+def _default_get_instance(hass):
+    return FakeRecorderInstance()
+
+
+def _default_get_last_state_changes(hass, number_of_states, entity_id):
+    return {}
+
+
+_ha_mods["homeassistant.helpers.recorder"].get_instance = _default_get_instance  # type: ignore[attr-defined]
+_ha_mods["homeassistant.components.recorder.history"].get_last_state_changes = _default_get_last_state_changes  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
 # 2.5  Wire each stub submodule onto its parent stub as a real attribute

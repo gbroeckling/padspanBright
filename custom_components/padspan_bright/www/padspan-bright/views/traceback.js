@@ -11,6 +11,11 @@
 // the ?b= cache-buster propagates (see docs/06_UI_CACHE_BUSTING.md).
 const { mapXform, fabricWorldRooms, worldGauge, metresToWorld } =
   await import(`./stack_transform.js${new URL(import.meta.url).search}`);
+// Keyed morph for the current-frame object markers — see its own header for
+// why: without it, every marker teleports to its new spot each frame instead
+// of gliding, the same problem overview.js's iso map had.
+const { mergeObjectLayer } =
+  await import(`./iso_motion.js${new URL(import.meta.url).search}`);
 
 export function render(ctx) {
   const { el, esc: _esc } = ctx.helpers;
@@ -263,8 +268,12 @@ export function render(ctx) {
   // ── SVG builder ────────────────────────────────────────────────────────
   function _buildTracebackSVG(frameIdx) {
     const maxIsoZ = sortedIsoLevels.length ? sortedIsoLevels[sortedIsoLevels.length - 1] : 0;
+    const minIsoZ = sortedIsoLevels.length ? sortedIsoLevels[0] : 0;
     const viewY = Math.min(0, CY - maxIsoZ * _ovFG - 50);
-    const HTOTAL = BASE_H + LEGEND_H - viewY;
+    // Basement/sub-ground floors (negative z_level) push content DOWN in
+    // screen-Y per iso()'s formula — extend the bottom edge too, or they clip.
+    const viewBottom = Math.max(BASE_H + LEGEND_H, CY - minIsoZ * _ovFG + 50);
+    const HTOTAL = viewBottom - viewY;
     let s = `<svg viewBox="0 ${viewY} ${W} ${HTOTAL}" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:${HTOTAL}px;display:block;font-family:system-ui,sans-serif">`;
     s += `<rect x="0" y="${viewY}" width="${W}" height="${HTOTAL}" fill="#071008"/>`;
 
@@ -507,6 +516,10 @@ export function render(ctx) {
         const lbl = _friendlyLabel(o);
         const tip = `${lbl} | Room: ${o.r}${o.rssi ? " | RSSI: " + o.rssi + " dBm" : ""}`;
 
+        // One <g> per object, keyed + anchored, so mergeObjectLayer can
+        // glide it to its next-frame position instead of the whole overlay
+        // teleporting on every frame swap.
+        s += `<g data-obj-key="${_esc(o.k || "")}" data-ann="${px} ${py}">`;
         // Outer glow ring (pulsing)
         s += `<circle cx="${px}" cy="${py}" r="26" fill="none" stroke="${col}" stroke-width="2" opacity="0.35">`;
         s += `<animate attributeName="r" values="22;28;22" dur="1.8s" repeatCount="indefinite"/>`;
@@ -527,6 +540,7 @@ export function render(ctx) {
         const roomW = Math.min(roomLbl.length * 6 + 10, 120);
         s += `<rect x="${px - roomW / 2}" y="${py + 16}" width="${roomW}" height="14" rx="3" fill="#071008" opacity="0.75"/>`;
         s += `<text x="${px}" y="${py + 27}" text-anchor="middle" fill="#94a3b8" font-size="10" font-weight="500">${_esc(roomLbl)}</text>`;
+        s += `</g>`;
       }
     }
 
@@ -580,8 +594,12 @@ export function render(ctx) {
   // Each object gets a data-disco attribute for click handling.
   function _buildDiscoverySVG(results) {
     const maxIsoZ = sortedIsoLevels.length ? sortedIsoLevels[sortedIsoLevels.length - 1] : 0;
+    const minIsoZ = sortedIsoLevels.length ? sortedIsoLevels[0] : 0;
     const viewY = Math.min(0, CY - maxIsoZ * _ovFG - 50);
-    const HTOTAL = BASE_H + LEGEND_H - viewY;
+    // Basement/sub-ground floors (negative z_level) push content DOWN in
+    // screen-Y per iso()'s formula — extend the bottom edge too, or they clip.
+    const viewBottom = Math.max(BASE_H + LEGEND_H, CY - minIsoZ * _ovFG + 50);
+    const HTOTAL = viewBottom - viewY;
     let s = `<svg viewBox="0 ${viewY} ${W} ${HTOTAL}" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:${HTOTAL}px;display:block;font-family:system-ui,sans-serif">`;
     s += `<rect x="0" y="${viewY}" width="${W}" height="${HTOTAL}" fill="#071008"/>`;
 
@@ -748,11 +766,12 @@ export function render(ctx) {
     // Count badge
     const placedCount = results.length - unplacedCount;
     if (results.length) {
-      const badgeW = 240;
-      s += `<rect x="6" y="${viewY + 4}" width="${badgeW}" height="22" rx="4" fill="#071008" opacity="0.85"/>`;
       const badgeTxt = placedCount === results.length
         ? `${results.length} new object${results.length !== 1 ? "s" : ""} discovered`
         : `${results.length} discovered (${placedCount} placed, ${unplacedCount} unplaced)`;
+      // Size from the actual text (multi-digit counts can run past a fixed width).
+      const badgeW = Math.min(badgeTxt.length * 6.5 + 24, 400);
+      s += `<rect x="6" y="${viewY + 4}" width="${badgeW}" height="22" rx="4" fill="#071008" opacity="0.85"/>`;
       s += `<text x="${badgeW / 2 + 6}" y="${viewY + 19}" text-anchor="middle" fill="#e879f9" font-size="11" font-weight="700">${badgeTxt}</text>`;
     }
 
@@ -852,20 +871,15 @@ export function render(ctx) {
         }
       }
     } else {
-      // Fast path: only rebuild the dynamic overlay (trails + objects)
+      // Fast path: rebuild the dynamic overlay (trails + objects). Trail
+      // shapes carry no data-obj-key, so mergeObjectLayer just swaps them
+      // fresh every frame like the old code did; the keyed object markers
+      // glide to their next-frame position instead of teleporting — see
+      // iso_motion.js's header for why this can't be a straight innerHTML
+      // rebuild, and why it's verified live rather than unit tested.
       if (_overlayDiv) {
-        // Remove old overlay content
-        while (_overlayDiv.firstChild) _overlayDiv.removeChild(_overlayDiv.firstChild);
-        // Build just the dynamic part as a temporary SVG, extract its children
         const dynSvg = _buildDynamicOverlay(tb.frameIdx);
-        if (dynSvg) {
-          const tmp = document.createElement("div");
-          tmp.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg">${dynSvg}</svg>`;
-          const tmpSvg = tmp.querySelector("svg");
-          if (tmpSvg) {
-            while (tmpSvg.firstChild) _overlayDiv.appendChild(tmpSvg.firstChild);
-          }
-        }
+        mergeObjectLayer(_overlayDiv, dynSvg);
       }
     }
   }

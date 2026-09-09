@@ -220,6 +220,106 @@ def test_empty_fabric_points_at_the_fabric_not_at_uploading_a_photo(tmp_path):
     assert "uploaded" not in out["svg"], "no photo is involved in this view"
 
 
+# ── Door/window barriers: no point marker, a wall-opening pass instead ──────
+# (docs/IDEA_DOOR_WINDOW_BARRIERS.md, step 5; Garry, 2026-09-08: "The
+# placement in mapping and lights is not making any sense... Please review
+# and make usable based on opening up an area of a space with a purple dot
+# on each side of the opening.") A door/window's real position is a SECTION
+# OF WALL, never a point — these tests pin that it never gets a freestanding
+# marker (placed or clustered), and that a linked barrier draws the actual
+# open/closed indicator and endpoint dots instead.
+
+def test_a_placed_door_never_draws_a_point_marker(tmp_path):
+    """Even a legacy light_positions_m entry for a door must never surface as
+    a hex — the barrier pass, not a dragged point, is its only marker."""
+    model = {**_MODEL, "light_positions_m": {**_MODEL["light_positions_m"],
+             "binary_sensor.frontdoor": {"x_m": 1.0, "y_m": 1.0, "floor_id": "main"}}}
+    lbe = {**_LIGHTS_BY_EID, "binary_sensor.frontdoor": {
+        "entity_id": "binary_sensor.frontdoor", "state": "off", "code": "D01",
+        "shape": "door", "isDoor": True}}
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\nconst FLOORS={json.dumps(_FLOORS)};\n"
+        f"const LBE={json.dumps(lbe)};\nconst out={{}};\n"
+        "const svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS);"
+        "out.svg=svg; out.placed=(svg.match(/data-placed=\"1\"/g)||[]).length;"
+        "out.hasDoorGroup=svg.includes('data-eid=\"binary_sensor.frontdoor\"');"
+        "console.log(JSON.stringify(out));"
+    ))
+    assert out["placed"] == 2, "the two ordinary lights still draw — only the door is withheld"
+    assert out["hasDoorGroup"] is False, "a placed door/window must never get its own marker group"
+
+
+def test_an_unplaced_door_never_joins_the_room_cluster(tmp_path):
+    """No light_positions_m entry at all — the path an unplaced light takes
+    to the room-centre hex pile. A door must never ride that pile either."""
+    lbe = {**_LIGHTS_BY_EID, "binary_sensor.frontdoor": {
+        "entity_id": "binary_sensor.frontdoor", "state": "off", "code": "D01",
+        "shape": "door", "isDoor": True, "area_name": "Kitchen"}}
+    by_room = {"Kitchen": [lbe["binary_sensor.frontdoor"]]}
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_MODEL)};\nconst FLOORS={json.dumps(_FLOORS)};\n"
+        f"const LBE={json.dumps(lbe)};\nconst BYROOM={json.dumps(by_room)};\nconst out={{}};\n"
+        "const svg=M.buildIsoSVG(MODEL,BYROOM,new Set(),null,150,0,LBE,false,FLOORS);"
+        "out.hasDoorGroup=svg.includes('data-eid=\"binary_sensor.frontdoor\"');"
+        "out.unplacedNote=svg.includes('1 unplaced');"
+        "console.log(JSON.stringify(out));"
+    ))
+    assert out["hasDoorGroup"] is False, "an unplaced door must not appear in the room's hex pile"
+    assert out["unplacedNote"] is False, "a door alone in a room must not count toward '<n> unplaced'"
+
+
+def _barrier_harness(model: dict, lbe: dict) -> str:
+    return (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\nconst FLOORS={json.dumps(_FLOORS)};\n"
+        f"const LBE={json.dumps(lbe)};\nconst out={{}};\n"
+        "const svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS);"
+        "out.svg=svg;\nconsole.log(JSON.stringify(out));\n"
+    )
+
+
+_BARRIER_MODEL = {**_MODEL, "rf_barriers_m": [
+    {"id": "b1", "floor_id": "main", "material": "wood", "attenuation_dbm": 4,
+     "points_m": [[1, 1], [3, 1]], "linked_entity_id": "binary_sensor.frontdoor"},
+]}
+_BARRIER_LBE = {**_LIGHTS_BY_EID, "binary_sensor.frontdoor": {
+    "entity_id": "binary_sensor.frontdoor", "state": "off", "code": "D01",
+    "shape": "door", "isDoor": True}}
+
+
+def test_a_linked_closed_barrier_draws_a_solid_line_and_two_purple_dots(tmp_path):
+    out = _run_js(tmp_path, _barrier_harness(_BARRIER_MODEL, _BARRIER_LBE))
+    svg = out["svg"]
+    assert svg.count('fill="#9333ea"') == 2, "exactly one purple dot per endpoint of the barrier"
+    assert "#fb7185" not in svg, "closed must not draw the open accent colour"
+    assert 'stroke="#94a3b8"' in svg, "closed reads as the neutral wall line"
+
+
+def test_a_linked_open_barrier_fades_the_line_but_keeps_both_dots(tmp_path):
+    lbe = {**_BARRIER_LBE, "binary_sensor.frontdoor": {**_BARRIER_LBE["binary_sensor.frontdoor"], "state": "on"}}
+    out = _run_js(tmp_path, _barrier_harness(_BARRIER_MODEL, lbe))
+    svg = out["svg"]
+    assert svg.count('fill="#9333ea"') == 2, "the endpoint dots mark WHERE the opening is in both states"
+    assert "#fb7185" in svg, "open must draw the distinct accent colour, not just fade to nothing"
+    assert 'stroke="#94a3b8"' not in svg, "open must not also draw the closed neutral line"
+
+
+def test_an_unlinked_barrier_draws_nothing_on_this_map(tmp_path):
+    """A door with NO rf_barriers_m match at all — the unlinked path from the
+    Lights table (host.doorLinkedIds excludes it) — must render exactly as
+    an install with no door sensors configured at all (explicit non-goal in
+    docs/IDEA_DOOR_WINDOW_BARRIERS.md: "must never change how an install
+    with no door sensors configured looks or behaves")."""
+    model = {**_MODEL, "rf_barriers_m": [
+        {"id": "b1", "floor_id": "main", "material": "wood", "attenuation_dbm": 4,
+         "points_m": [[1, 1], [3, 1]], "linked_entity_id": None},
+    ]}
+    out = _run_js(tmp_path, _barrier_harness(model, _LIGHTS_BY_EID))
+    assert "#9333ea" not in out["svg"], "an unlinked (ordinary) wall draws nothing here — Rooms-tab-only"
+
+
 # ── Marker scale ────────────────────────────────────────────────────────────
 # A marker is an object in a room, so it is measured in metres. It used to be a
 # flat 14 px, which was fine when the world was a normalised photo but became
@@ -308,6 +408,58 @@ def test_room_shapes_carry_a_soft_centre_glow_like_the_light_pools(tmp_path):
     assert out["showDefCount"] == 1, out
     assert out["workUsesGlow"], "the working view's room polygons must reference their glow gradient"
     assert out["showUsesGlow"], "Showcase must keep the room glow alongside its own pswash sheen"
+
+
+def test_room_tint_blends_the_colour_of_its_own_lit_fixtures_in_showcase(tmp_path):
+    """Gap #15, best-in-class roadmap: "slab tint from blended live rgb/brightness".
+
+    A room whose lights are actually glowing a colour should tint that
+    colour on the slab — not just wear its assigned display colour. Falls
+    back to the static colour when the room has nothing lit (or byRoom
+    carries nothing for it at all, the shape every prior Showcase test in
+    this file already uses and must keep working unchanged).
+    """
+    base_model = {
+        "room_geometry_m": {
+            "Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 4], [0, 4]]},
+        },
+        "light_positions_m": {
+            "light.lit": {"x_m": 3.0, "y_m": 2.0, "floor_id": "main"},
+        },
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    lbe = {"light.lit": {"entity_id": "light.lit", "state": "on", "code": "A01",
+                         "shape": "circle", "isWled": False, "rgb": [16, 240, 128], "bri": 255}}
+    by_room = {"Kitchen": [{"entity_id": "light.lit", "state": "on", "rgb": [16, 240, 128], "bri": 255}]}
+
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        "import { roomColor } from './room_color.mjs';\n"
+        f"const MODEL={json.dumps(base_model)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const BYROOM={json.dumps(by_room)};\n"
+        "const out={};\n"
+        "out.staticColor=roomColor('Kitchen', MODEL);\n"
+        "const show=M.buildIsoSVG(MODEL,BYROOM,new Set(),null,150,0,LBE,false,FLOORS,{showcase:true});\n"
+        "const work=M.buildIsoSVG(MODEL,BYROOM,new Set(),null,150,0,LBE,false,FLOORS,{});\n"
+        "const showOff=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,{showcase:true});\n"
+        "const strokeOf=(svg)=>{const m=/<polygon points=\"[^\"]+\" fill=\"none\" stroke=\"#04100a\"[^>]*\\/>\\s*<polygon[^>]*stroke=\"([^\"]+)\"/.exec(svg); return m?m[1]:null;};\n"
+        "out.showStroke=strokeOf(show);\n"
+        "out.workStroke=/<polygon[^>]*fill=\"[^\"]*\" fill-opacity=\"0\\.16\" stroke=\"([^\"]+)\"/.exec(work)?.[1]||null;\n"
+        "out.showOffStroke=strokeOf(showOff);\n"
+        "console.log(JSON.stringify(out));\n"
+    ))
+    # The fixture reports rgb 16,240,128; quantised the same way glowIds
+    # quantises it elsewhere in this file (see #18f078 in the showcase tests).
+    assert out["showStroke"] == "#18f078", out
+    # Working (non-Showcase) mode is a "cinematic Showcase upgrade" — the
+    # working map keeps its ordinary static colour regardless of byRoom.
+    assert out["workStroke"] == out["staticColor"], out
+    # No lit fixture recorded for the room at all (byRoom={}) — the shape
+    # every OTHER Showcase test in this file uses — must fall back exactly
+    # as before.
+    assert out["showOffStroke"] == out["staticColor"], out
 
 
 def test_marker_never_exceeds_the_old_fixed_size(tmp_path):
@@ -1217,6 +1369,146 @@ def test_perimeter_marker_hides_the_square_keeps_click_space_and_glow(tmp_path):
     assert out["poolGlows"], "the Showcase glow was lost"
 
 
+def test_perimeter_automorph_off_is_byte_identical_to_the_legacy_trace(tmp_path):
+    """Garry (2026-09-07): the room-boundary shape was left out of "the
+    whole morph thing" and looked like "a serious mismatch" once every
+    other aura got the new material treatment. perimeterAuraSvg fixes
+    that — but ONLY while the switch is up. With Automorph off (absent, or
+    pct=0) the legacy perimeterSvg call must still be the only thing that
+    draws a perimeter trace, byte-identical to a render with no automorph
+    keys at all."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_PERIM_MODEL)};\n"
+        f"const FLOORS={json.dumps(_PERIM_FLOORS)};\n"
+        f"const LBE={json.dumps(_PERIM_LBE)};\n"
+        f"const BYROOM={json.dumps(_PERIM_BYROOM)};\n"
+        "const mk=(o)=>M.buildIsoSVG(MODEL,BYROOM,new Set(),null,150,0,LBE,false,FLOORS,o);\n"
+        "console.log(JSON.stringify({\n"
+        "  bare: mk({}),\n"
+        "  off: mk({automorph:false, automorphRoomPct:80, automorphStyle:'blueprint'}),\n"
+        "  pctZero: mk({automorph:true, automorphRoomPct:0, automorphStyle:'nebula'}),\n"
+        "}));\n"
+    ))
+    assert out["off"] == out["bare"], "automorph:false must render exactly like no automorph keys at all"
+    assert out["pctZero"] == out["bare"], "pct=0 is Automorph's own rest position — must stay byte-identical too"
+
+
+def test_perimeter_automorph_on_joins_the_floor_wide_aura_tiers(tmp_path):
+    """With the slider up, a perimeter light's trace stands down from the
+    legacy call and instead rides perimeterAuraSvg into the SAME floor-wide
+    glow/edge tiers every other aura uses (see
+    test_automorph_aura_paints_under_room_labels_in_two_floor_tiers) — so it
+    gets the shared blur group, sits under labels, and never double-draws."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_PERIM_MODEL)};\n"
+        f"const FLOORS={json.dumps(_PERIM_FLOORS)};\n"
+        f"const LBE={json.dumps(_PERIM_LBE)};\n"
+        f"const BYROOM={json.dumps(_PERIM_BYROOM)};\n"
+        "const svg=M.buildIsoSVG(MODEL,BYROOM,new Set(),null,150,0,LBE,false,FLOORS,"
+        "{automorph:true, automorphRoomPct:100, automorphHardness:0, automorphStyle:'glow'});\n"
+        "console.log(JSON.stringify({\n"
+        "  legacyTrace:/<polygon data-eid=\"light\\.cove\" points=/.test(svg),\n"
+        "  auraEdge:/<path data-eid=\"light\\.cove\" d=\"M[^\"]+\" fill=\"none\" stroke=\"#94a3b8\"/.test(svg),\n"
+        "  auraGlowFirst: svg.indexOf('filter=\"url(#psaurasoft)\"'),\n"
+        "  edgeFirst: svg.indexOf('data-eid=\"light.cove\" d='),\n"
+        "  labelFirst: svg.indexOf('<g class=\"lroom\"'),\n"
+        "  unplacedAura:/<path data-eid=\"light\\.unplaced\" d=\"M[^\"]+\" fill=\"none\" stroke=\"#94a3b8\"/.test(svg),\n"
+        "}));\n"
+    ))
+    assert not out["legacyTrace"], "the legacy <polygon> trace must stand down once Automorph is on"
+    assert out["auraEdge"], "the placed perimeter light must paint through perimeterAuraSvg instead"
+    assert out["auraGlowFirst"] >= 0 and out["auraGlowFirst"] < out["labelFirst"], out
+    assert out["edgeFirst"] >= 0 and out["edgeFirst"] < out["labelFirst"], (
+        "the perimeter aura must land before the first room label, same as every other aura", out
+    )
+    assert out["unplacedAura"], "an unplaced (area-only) perimeter light must also get the Automorph treatment"
+
+
+def test_perimeter_automorph_style_dropdown_switches_the_treatment(tmp_path):
+    """The style dropdown must restyle a perimeter trace exactly the way it
+    restyles a cell aura: blueprint dashes+nodes, nebula's shared duotone
+    glow, glow's stroke-centric material stack — never a filled interior on
+    any of the three (a cove line is a line, not a cell)."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_PERIM_MODEL)};\n"
+        f"const FLOORS={json.dumps(_PERIM_FLOORS)};\n"
+        f"const LBE={json.dumps(_PERIM_LBE)};\n"
+        f"const BYROOM={json.dumps(_PERIM_BYROOM)};\n"
+        "const mk=(style)=>M.buildIsoSVG(MODEL,BYROOM,new Set(),null,150,0,LBE,false,FLOORS,"
+        "{automorph:true, automorphRoomPct:100, automorphStyle:style});\n"
+        "const glow=mk('glow'), blueprint=mk('blueprint'), nebula=mk('nebula');\n"
+        "const coveD=(svg)=>{const m=/<path data-eid=\"light\\.cove\" d=\"([^\"]+)\"/.exec(svg); return m&&m[1];};\n"
+        "console.log(JSON.stringify({\n"
+        "  glowFill:/<path data-eid=\"light\\.cove\" d=\"[^\"]+\" fill=\"(?!none)/.test(glow),\n"
+        "  blueprintDash:/<path data-eid=\"light\\.cove\" d=\"[^\"]+\" fill=\"none\" stroke=\"#94a3b8\" stroke-opacity=\"[0-9.]+\" stroke-width=\"[0-9.]+\" stroke-dasharray=\"4,3\"/.test(blueprint),\n"
+        "  blueprintNodes:(blueprint.match(/<circle cx=\"[0-9.-]+\" cy=\"[0-9.-]+\" r=\"1\\.6\" fill=\"#94a3b8\"/g)||[]).length,\n"
+        "  nebulaDuo:/<path data-eid=\"light\\.cove\" d=\"[^\"]+\" fill=\"none\" stroke=\"url\\(#psautomorphduo_on\\)\"/.test(nebula),\n"
+        "  nebulaFill:/<path data-eid=\"light\\.cove\" d=\"[^\"]+\" fill=\"(?!none)/.test(nebula),\n"
+        "  glowD: coveD(glow), blueprintD: coveD(blueprint), nebulaD: coveD(nebula),\n"
+        "}));\n"
+    ))
+    assert not out["glowFill"], "glow style must stay stroke-centric on a perimeter trace — no filled interior"
+    assert out["blueprintDash"], "blueprint must dash the perimeter trace exactly like a cell aura"
+    assert out["blueprintNodes"] >= 3, "blueprint must drop vertex nodes along the perimeter ring too"
+    assert out["nebulaDuo"], "nebula must stroke through the shared duotone, keeping the orb-language colour ownership"
+    assert not out["nebulaFill"], "nebula must not fill a boundary-hugging line — that would eat the line itself"
+    # glow and blueprint both run the hand-inked jitter step, so they morph
+    # the identical inset ring byte-for-byte; nebula deliberately SKIPS
+    # jitter (its own soft treatment makes it invisible effort — see
+    # automorphInkedRing's comment), so its ring differs from the other
+    # two's by design, not by drift.
+    assert out["glowD"] == out["blueprintD"], out
+    assert out["nebulaD"] != out["glowD"], "nebula not skipping jitter would mean the style split silently vanished"
+
+
+def test_perimeter_automorph_honours_its_own_margin_cm(tmp_path):
+    """The Automorph treatment must still respect a perimeter light's own
+    margin_cm exactly as the legacy trace does — light.zero (margin 0) sits
+    on the room's own outline, light.cove (margin 50cm) is inset well
+    inside it, through the SAME automorphInsetRing pipeline."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_PERIM_MODEL)};\n"
+        f"const FLOORS={json.dumps(_PERIM_FLOORS)};\n"
+        f"const LBE={json.dumps(_PERIM_LBE)};\n"
+        f"const BYROOM={json.dumps(_PERIM_BYROOM)};\n"
+        "const svg=M.buildIsoSVG(MODEL,BYROOM,new Set(),null,150,0,LBE,false,FLOORS,"
+        "{automorph:true, automorphRoomPct:100, automorphHardness:0, automorphStyle:'glow'});\n"
+        "const bbox=(eid)=>{\n"
+        "  const m=new RegExp('<path data-eid=\"'+eid.replace('.','\\\\.')+'\" d=\"([^\"]+)\"').exec(svg);\n"
+        "  const nums=m[1].match(/-?[0-9.]+/g).map(Number);\n"
+        "  const xs=nums.filter((_,i)=>i%2===0), ys=nums.filter((_,i)=>i%2===1);\n"
+        "  return [Math.min(...xs),Math.min(...ys),Math.max(...xs),Math.max(...ys)];\n"
+        "};\n"
+        "console.log(JSON.stringify({zero:bbox('light.zero'), cove:bbox('light.cove')}));\n"
+    ))
+    zx0, zy0, zx1, zy1 = out["zero"]
+    cx0, cy0, cx1, cy1 = out["cove"]
+    assert cx0 > zx0 and cy0 > zy0 and cx1 < zx1 and cy1 < zy1, (
+        "a real margin_cm must still inset the Automorph-styled trace further than a zero margin", out
+    )
+
+
+def test_perimeter_automorph_render_is_deterministic(tmp_path):
+    """Determinism is a hard invariant end to end — two renders of the same
+    perimeter+Automorph scene, same nowMs, must be byte-identical."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_PERIM_MODEL)};\n"
+        f"const FLOORS={json.dumps(_PERIM_FLOORS)};\n"
+        f"const LBE={json.dumps(_PERIM_LBE)};\n"
+        f"const BYROOM={json.dumps(_PERIM_BYROOM)};\n"
+        "const o={nowMs:1700000000000, automorph:true, automorphRoomPct:70, automorphHardness:-40, automorphStyle:'glow'};\n"
+        "const a=M.buildIsoSVG(MODEL,BYROOM,new Set(),null,150,0,LBE,false,FLOORS,o);\n"
+        "const b=M.buildIsoSVG(MODEL,BYROOM,new Set(),null,150,0,LBE,false,FLOORS,o);\n"
+        "console.log(JSON.stringify({equal:a===b}));\n"
+    ))
+    assert out["equal"], "a perimeter-plus-Automorph render must be reproducible from the fabric alone"
+
+
 def test_motion_sensor_pulses_blue_while_triggered_and_fans_do_not_pool(tmp_path):
     """Garry: "a blue pulsing glow around motion sensors when activated".
     The pulse draws in BOTH modes (it is live status, not presentation),
@@ -1258,20 +1550,48 @@ def test_motion_sensor_pulses_blue_while_triggered_and_fans_do_not_pool(tmp_path
     assert out["motionGlyph"] and out["fanGlyph"], out
 
 
-def test_motion_sensor_fades_blue_to_green_over_two_hours_after_going_quiet(tmp_path):
+def test_motion_sensor_fades_through_a_distinct_rainbow_while_quiet_but_stays_fixed_blue_while_on(tmp_path):
     """Garry, across several rounds: "if a motion detector went off in the
     last 6 hours the flashing blue goes to a flashing purple after the blue
     has stopped" — "so all colours from blue to purple over 6 hours" — then,
     watching it live: "don't think the color is changing" (a continuous
     sweep moves under 1deg/minute, correct but invisible) — "the blue only
-    stays on for 5 minutes, and the next color is visibly not blue" — and
-    finally, the settled spec: "start blue, stay blue for 5 minutes, and
-    then cycle thru all colors and end on green after 2 hours." A STEP
-    function: held stages, each a genuinely distinct hue, front-loaded, the
-    sweep running the LONG way round the wheel (through violet, magenta,
-    red, orange, yellow) so it passes every colour family on the way to
-    green rather than just the two hues nearest blue. last_changed is HA's
-    own field for when a binary_sensor stopped tripping; nowMs is injectable
+    stays on for 5 minutes, and the next color is visibly not blue" — then,
+    the one-clock-whether-on-or-quiet version: "why can't you get this
+    right! ... they start blue for 5 minutes, then cycle thru every color
+    ... after 2 hours end up on green ... all types of motion sensors and
+    occupance sensor replicate the same behavior. I need consistancy!" —
+    live data showed the actual bugs: (1) the first three stops (blue,
+    violet, magenta) are all "cool" blue-purple-pink tones that read as one
+    colour at a glance even though they are 40deg apart on paper, so a room
+    re-triggered inside 20 minutes only ever looked blue; (2) applying that
+    same elapsed-since-last-changed clock to the TRIGGERED state meant a
+    genuine occupancy/radar sensor that stays "on" for hours while someone
+    is continuously present faded all the way to the "long since quiet"
+    colour while the room was still actively occupied — backwards for
+    "simple occupancy viewing", and Garry's real complaint: "I need
+    consistent behaviour regardless of the sensor type."
+
+    Settled design, round three (Garry: "the blue flashing motion bulb only
+    flashes for 5 seconds for [any] of the alarm motion sensors!! They
+    should flash for 5 minutes like some of the other motion sensors, Make
+    them all behave the same way"): the ANIMATED flashing pulse runs while
+    a sensor is genuinely "on" OR is still within the shared 5-minute hold
+    window of its last transition — never merely while the raw state reads
+    "on". The raw "on" duration is a hardware artefact (an alarm panel's
+    PIR zone self-clears in ~5 seconds; a standalone PIR's retrigger timer
+    holds for minutes; a radar unit holds while someone is present), and
+    tying the flash to it alone made the identical real-world event flash
+    for seconds on one sensor and minutes on another. Because last_changed
+    also resets on the on→off flip, a short-hold sensor's off-transition
+    lands within seconds of the trigger itself, so the hold window gives
+    every class the same minimum flash. While flashing the colour is always
+    the fixed active blue. Only once a sensor has been QUIET past the hold
+    window does the calmer ring take over, driving a step function through
+    classic, immediately-distinct colour-wheel colours (cyan/green/yellow/
+    orange/red/magenta) — held stages, front-loaded, the long way round the
+    wheel to the held end colour (magenta, at 2h). last_changed is HA's own
+    field for when a binary_sensor last transitioned; nowMs is injectable
     so this test does not race a real clock."""
     model = {
         "room_geometry_m": {"Hall": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]}},
@@ -1286,15 +1606,22 @@ def test_motion_sensor_fades_blue_to_green_over_two_hours_after_going_quiet(tmp_
             "binary_sensor.over_six":        {"x_m": 8.0, "y_m": 2.0, "floor_id": "main"},
             "binary_sensor.no_ts":           {"x_m": 9.0, "y_m": 2.0, "floor_id": "main"},
             "binary_sensor.active":          {"x_m": 10.0, "y_m": 2.0, "floor_id": "main"},
+            "binary_sensor.active_fresh":    {"x_m": 11.0, "y_m": 2.0, "floor_id": "main"},
+            "binary_sensor.active_stuck":    {"x_m": 12.0, "y_m": 2.0, "floor_id": "main"},
         },
     }
     NOW = 1_000_000_000_000  # an arbitrary fixed epoch ms, matched by nowMs
     H = 3_600_000
     M = 60_000
     lbe = {
+        # The alarm-panel case: the zone triggered and its hardware already
+        # self-cleared back to "off" seconds later. The ANIMATED flash must
+        # still be running — the raw "on" hold-time never decides how long
+        # the flash lasts.
         "binary_sensor.just_now":        {"entity_id": "binary_sensor.just_now",        "state": "off", "code": "M01", "shape": "motion", "isMotion": True, "last_changed": NOW - 1},
-        # 4m59s quiet: STILL the held blue stage — the 5-minute promise means
-        # "holds THROUGH 5 minutes", not "starts fading immediately".
+        # 4m59s quiet: STILL inside the hold window — still the animated
+        # flash, still blue. "Holds THROUGH 5 minutes", not "starts fading
+        # (or calming) immediately".
         "binary_sensor.under_five":      {"entity_id": "binary_sensor.under_five",      "state": "off", "code": "M02", "shape": "motion", "isMotion": True, "last_changed": NOW - (5 * M - 1000)},
         # 5m01s quiet: the very next instant after the hold — must already
         # be a CLEARLY different hue, not a one-degree nudge off blue.
@@ -1311,7 +1638,18 @@ def test_motion_sensor_fades_blue_to_green_over_two_hours_after_going_quiet(tmp_
         "binary_sensor.almost_six":      {"entity_id": "binary_sensor.almost_six",      "state": "off", "code": "M07", "shape": "motion", "isMotion": True, "last_changed": NOW - (6 * H - 1000)},
         "binary_sensor.over_six":        {"entity_id": "binary_sensor.over_six",        "state": "off", "code": "M08", "shape": "motion", "isMotion": True, "last_changed": NOW - (6 * H + 1000)},
         "binary_sensor.no_ts":           {"entity_id": "binary_sensor.no_ts",           "state": "off", "code": "M09", "shape": "motion", "isMotion": True, "last_changed": None},
+        # A sensor that is CURRENTLY "on" is always the fixed active colour
+        # (blue), whatever its device class or how long it has been "on" —
+        # a hold-time PIR and a genuine sustained-occupancy sensor that has
+        # been continuously "on" for hours must look identical, and neither
+        # one may fade toward the "long since quiet" colours while it is
+        # still actively triggered.
         "binary_sensor.active":          {"entity_id": "binary_sensor.active",          "state": "on",  "code": "M10", "shape": "motion", "isMotion": True, "last_changed": NOW - 5 * H},
+        "binary_sensor.active_fresh":    {"entity_id": "binary_sensor.active_fresh",    "state": "on",  "code": "M11", "shape": "motion", "isMotion": True, "last_changed": NOW - 1000},
+        # Reporting "on" continuously past the 6h outer cutoff is a stuck
+        # sensor, not six hours of one continuous fresh event — it gets the
+        # same hard edge a quiet sensor gets: nothing drawn at all.
+        "binary_sensor.active_stuck":    {"entity_id": "binary_sensor.active_stuck",    "state": "on",  "code": "M12", "shape": "motion", "isMotion": True, "last_changed": NOW - (6 * H + 1000)},
     }
     # Encode last_changed as real ISO strings (what gatherLights actually
     # hands the renderer), built from the epoch-ms markers above.
@@ -1330,43 +1668,85 @@ def test_motion_sensor_fades_blue_to_green_over_two_hours_after_going_quiet(tmp_
         "  const m=new RegExp('class=\"lrecent\" data-eid=\"'+eid.replace(/\\./g,'\\\\.')+'\"[^]*?stroke=\"hsl\\\\((\\\\d+),').exec(svg);\n"
         "  return m ? parseInt(m[1],10) : null;\n"
         "};\n"
+        "const pulseHueFor=(eid)=>{\n"
+        "  const m=new RegExp('class=\"lpulse\" data-eid=\"'+eid.replace(/\\./g,'\\\\.')+'\"[^]*?stroke=\"hsl\\\\((\\\\d+),').exec(svg);\n"
+        "  return m ? parseInt(m[1],10) : null;\n"
+        "};\n"
+        "const iconOpacityFor=(eid)=>{\n"
+        "  const m=new RegExp('class=\"lhex\" data-eid=\"'+eid.replace(/\\./g,'\\\\.')+'\"[^>]*opacity=\"([\\\\d.]+)\"').exec(svg);\n"
+        "  return m ? parseFloat(m[1]) : null;\n"
+        "};\n"
         "console.log(JSON.stringify({\n"
-        "  justNow: hueFor('binary_sensor.just_now'),\n"
-        "  underFive: hueFor('binary_sensor.under_five'),\n"
+        "  justNow: pulseHueFor('binary_sensor.just_now'),\n"
+        "  justNowCalmRing: hueFor('binary_sensor.just_now'),\n"
+        "  underFive: pulseHueFor('binary_sensor.under_five'),\n"
+        "  underFiveCalmRing: hueFor('binary_sensor.under_five'),\n"
         "  justAfterFive: hueFor('binary_sensor.just_after_five'),\n"
+        "  justAfterFivePulse: pulseHueFor('binary_sensor.just_after_five'),\n"
         "  midSweep: hueFor('binary_sensor.mid_sweep'),\n"
         "  atTwoHours: hueFor('binary_sensor.at_two_hours'),\n"
         "  pastTwoHours: hueFor('binary_sensor.past_two_hours'),\n"
         "  almostSix: hueFor('binary_sensor.almost_six'),\n"
         "  overSix: hueFor('binary_sensor.over_six'),\n"
         "  noTs: hueFor('binary_sensor.no_ts'),\n"
-        "  activeHasBluePulse: /fill=\"url\\(#psmotion\\)\"/.test(svg),\n"
+        "  activeHue: pulseHueFor('binary_sensor.active'),\n"
+        "  activeFreshHue: pulseHueFor('binary_sensor.active_fresh'),\n"
+        "  activeStuckHue: pulseHueFor('binary_sensor.active_stuck'),\n"
+        "  activeStuckHasAnyPulseMarkup: /class=\"l(pulse|recent)\" data-eid=\"binary_sensor\\.active_stuck\"/.test(svg),\n"
+        "  justNowIcon: iconOpacityFor('binary_sensor.just_now'),\n"
+        "  underFiveIcon: iconOpacityFor('binary_sensor.under_five'),\n"
+        "  justAfterFiveIcon: iconOpacityFor('binary_sensor.just_after_five'),\n"
+        "  activeIcon: iconOpacityFor('binary_sensor.active'),\n"
         "}));\n"
     ))
-    # Just gone quiet, and still under 5 minutes: BOTH hold at the exact
-    # same solid blue — no drift at all within the hold.
-    assert out["justNow"] == 240, out
-    assert out["underFive"] == 240, "the 5-minute hold must be a firm hold, not a slow drift toward it ending"
-    # The very next instant after 5 minutes: a BIG, unmistakable jump —
-    # "a clear 5 min indicator" — not a one-degree nudge off blue.
-    assert out["justAfterFive"] is not None and abs(out["justAfterFive"] - 240) >= 30, \
-        f"the step right after 5 minutes must be visibly not blue: {out}"
-    # 50 minutes in: further along still — the march through the rainbow
-    # continues, neither blue nor the final green.
-    assert out["midSweep"] is not None
-    assert abs(out["midSweep"] - 240) > 60 and out["midSweep"] != 120, \
-        f"the 50-min mark must read as neither blue nor green: {out}"
-    # Exactly 2h, and every point past it out to the 6h cutoff: green, held.
-    assert out["atTwoHours"] == 120, "2h is the stop's own boundary — must already be green, not the stage before it"
-    assert out["pastTwoHours"] == 120, out
-    assert out["almostSix"] == 120, "green is held all the way to the 6h edge, not swept past"
+    # The alarm-zone case, and the heart of round three: hardware already
+    # reads "off" seconds after the trigger, but the ANIMATED flashing
+    # pulse (not the calm ring) must still be running, blue, for the whole
+    # 5-minute hold — the raw "on" hold-time never decides the flash.
+    assert out["justNow"] == 240 and out["justNowCalmRing"] is None, \
+        f"seconds after triggering, an already-cleared sensor must still wear the ANIMATED blue flash: {out}"
+    assert out["underFive"] == 240 and out["underFiveCalmRing"] is None, \
+        "4m59s after its last transition the animated flash is still running — the hold is a firm hold"
+    # The very next instant after 5 minutes: the flash ends and the calm
+    # ring takes over at cyan — a genuinely different colour family, not a
+    # nudge within the same blue-purple cluster the earlier violet/magenta
+    # stops read as.
+    assert out["justAfterFive"] == 180 and out["justAfterFivePulse"] is None, \
+        f"right after 5 minutes: calm ring at cyan, no animated flash: {out}"
+    # The marker ICON lights for the SAME window the pulse flashes (round
+    # four: "the blue solid flash for the motion icon still goes out ...
+    # The ring might be OK, but not the icon") — full opacity through the
+    # hold, dimmed only once the calm ring takes over.
+    assert out["justNowIcon"] == 1 and out["underFiveIcon"] == 1, \
+        f"the icon must stay lit through the whole hold window, not the raw hardware hold: {out}"
+    assert out["justAfterFiveIcon"] == 0.45, \
+        f"past the hold the icon dims like any off device: {out}"
+    assert out["activeIcon"] == 1, out
+    # 50 minutes in: past the 40-min (yellow) stop, before the 65-min
+    # (orange) one — neither blue nor the final magenta.
+    assert out["midSweep"] == 60, f"the 50-min mark must read as yellow (the 40-min stop, held): {out}"
+    # Exactly 2h, and every point past it out to the 6h cutoff: magenta, held.
+    assert out["atTwoHours"] == 300, "2h is the stop's own boundary — must already be magenta, not the stage before it"
+    assert out["pastTwoHours"] == 300, out
+    assert out["almostSix"] == 300, "magenta is held all the way to the 6h edge, not swept past"
     # Past 6h: no glow at all — "recent" has a hard edge.
     assert out["overSix"] is None, "a sensor quiet for over 6 hours must show no recent-pulse at all"
     # No timestamp at all (defensive): no glow, no crash.
     assert out["noTs"] is None, out
-    # An ACTIVELY triggered sensor keeps its existing blue pulse, unaffected
-    # by how long ago some OTHER sensor went quiet.
-    assert out["activeHasBluePulse"], "the active (on) sensor must keep its own blue pulse"
+    # A CURRENTLY TRIGGERED sensor is ALWAYS the fixed active colour (blue),
+    # never elapsed-shifted — 5h since its last transition must look
+    # identical to one that just started, not fade toward "long since
+    # quiet" while the room is still actively occupied.
+    assert out["activeHue"] == 240, \
+        f"an 'on' sensor must always read as the fixed active blue, whatever its elapsed time: {out}"
+    assert out["activeFreshHue"] == 240, out
+    # An "on" sensor stuck past the 6h outer cutoff gets the same hard edge
+    # a quiet one gets: no pulse ring, no recency ring — nothing, because a
+    # sensor still claiming "on" six hours after its last transition is
+    # stuck, not six hours of one continuous fresh event.
+    assert out["activeStuckHue"] is None, out
+    assert not out["activeStuckHasAnyPulseMarkup"], \
+        "a sensor stuck 'on' past 6h must draw no motion glow at all"
 
 
 def test_room_label_steps_out_of_a_markers_way_by_its_own_rendered_width(tmp_path):
@@ -1390,12 +1770,12 @@ def test_room_label_steps_out_of_a_markers_way_by_its_own_rendered_width(tmp_pat
     def render_with_room_name(room_name):
         model = {
             "room_geometry_m": {room_name: {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 3], [0, 3]]}},
-            # Calibrated against this exact room polygon: lands ~38px
-            # horizontally from the label's own x, ~13px above its
-            # unshifted y — inside a long name's half-width, outside a
+            # Calibrated against this exact room polygon (re-tuned 2026-09-07
+            # for the smaller rfsBase — "takes up too much space"): lands
+            # inside a long name's (now narrower) half-width, outside a
             # short one's, and within the (unchanged) ±9px vertical band
             # either way.
-            "light_positions_m": {"binary_sensor.probe": {"x_m": 0.59, "y_m": -0.4, "floor_id": "main"}},
+            "light_positions_m": {"binary_sensor.probe": {"x_m": 0.7, "y_m": -0.4, "floor_id": "main"}},
         }
         lbe = {"binary_sensor.probe": {"entity_id": "binary_sensor.probe", "state": "off", "code": "M08", "shape": "motion", "isMotion": True, "last_changed": None}}
         return _run_js(tmp_path, (
@@ -1750,6 +2130,14 @@ def test_showcase_pool_physics_kelvin_clip_beam_breathe(tmp_path):
     offset off-centre — and tighter than a downlight's.
     Breathe: pools carry a slow opacity animation; the working map carries
     none of this.
+
+    workInert's contract was deliberately narrowed when the room clipPath
+    defs were re-gated on (SHOW || Automorph) — the Automorph aura is gated
+    on its own slider, never on Showcase, so its room clip must exist on
+    the working map too whenever the slider is up. A bare def is inert, so
+    the working map is policed for clip-path APPLICATION and the breathing
+    animation, not for the mere presence of psclip_ ids (which the
+    automorph-off byte-identity guard test polices separately).
     """
     out = _showcase(tmp_path, (
         "const LBE2=JSON.parse(JSON.stringify(LBE));\n"
@@ -1768,7 +2156,7 @@ def test_showcase_pool_physics_kelvin_clip_beam_breathe(tmp_path):
         "const rxOf=(s)=>{const e=/<ellipse cx=\"0\" cy=\"[-0-9.]+\" rx=\"([0-9.]+)\"[^>]*fill=\"url\\(#psglow_0\\)\"/.exec(s); return e?Number(e[1]):null;};\n"
         "out.downCy=cyOf(on); out.spotCy=cyOf(spot);\n"
         "out.downRx=rxOf(on); out.spotRx=rxOf(spot);\n"
-        "out.workInert=!/psclip_|<animate attributeName=\"opacity\" values=/.test(mk({}));\n"
+        "out.workInert=!/clip-path=\"url\\(#psclip_|<animate attributeName=\"opacity\" values=/.test(mk({}));\n"
     ))
     assert out["kelvinStop"] == "#ffa860", out["kelvinStop"]
     assert out["hasClipDef"], "no room clipPath was defined"
@@ -1924,3 +2312,2200 @@ def test_fit_to_room_caps_an_oversized_fixture_and_leaves_a_gap(tmp_path):
     # nothing about the cap.
     assert free_m > 3.0, ("the unconstrained fixture was not oversized to "
                           "begin with", free_m, out)
+
+
+# ── Automorph geometry (Garry, 2026-09-07) ───────────────────────────────────
+# The morph's pure maths — resample, align, lerp — tested directly against
+# synthetic squares/hexes, the same "prove it on a shape a human can check by
+# hand" approach the offsetPolygonInward tests above use.
+
+def test_resample_polygon_ring_preserves_point_count_and_perimeter(tmp_path):
+    out = _run_js(tmp_path, (
+        "import { resamplePolygonRing } from './iso_lights.mjs';\n"
+        "const sq=[[0,0],[10,0],[10,10],[0,10]];\n"
+        "const r=resamplePolygonRing(sq,8);\n"
+        "const perim=(pts)=>{let s=0;for(let i=0;i<pts.length;i++){const a=pts[i],b=pts[(i+1)%pts.length];s+=Math.hypot(b[0]-a[0],b[1]-a[1]);}return s;};\n"
+        "console.log(JSON.stringify({count:r.length, first:r[0], perim:perim(r)}));\n"
+    ))
+    assert out["count"] == 8, "resampling must return exactly the requested point count"
+    assert out["first"] == [0, 0], "resampling starts exactly at the ring's own first point"
+    # Every resampled point lies ON the original square's boundary (straight
+    # edges), so the total perimeter is preserved exactly, not just approximated.
+    assert abs(out["perim"] - 40) < 1e-6, out["perim"]
+
+
+def test_align_ring_start_normalizes_winding_and_starts_at_the_top(tmp_path):
+    """Two rings built by unrelated code — a hand-written icon, a traced room
+    — cannot be lerped index-for-index unless both wind the same way and
+    start from the same reference point, or the interpolation twists through
+    itself. A clockwise square (negative signed area by this file's formula)
+    must come back reversed (positive area) and starting at its own
+    topmost point (smallest y — this file's y grows downward, so "top" is
+    the minimum, matching arcPts' own "y down" convention)."""
+    out = _run_js(tmp_path, (
+        "import { alignRingStart } from './iso_lights.mjs';\n"
+        "const cw=[[0,0],[0,10],[10,10],[10,0]];\n"
+        "const out=alignRingStart(cw);\n"
+        "const area=(pts)=>{let a=0;for(let i=0,j=pts.length-1;i<pts.length;j=i++)a+=pts[j][0]*pts[i][1]-pts[i][0]*pts[j][1];return a/2;};\n"
+        "console.log(JSON.stringify({out, area: area(out)}));\n"
+    ))
+    assert out["area"] > 0, "a clockwise ring must come back with reversed (positive) winding"
+    top_y = min(p[1] for p in out["out"])
+    assert out["out"][0][1] == top_y, (
+        "the ring must start at its own topmost point (min y), not wherever "
+        f"the original vertex order happened to begin: {out['out']}"
+    )
+
+
+def test_automorph_ring_at_zero_percent_is_the_icon_completely_untouched(tmp_path):
+    """The switch's and slider's own rest-position contract: t=0 must be
+    byte-for-byte the icon's own outline, translated to its position — no
+    resampling, no realignment, nothing that could shift a single pixel of
+    the map when Automorph is off or freshly turned on at 0%."""
+    out = _run_js(tmp_path, (
+        "import { iconRingLocal, automorphRing } from './iso_lights.mjs';\n"
+        "const icon=iconRingLocal('hex', 10);\n"
+        "const room=[[0,0],[200,0],[200,200],[0,200]];\n"
+        "const ring=automorphRing(icon, 50, 60, room, 0);\n"
+        "const expect=icon.map(p=>[p[0]+50, p[1]+60]);\n"
+        "console.log(JSON.stringify({ring, expect, equal: JSON.stringify(ring)===JSON.stringify(expect)}));\n"
+    ))
+    assert out["equal"], (
+        "t=0 must exactly equal the icon's own points translated to its "
+        f"position, unresampled: ring={out['ring']} expect={out['expect']}"
+    )
+
+
+def test_automorph_ring_at_full_percent_lands_exactly_on_the_room_boundary(tmp_path):
+    """t=1 is the fully-grown end of the slider — every returned point must
+    sit exactly on the room's own (inset) boundary, not somewhere between
+    the icon and the room. A concentric, axis-aligned icon and room (both
+    squares, same orientation) is the one case simple enough to check this
+    generically: every output point's x is 0 or 100, or its y is 0 or 100 —
+    a point strictly inside the square (a leftover from the icon) or outside
+    it (an overshoot) would fail this."""
+    out = _run_js(tmp_path, (
+        "import { iconRingLocal, automorphRing } from './iso_lights.mjs';\n"
+        "const icon=iconRingLocal('square', 10);\n"
+        "const room=[[0,0],[100,0],[100,100],[0,100]];\n"
+        "const ring=automorphRing(icon, 50, 50, room, 1);\n"
+        "console.log(JSON.stringify({ring}));\n"
+    ))
+    for p in out["ring"]:
+        on_boundary = (
+            abs(p[0] - 0) < 1e-6 or abs(p[0] - 100) < 1e-6
+            or abs(p[1] - 0) < 1e-6 or abs(p[1] - 100) < 1e-6
+        )
+        assert on_boundary, f"point {p} is not on the room's own square boundary: {out['ring']}"
+
+
+def test_automorph_ring_at_half_percent_sits_strictly_between_icon_and_room(tmp_path):
+    """A sanity check against a twisted/overshooting morph: at t=0.5, every
+    point's distance from the shared centre must be strictly between the
+    icon's own radius and the room's half-width — not collapsed back near
+    the icon, and not overshooting past the room."""
+    out = _run_js(tmp_path, (
+        "import { iconRingLocal, automorphRing } from './iso_lights.mjs';\n"
+        "const icon=iconRingLocal('circle', 10);\n"
+        "const room=[[0,0],[100,0],[100,100],[0,100]];\n"
+        "const ring=automorphRing(icon, 50, 50, room, 0.5);\n"
+        "const dist=ring.map(p=>Math.hypot(p[0]-50, p[1]-50));\n"
+        "console.log(JSON.stringify({dist}));\n"
+    ))
+    icon_r = 10 * 0.866
+    room_half_diag = (50 * 2 ** 0.5)
+    for d in out["dist"]:
+        assert icon_r < d < room_half_diag, (
+            f"a half-morphed point sat outside the icon..room range: {d} "
+            f"(icon_r={icon_r}, room_half_diag={room_half_diag})"
+        )
+
+
+def test_best_rotational_match_recovers_a_cyclic_shift(tmp_path):
+    """Ring correspondence must come from geometry, not from each ring's own
+    'topmost point' guess: two copies of the SAME ring, one cyclically
+    rotated, are the case where the right answer is unambiguous — the search
+    must undo the rotation exactly (cost 0), so the subsequent index-for-
+    index lerp pairs every point with itself instead of twisting."""
+    out = _run_js(tmp_path, (
+        "import { bestRotationalMatch } from './iso_lights.mjs';\n"
+        "const a=[[0,0],[10,0],[10,10],[0,10]];\n"
+        "const b=a.slice(3).concat(a.slice(0,3));\n"
+        "const m=bestRotationalMatch(a,b);\n"
+        "console.log(JSON.stringify({m, equal: JSON.stringify(m)===JSON.stringify(a)}));\n"
+    ))
+    assert out["equal"], (
+        "bestRotationalMatch must rotate the shifted copy back into exact "
+        f"index-for-index alignment with the reference ring: {out['m']}"
+    )
+
+
+def test_automorph_resample_count_adapts_to_the_target_rings_own_density(tmp_path):
+    """AUTOMORPH_N is a floor, not the count: a sparse 4-vertex room polygon
+    still resamples to exactly 24 (the pre-cell behaviour, unchanged), but a
+    Chaikin-densified cell ring arriving with more points keeps its own
+    density — capped at 64 — so a cell's concave detail survives the
+    resample instead of being averaged away by a fixed sparse count."""
+    out = _run_js(tmp_path, (
+        "import { iconRingLocal, automorphRing } from './iso_lights.mjs';\n"
+        "const icon=iconRingLocal('circle', 10);\n"
+        "const circ=(n,r)=>Array.from({length:n},(_,i)=>{const a=i/n*2*Math.PI;"
+        "return [50+Math.cos(a)*r, 50+Math.sin(a)*r];});\n"
+        "const sparse=automorphRing(icon, 50, 50, [[0,0],[100,0],[100,100],[0,100]], 0.5);\n"
+        "const dense=automorphRing(icon, 50, 50, circ(40, 40), 0.5);\n"
+        "const capped=automorphRing(icon, 50, 50, circ(200, 40), 0.5);\n"
+        "console.log(JSON.stringify({sparse:sparse.length, dense:dense.length, capped:capped.length}));\n"
+    ))
+    assert out["sparse"] == 24, (
+        "a 4-vertex target must still resample to exactly AUTOMORPH_N=24, "
+        f"got {out['sparse']}"
+    )
+    assert out["dense"] == 40, (
+        f"a 40-point target must keep its own density, got {out['dense']}"
+    )
+    assert out["capped"] == 64, (
+        f"a 200-point target must cap at 64, got {out['capped']}"
+    )
+
+
+# ── Automorph slider 2: edge hardness (Garry, 2026-09-07) ───────────────────
+# "The second slider is to make all the shapes from hard edges to soft, this
+# one starts in the center." Centered at 0 = today's straight polygon,
+# unchanged either direction; negative sharpens via a LOCAL Pucker-and-Bloat
+# push (each point away from its own neighbours' midpoint — straight runs
+# hold still, existing corners spike), positive smooths (a closed Catmull-Rom
+# spline). The negative push is bounded twice: by 75% of the point's own
+# shorter adjacent edge (no local self-intersection at -100) and by an
+# absolute cap the aura call site derives from its inset margin (hardness
+# must never eat the non-overlap gap between neighbouring cells).
+
+def test_hardness_zero_is_the_straight_polygon_completely_unchanged(tmp_path):
+    """The rest position's own contract: hardness=0 must produce the exact
+    same M/L/Z straight-polygon path as before this slider existed, and
+    applyHardness at 0 must not touch a single point."""
+    out = _run_js(tmp_path, (
+        "import { applyHardness, ringPathD } from './iso_lights.mjs';\n"
+        "const ring=[[0,0],[10,0],[10,10],[0,10]];\n"
+        "const same = JSON.stringify(applyHardness(ring, 0)) === JSON.stringify(ring);\n"
+        "const d = ringPathD(ring, 0);\n"
+        "console.log(JSON.stringify({same, d}));\n"
+    ))
+    assert out["same"], "applyHardness(ring, 0) must return the ring's points completely untouched"
+    assert out["d"] == "M0.0,0.0 L10.0,0.0 L10.0,10.0 L0.0,10.0Z", out["d"]
+
+
+def test_hardness_negative_spikes_corners_and_holds_straight_runs_still(tmp_path):
+    """Negative hardness is a LOCAL corner-sharpening operator (the
+    Pucker-and-Bloat technique), not the old centroid inflate: each point
+    is pushed away from the midpoint of its own two neighbours, so
+    'harder' actually ADDS angularity instead of uniformly scaling the
+    whole shape. Checked on a square listed WITH its edge midpoints: a
+    midpoint is collinear with its neighbours (zero local deviation) and
+    must not move AT ALL, while each true corner must spike outward within
+    its own quadrant. Also pins the operator's structural invariants:
+    point count preserved, and byte-identical output across two calls
+    (a render must be reproducible from the fabric alone)."""
+    ring = [[-10, -10], [0, -10], [10, -10], [10, 0],
+            [10, 10], [0, 10], [-10, 10], [-10, 0]]
+    out = _run_js(tmp_path, (
+        "import { applyHardness } from './iso_lights.mjs';\n"
+        f"const ring={json.dumps(ring)};\n"
+        "const a=applyHardness(ring, -100);\n"
+        "const b=applyHardness(ring, -100);\n"
+        "console.log(JSON.stringify({a, same: JSON.stringify(a)===JSON.stringify(b), n: a.length}));\n"
+    ))
+    assert out["n"] == len(ring), "the operator must preserve the point count"
+    assert out["same"], "applyHardness must be deterministic"
+    for orig, p in zip(ring, out["a"]):
+        if 0 in orig:
+            # An edge midpoint: on the straight run between two corners.
+            assert p == orig, f"straight-run point {orig} must not move, got {p}"
+        else:
+            # A true corner: must move strictly outward, same quadrant.
+            assert abs(p[0]) > 10 and abs(p[1]) > 10, f"corner {orig} must spike outward, got {p}"
+            assert p[0] * orig[0] > 0 and p[1] * orig[1] > 0, f"corner {orig} left its quadrant: {p}"
+
+
+def test_hardness_negative_outward_push_respects_an_absolute_cap(tmp_path):
+    """The hardness slider must never blow through the non-overlap gap:
+    the optional third argument is a hard per-point displacement cap (the
+    aura call site derives it from the same inset margin that created the
+    gap). Every point's displacement must stay within the cap, cap=0 must
+    return the ring completely unchanged (a zero inset means the ring
+    already sits on the wall), and the cap must actually bind here —
+    i.e. the uncapped push in this scenario is larger."""
+    ring = [[-10, -10], [0, -10], [10, -10], [10, 0],
+            [10, 10], [0, 10], [-10, 10], [-10, 0]]
+    out = _run_js(tmp_path, (
+        "import { applyHardness } from './iso_lights.mjs';\n"
+        f"const ring={json.dumps(ring)};\n"
+        "const disp=(r)=>Math.max(...r.map((p,i)=>Math.hypot(p[0]-ring[i][0], p[1]-ring[i][1])));\n"
+        "const dCapped=disp(applyHardness(ring, -100, 2));\n"
+        "const dFree=disp(applyHardness(ring, -100));\n"
+        "const zeroSame=JSON.stringify(applyHardness(ring, -100, 0))===JSON.stringify(ring);\n"
+        "console.log(JSON.stringify({dCapped, dFree, zeroSame}));\n"
+    ))
+    assert out["dCapped"] <= 2 + 1e-9, f"a point moved {out['dCapped']} past the cap of 2"
+    assert out["dFree"] > 2, "the cap must actually bind in this scenario, or the test proves nothing"
+    assert out["zeroSame"], "cap=0 (no gap at all) must leave the ring completely unchanged"
+
+
+def test_hardness_negative_gain_is_linear_in_the_slider_and_exact_at_the_endpoint(tmp_path):
+    """The negative side's amplitude anchor: push = (-h/100)*2 * local
+    deviation. Without this, a slider-magnitude-blind gain (hardness -1
+    spiking exactly like -100) passes every other hardness test — they pin
+    direction, locality, quadrant, count, determinism and the two clamps,
+    but no amplitude. Built on a shallow bump whose deviation (1) sits far
+    under both clamps (adjacent edges ~10, no cap passed), so the raw gain
+    formula is the ONLY thing deciding the displacement: -100 must double
+    the deviation exactly, -50 half of that, -25 half again — the linear
+    slider law, pinned at three points."""
+    out = _run_js(tmp_path, (
+        "import { applyHardness } from './iso_lights.mjs';\n"
+        "const ring=[[0,0],[10,1],[20,0],[20,10],[0,10]];\n"
+        "const bump=(h)=>applyHardness(ring, h)[1];\n"
+        "console.log(JSON.stringify({m100:bump(-100), m50:bump(-50), m25:bump(-25)}));\n"
+    ))
+    assert out["m100"] == [10, 3], (
+        f"at -100 the unclamped bump (deviation 1) must move by exactly 2: {out}"
+    )
+    assert out["m50"] == [10, 2], (
+        f"at -50 the push must be exactly HALF the -100 endpoint's — gain is linear in -h: {out}"
+    )
+    assert out["m25"] == [10, 1.5], (
+        f"at -25 the push must be exactly a quarter of the -100 endpoint's: {out}"
+    )
+
+
+def test_hardness_cap_is_derived_from_the_inset_margin_itself():
+    """Structural pin, same discipline as the marginM multiplier pin: the
+    absolute spike cap must be derived from the SAME margin the ring was
+    just inset by — marginM*frame.scale (metres to px) * SQRT1_2 (the iso
+    projection's most-compressed direction, so the cap holds whichever way
+    a spike points) * 0.85 (spend at most 85% of the projected gap). No
+    render test can pin this formula cheaply: with the inset ring holding
+    its full-margin clearance, the 75%-of-edge clamp also bounds ordinary
+    spikes, so a regressed cap only shows on shapes with long edges AND
+    tight margins — exactly the combination a fixed scene doesn't stage."""
+    src = _code_only((_VIEWS / "iso_lights.js").read_text(encoding="utf-8"))
+    assert "const hardCapPx=marginM*frame.scale*Math.SQRT1_2*0.85;" in src, (
+        "the hardness spike cap must stay derived from the inset margin that created "
+        "the gap it protects — an Infinity or unrelated-constant cap silently re-opens "
+        "the negative-hardness overlap defect on tight-margin scenes"
+    )
+
+
+def test_hardness_negative_push_cannot_exceed_the_local_edge_length(tmp_path):
+    """Self-intersection guard: an already-sharp corner's amplified
+    deviation could overshoot its own neighbours at -100, folding the
+    outline over itself. The push is clamped to 75% of the shorter
+    adjacent edge, so a spike is always shorter than the edges it grows
+    between. Built on a needle whose deviation (~10) dwarfs its shortest
+    edge (~0.71) — uncapped, the raw push would be ~20."""
+    ring = [[10, 0], [9.5, 0.5], [-10, 1], [-10, -1]]
+    short_edge = (0.5 ** 2 + 0.5 ** 2) ** 0.5  # [10,0] to [9.5,0.5]
+    out = _run_js(tmp_path, (
+        "import { applyHardness } from './iso_lights.mjs';\n"
+        f"const ring={json.dumps(ring)};\n"
+        "const r=applyHardness(ring, -100);\n"
+        "const d0=Math.hypot(r[0][0]-ring[0][0], r[0][1]-ring[0][1]);\n"
+        "console.log(JSON.stringify({d0}));\n"
+    ))
+    assert 0 < out["d0"] <= short_edge * 0.75 + 1e-9, \
+        f"the needle point moved {out['d0']}, past 75% of its shorter edge ({short_edge * 0.75:.3f})"
+
+
+def test_hardness_non_negative_is_exact_passthrough_even_with_a_cap(tmp_path):
+    """The soft half lives entirely in ringPathD; applyHardness at any
+    hardness >= 0 must return the very same array untouched regardless of
+    the cap argument — the rest position (0) and the whole positive range
+    must be unreachable by the new clamp plumbing."""
+    out = _run_js(tmp_path, (
+        "import { applyHardness } from './iso_lights.mjs';\n"
+        "const ring=[[0,0],[10,0],[10,10],[0,10]];\n"
+        "const atZero=applyHardness(ring, 0, 5)===ring;\n"
+        "const atSoft=applyHardness(ring, 60, 5)===ring;\n"
+        "console.log(JSON.stringify({atZero, atSoft}));\n"
+    ))
+    assert out["atZero"], "hardness=0 with a cap must still be an exact (same-array) passthrough"
+    assert out["atSoft"], "positive hardness with a cap must still be an exact (same-array) passthrough"
+
+
+def test_hardness_positive_leaves_points_untouched_only_the_path_smooths(tmp_path):
+    """Positive (soft) hardness is deliberately NOT a point transform —
+    applyHardness must return the ring as-is; only ringPathD changes,
+    producing cubic-Bezier ("C") segments, one per ring point, instead of
+    straight lines."""
+    out = _run_js(tmp_path, (
+        "import { applyHardness, ringPathD } from './iso_lights.mjs';\n"
+        "const ring=[[0,0],[10,0],[10,10],[0,10]];\n"
+        "const same = JSON.stringify(applyHardness(ring, 100)) === JSON.stringify(ring);\n"
+        "const d = ringPathD(ring, 100);\n"
+        "const cCount = (d.match(/C/g)||[]).length;\n"
+        "const hasL = d.includes('L');\n"
+        "console.log(JSON.stringify({same, cCount, hasL}));\n"
+    ))
+    assert out["same"], "positive hardness must not transform the ring's points"
+    assert out["cCount"] == 4, "one cubic-bezier segment per ring point, at full softness"
+    assert not out["hasL"], "a fully-softened path must not contain any straight-line (L) segments"
+
+
+def test_hardness_softening_scales_continuously_with_the_slider(tmp_path):
+    """A half-soft path (hardness=50) must sit strictly between the sharp
+    corner (the straight polygon's own vertex) and the fully-softened
+    curve's control point — proving the dial is continuous, not a hard
+    flip between two fixed looks at some threshold."""
+    out = _run_js(tmp_path, (
+        "import { ringPathD } from './iso_lights.mjs';\n"
+        "const ring=[[0,0],[10,0],[10,10],[0,10]];\n"
+        "const d0 = ringPathD(ring, 0);\n"
+        "const d50 = ringPathD(ring, 50);\n"
+        "const d100 = ringPathD(ring, 100);\n"
+        "console.log(JSON.stringify({d0, d50, d100}));\n"
+    ))
+    assert "L" in out["d0"] and "C" not in out["d0"], out["d0"]
+    assert "C" in out["d50"], out["d50"]
+    assert "C" in out["d100"] and "L" not in out["d100"], out["d100"]
+    assert out["d50"] != out["d100"], "50% soft must not already equal the fully-softened path"
+
+
+def test_automorph_style_dropdown_switches_the_rendered_treatment(tmp_path):
+    """Every style paints the SAME morphed ring differently — verified
+    through the real renderer (buildIsoSVG), not just the pure geometry:
+    glow (default) carries the aura's blur group (psaurasoft, its own
+    clone of the pool filter) and a stroke, plus — this fixture is lit —
+    exactly one masked inner bloom; blueprint is stroke-only with dashes
+    and per-vertex node circles, no fill and no blur; nebula fills through
+    the shared mask and has neither a blur group nor a stroke. An
+    unrecognised style name must fall back to glow."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Office": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]}},
+        "light_positions_m": {"light.lamp": {"x_m": 3, "y_m": 3, "floor_id": "main"}},
+    }
+    lbe = {"light.lamp": {"entity_id": "light.lamp", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None}}
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+
+    def render(style):
+        return _run_js(tmp_path, (
+            "import * as M from './iso_lights.mjs';\n"
+            f"const MODEL={json.dumps(model)};\n"
+            f"const LBE={json.dumps(lbe)};\n"
+            f"const FLOORS={json.dumps(floors)};\n"
+            f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+            f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:50, automorphStyle:{json.dumps(style)}}});\n"
+            "console.log(JSON.stringify({"
+            "blur: (svg.match(/filter=\"url\\(#psaurasoft\\)\"/g)||[]).length,"
+            "mask: (svg.match(/mask=\"url\\(#psautomorphmask\\)\"/g)||[]).length,"
+            "dashed: svg.includes('stroke-dasharray=\"4,3\"'),"
+            "}));\n"
+        ))
+
+    glow = render("glow")
+    blueprint = render("blueprint")
+    nebula = render("nebula")
+    unknown = render("bogus")
+
+    # glow's single mask application is the on-state inner bloom: the lit
+    # material split borrows nebula's shared mask (one def, any number of
+    # fixtures) rather than defining a second fade of its own.
+    assert glow["blur"] >= 1 and not glow["dashed"] and glow["mask"] == 1, glow
+    assert blueprint["dashed"] and blueprint["blur"] == 0 and blueprint["mask"] == 0, blueprint
+    assert nebula["mask"] >= 1 and nebula["blur"] == 0 and not nebula["dashed"], nebula
+    assert unknown == glow, "an unrecognised style name must fall back to glow, not silently render nothing"
+
+
+def test_automorph_subtlety_thins_opacity_and_stroke_without_ever_reaching_zero(tmp_path):
+    """0 must be today's exact opacity/stroke-width (the same contract every
+    other Automorph control's rest position holds); 100 must be visibly
+    thinner and fainter, but never fully invisible or zero-width — Garry
+    asked for "almost completely lost", not gone."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Office": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]}},
+        "light_positions_m": {"light.lamp": {"x_m": 3, "y_m": 3, "floor_id": "main"}},
+    }
+    lbe = {"light.lamp": {"entity_id": "light.lamp", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None}}
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+
+    def render(subtlety):
+        out = _run_js(tmp_path, (
+            "import * as M from './iso_lights.mjs';\n"
+            f"const MODEL={json.dumps(model)};\n"
+            f"const LBE={json.dumps(lbe)};\n"
+            f"const FLOORS={json.dumps(floors)};\n"
+            f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+            f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:50, automorphStyle:'glow', automorphSubtlety:{subtlety}}});\n"
+            # The wash's fill is the shared duotone gradient now (craft round:
+            # interiors own the depth cue), so the probe keys on its url ref
+            # rather than the old flat on-grey.
+            "const m = svg.match(/<path d=\"[^\"]+\" fill=\"url\\(#psautomorphduo_on\\)\" fill-opacity=\"([\\d.]+)\"[^]*?stroke-width=\"([\\d.]+)\"/);\n"
+            "console.log(JSON.stringify({fillOpacity: m ? parseFloat(m[1]) : null, strokeWidth: m ? parseFloat(m[2]) : null}));\n"
+        ))
+        return out
+
+    at0 = render(0)
+    at100 = render(100)
+    assert at0["fillOpacity"] is not None and at100["fillOpacity"] is not None, (at0, at100)
+    assert at100["fillOpacity"] < at0["fillOpacity"], (at0, at100)
+    assert at100["fillOpacity"] > 0, "subtlety=100 must fade, not fully hide"
+    assert at100["strokeWidth"] < at0["strokeWidth"], (at0, at100)
+    assert at100["strokeWidth"] > 0, "subtlety=100 must thin, not zero out, the stroke"
+
+
+# ── Automorph non-overlap partitioning (Garry, 2026-09-07: "give a thorough
+# rethink to complete the logic of this feature") ───────────────────────────
+# Before this, every fixture sharing a room grew toward the SAME full-room
+# shape and piled on top of its neighbours. buildRoomFixtureCells instead
+# gives each fixture its own region: a masked approximate-geodesic flood per
+# fixture, weighted (and reach-capped) by its own manual footprint.
+
+def test_automorph_fixture_weight_default_and_scaled(tmp_path):
+    """No recorded manual size is a typical/default fixture (weight 1); a
+    tiny footprint weighs less (a smaller reach cap later); a very long one
+    weighs more, clamped so no single fixture's footprint can blow past the
+    [0.25, 2.5] band regardless of how extreme the entered dimensions are."""
+    out = _run_js(tmp_path, (
+        "import { automorphFixtureWeight as w } from './iso_lights.mjs';\n"
+        "console.log(JSON.stringify({"
+        "unset: w(0,0), unsetNull: w(undefined,undefined), tiny: w(15,15), "
+        "long: w(300,10), extreme: w(1,1)"
+        "}));\n"
+    ))
+    assert out["unset"] == 1 and out["unsetNull"] == 1, out
+    assert 0.25 <= out["tiny"] < 1, out
+    assert out["long"] == 2.5, "a very long fixture's weight must clamp at the 2.5 ceiling"
+    assert out["extreme"] == 0.25, "a near-zero footprint's weight must clamp at the 0.25 floor"
+
+
+def test_partition_two_fixtures_get_non_overlapping_cells(tmp_path):
+    """Two ordinary (default-weight) fixtures placed on opposite sides of a
+    square room must each get a cell containing their OWN position and
+    excluding the other's, and the two cells must not substantially overlap
+    — sampled across the room's interior, only a thin sliver near the shared
+    boundary may legitimately land in both (grid-resolution ambiguity right
+    at the dividing line), never a broad swath."""
+    out = _run_js(tmp_path, (
+        "import { buildRoomFixtureCells, pointInPolygon } from './iso_lights.mjs';\n"
+        "const room=[[0,0],[10,0],[10,10],[0,10]];\n"
+        "const fixtures=[{id:'a',x:2,y:5,weight:1},{id:'b',x:8,y:5,weight:1}];\n"
+        "const cells=buildRoomFixtureCells(room, fixtures);\n"
+        "const a=cells.get('a'), b=cells.get('b');\n"
+        "const aHasOwn = a ? pointInPolygon(a, 2, 5) : false;\n"
+        "const bHasOwn = b ? pointInPolygon(b, 8, 5) : false;\n"
+        "const aHasOther = a ? pointInPolygon(a, 8, 5) : false;\n"
+        "const bHasOther = b ? pointInPolygon(b, 2, 5) : false;\n"
+        "let both=0, either=0;\n"
+        "for(let x=0.5;x<10;x+=0.5) for(let y=0.5;y<10;y+=0.5){\n"
+        "  const inA = a && pointInPolygon(a, x, y), inB = b && pointInPolygon(b, x, y);\n"
+        "  if(inA||inB) either++;\n"
+        "  if(inA&&inB) both++;\n"
+        "}\n"
+        "console.log(JSON.stringify({hasA: !!a, hasB: !!b, aHasOwn, bHasOwn, aHasOther, bHasOther, both, either}));\n"
+    ))
+    assert out["hasA"] and out["hasB"], f"both fixtures must resolve to a real cell: {out}"
+    assert out["aHasOwn"] and out["bHasOwn"], f"a fixture's own cell must contain its own position: {out}"
+    assert not out["aHasOther"] and not out["bHasOther"], (
+        f"a fixture's cell must not contain the OTHER fixture's position — that was exactly "
+        f"the pre-fix bug (every fixture grew toward the same shared target): {out}"
+    )
+    overlap_frac = out["both"] / out["either"]
+    assert overlap_frac < 0.15, f"cells overlap too broadly to be a real partition: {out}"
+
+
+def test_partition_single_tiny_fixture_stays_small_even_alone_in_its_room(tmp_path):
+    """'Common sense' sizing (Garry, 2026-09-07): a fixture with a small
+    recorded manual footprint must NOT balloon to fill most of the room just
+    because it happens to be the only fixture present — the same reach-cap
+    weighting that divides a room between several fixtures also caps a lone
+    fixture's own cell, with no special-cased N=1 branch needed."""
+    out = _run_js(tmp_path, (
+        "import { buildRoomFixtureCells, automorphFixtureWeight } from './iso_lights.mjs';\n"
+        "const room=[[0,0],[10,0],[10,10],[0,10]];\n"
+        "const area=(pts)=>{ let a=0; for(let i=0,j=pts.length-1;i<pts.length;j=i++) "
+        "a+=pts[j][0]*pts[i][1]-pts[i][0]*pts[j][1]; return Math.abs(a)/2; };\n"
+        "const tinyW=automorphFixtureWeight(15,15), defaultW=automorphFixtureWeight(0,0);\n"
+        "const tinyCell=buildRoomFixtureCells(room, [{id:'x', x:1.2, y:1.2, weight:tinyW}]).get('x');\n"
+        "const defaultCell=buildRoomFixtureCells(room, [{id:'x', x:1.2, y:1.2, weight:defaultW}]).get('x');\n"
+        "console.log(JSON.stringify({tinyArea: tinyCell?area(tinyCell):null, defaultArea: defaultCell?area(defaultCell):null, roomArea: area(room)}));\n"
+    ))
+    assert out["tinyArea"] is not None and out["defaultArea"] is not None, out
+    assert out["tinyArea"] < out["defaultArea"], (
+        f"a tiny-footprint fixture alone in a room must still get a smaller cell than a "
+        f"default-weight fixture alone in the same room: {out}"
+    )
+    assert out["defaultArea"] > out["roomArea"] * 0.5, (
+        f"a default-weight lone fixture should still comfortably fill most of its room "
+        f"(today's original v1 behaviour, unchanged for the common case): {out}"
+    )
+
+
+# ── Chaikin baseline smoothing of the automorph TARGET (2026-09-07 critique:
+# the marching-squares cell rings render their sampling grid's stairstep as
+# zig-zags even at hardness=0 — a NEW artifact the partition introduced, not
+# what "0 = today's clean straight treatment" ever meant — and the room-trace
+# fallback carries digitization noise and miter bevels of its own). The fix
+# is chaikinSmooth, applied exactly once at automorphAuraSvg's targetPts
+# choice so BOTH target kinds share one corner language.
+
+def test_chaikin_smooth_cuts_corners_but_only_along_the_rings_own_edges(tmp_path):
+    """One pass replaces each edge with its 25%/75% points: the point count
+    doubles, the ring is treated as CLOSED (the last->first edge is cut like
+    any other, and no original corner vertex survives), and every output
+    point lies ON an edge of the input ring — the property that makes the
+    pass unable to change topology or push a cell broadly into a
+    neighbour's, unlike a blur or inflate. Two passes are exactly one pass
+    applied twice, so that per-pass on-edge guarantee composes."""
+    out = _run_js(tmp_path, (
+        "import { chaikinSmooth } from './iso_lights.mjs';\n"
+        "const ring=[[0,0],[10,0],[10,10],[0,10]];\n"
+        "const onEdge=(p)=>{ for(let i=0;i<ring.length;i++){\n"
+        "  const a=ring[i], b=ring[(i+1)%ring.length];\n"
+        "  const cross=Math.abs((b[0]-a[0])*(p[1]-a[1])-(b[1]-a[1])*(p[0]-a[0]));\n"
+        "  const within=p[0]>=Math.min(a[0],b[0])-1e-9 && p[0]<=Math.max(a[0],b[0])+1e-9\n"
+        "    && p[1]>=Math.min(a[1],b[1])-1e-9 && p[1]<=Math.max(a[1],b[1])+1e-9;\n"
+        "  if(cross<1e-9 && within) return true; } return false; };\n"
+        "const one=chaikinSmooth(ring, 1);\n"
+        "const two=chaikinSmooth(ring, 2);\n"
+        "const composed=chaikinSmooth(chaikinSmooth(ring, 1), 1);\n"
+        "console.log(JSON.stringify({\n"
+        "  oneLen: one.length, twoLen: two.length,\n"
+        "  allOnEdge: one.every(onEdge),\n"
+        "  cornerSurvives: one.some(p=>ring.some(q=>p[0]===q[0]&&p[1]===q[1])),\n"
+        "  closingEdgeCut: one.some(p=>p[0]===0 && p[1]>0 && p[1]<10),\n"
+        "  composes: JSON.stringify(two)===JSON.stringify(composed),\n"
+        "}));\n"
+    ))
+    assert out["oneLen"] == 8 and out["twoLen"] == 16, f"each pass must double the point count: {out}"
+    assert out["allOnEdge"], f"every smoothed point must lie on an edge of the input ring: {out}"
+    assert not out["cornerSurvives"], f"corner cutting must remove every original corner vertex: {out}"
+    assert out["closingEdgeCut"], f"the closing (last->first) edge must be cut like any other: {out}"
+    assert out["composes"], f"two passes must equal one pass applied twice: {out}"
+
+
+def test_chaikin_smooth_passthrough_clamp_and_determinism(tmp_path):
+    """A degenerate under-3-point ring passes through untouched (never
+    fabricate geometry from nothing); iterations clamp at 2 — past that,
+    corner cutting starts eating an L-shaped trace's REAL concave corners
+    rather than the grid noise it exists to remove; and the output is a pure
+    function of the input ring alone — the same determinism contract the
+    cell wobble already documents (the fabric alone must reproduce a
+    render)."""
+    out = _run_js(tmp_path, (
+        "import { chaikinSmooth } from './iso_lights.mjs';\n"
+        "const ring=[[0,0],[10,0],[10,10],[0,10]];\n"
+        "const j=JSON.stringify;\n"
+        "console.log(j({\n"
+        "  twoPt: j(chaikinSmooth([[0,0],[5,5]], 2))===j([[0,0],[5,5]]),\n"
+        "  empty: j(chaikinSmooth(null, 2))===j([]),\n"
+        "  clamped: j(chaikinSmooth(ring, 5))===j(chaikinSmooth(ring, 2)),\n"
+        "  zero: j(chaikinSmooth(ring, 0))===j(ring),\n"
+        "  deterministic: j(chaikinSmooth(ring, 2))===j(chaikinSmooth(ring, 2)),\n"
+        "}));\n"
+    ))
+    assert out["twoPt"], "an under-3-point ring must pass through untouched"
+    assert out["empty"], "a null ring must come back as an empty ring, not a crash"
+    assert out["clamped"], "iterations beyond 2 must clamp — over-smoothing eats real concave corners"
+    assert out["zero"], "zero iterations must be a no-op"
+    assert out["deterministic"], "same ring in, same points out — no hidden randomness"
+
+
+def test_chaikin_is_applied_once_at_the_shared_target_choice():
+    """The smoothing has exactly ONE application point — automorphInsetRing,
+    the shared inset stage — so a resolved cell, the room.pts fallback AND
+    the perimeter trace (which rides the same helper since the 2026-09-08
+    perimeter round) get the identical corner language. Smoothing inside
+    buildRoomFixtureCells AND at the call site would double-smooth every
+    resolved cell while the fallback got a single pass; this pins the
+    reconciled single-site scheme, and it keeps the stored cells raw so the
+    non-overlap partition tests above measure the field competition itself,
+    not a post-process of it. The densifyRing wrapper is part of the pinned
+    shape: Chaikin's cut rides its input's edge length, so 'identical corner
+    language' only holds when every target kind enters at the same ~0.1m
+    edge scale — without it a sparse traced polygon got metre-scale corner
+    rounding where a cell ring got cm-scale cleanup (see the densify unit
+    test below for the measured numbers). Deliberately updated when the
+    inset stage moved from automorphAuraSvg's targetPts line into the
+    helper: the pinned intent — one smoothing application, no consumer with
+    its own corner language — is unchanged, and both consumers' routing is
+    pinned here so neither can quietly grow a private smoothing pass."""
+    src = _code_only((_VIEWS / "iso_lights.js").read_text(encoding="utf-8"))
+    calls = re.findall(r"(?<!function )chaikinSmooth\(", src)
+    assert len(calls) == 1, f"expected exactly one chaikinSmooth call site, found {len(calls)}"
+    assert "chaikinSmooth(densifyRing(rawPts, 0.1), 2)" in src, (
+        "the one call site must live in automorphInsetRing, densified to the same "
+        "~0.1m edge scale, so every target kind is smoothed identically"
+    )
+    assert "automorphInsetRing(hasCell?cellPtsM:room.pts," in src, (
+        "the aura must route the cell/room-fallback choice through the shared inset stage"
+    )
+    assert "automorphInsetRing(room.pts, perimeterWantM(entry))" in src, (
+        "the perimeter trace must ride the same shared inset stage at its own margin_cm"
+    )
+
+
+def test_densify_makes_the_sparse_fallback_smoothing_cm_scale(tmp_path):
+    """Chaikin's cut rides its input's edge length, so the same two passes
+    that clean cm-scale grid noise off a ~0.1m-edged cell ring rounded the
+    sparse 4-8-vertex room.pts fallback at METRE scale — measured: a 6x4m
+    room's smoothed fallback passed 0.83m inside its own corner, on input
+    that had zero digitization noise to remove, defeating 'barely changing
+    the traced position'. Pre-densified to ~0.1m edges the identical call
+    passes within ~2cm of the corner — the cells' corner language, at the
+    cells' scale. Also pins densifyRing's own contract: original vertices
+    kept exactly (subdivision only, never displacement), and an already-
+    dense ring passes through as a no-op."""
+    out = _run_js(tmp_path, (
+        "import { chaikinSmooth, densifyRing } from './iso_lights.mjs';\n"
+        "const sq=[[0,0],[6,0],[6,4],[0,4]];\n"
+        "const corner=(pts)=>Math.min(...pts.map(p=>Math.hypot(p[0]-6, p[1]-0)));\n"
+        "const raw=corner(chaikinSmooth(sq, 2));\n"
+        "const dens=corner(chaikinSmooth(densifyRing(sq, 0.1), 2));\n"
+        "const kept=densifyRing(sq, 0.1).some(p=>p[0]===6&&p[1]===0);\n"
+        "const fine=[[0,0],[0.05,0],[0.1,0],[0.1,0.05],[0.1,0.1],[0,0.1]];\n"
+        "const noop=JSON.stringify(densifyRing(fine, 0.1))===JSON.stringify(fine);\n"
+        "console.log(JSON.stringify({raw:+raw.toFixed(3), dens:+dens.toFixed(3), kept, noop}));\n"
+    ))
+    assert out["raw"] > 0.8, (
+        f"the raw sparse ring should document the defect scale (~0.83m of corner cut): {out}"
+    )
+    assert out["dens"] < 0.05, (
+        f"the densified ring must keep the smoothing at cm scale — the fallback aura has "
+        f"to track the room's actual corners: {out}"
+    )
+    assert out["kept"], "densifyRing must keep every original vertex exactly — subdivision only"
+    assert out["noop"], "a ring already at or under the edge scale must pass through untouched"
+
+
+def test_automorph_two_fixtures_sharing_a_room_render_different_auras(tmp_path):
+    """End-to-end through the real renderer: two fixtures placed in the SAME
+    room must render two DIFFERENT aura outlines at pct=100 — before this,
+    both fixtures resampled the identical full-room boundary and produced
+    the same point set (visually, two auras stacked on each other). Uses
+    hardness=0 (plain M/L/Z, easy to parse) and the 'blueprint' style, whose
+    dashed single-path-per-fixture output (see the style-dropdown test
+    above) is unambiguous to pull two separate 'd' strings out of."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]}},
+        "light_positions_m": {
+            "light.a": {"x_m": 1.5, "y_m": 2, "floor_id": "main"},
+            "light.b": {"x_m": 6.5, "y_m": 2, "floor_id": "main"},
+        },
+    }
+    lbe = {
+        "light.a": {"entity_id": "light.a", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.b": {"entity_id": "light.b", "state": "on", "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:100, automorphHardness:0, automorphStyle:'blueprint'}});\n"
+        "const ds = [...svg.matchAll(/<path d=\"([^\"]+)\" fill=\"none\" stroke=\"[^\"]+\" \"?stroke-opacity/g)].map(m=>m[1]);\n"
+        "const ds2 = [...svg.matchAll(/<path d=\"([^\"]+)\"[^>]*stroke-dasharray=\"4,3\"/g)].map(m=>m[1]);\n"
+        "console.log(JSON.stringify({count: ds2.length, d0: ds2[0]||null, d1: ds2[1]||null}));\n"
+    ))
+    assert out["count"] == 2, f"expected exactly one blueprint aura path per fixture: {out}"
+    assert out["d0"] and out["d1"] and out["d0"] != out["d1"], (
+        f"the two fixtures' aura outlines must differ — identical outlines mean the partition "
+        f"was not applied and both fell back to the same full-room shape: {out}"
+    )
+
+
+def test_automorph_rendered_rings_are_simple_and_never_cross_a_neighbours(tmp_path):
+    """The two invariants the whole inset stage exists to deliver, checked
+    on the DRAWN rings end-to-end — no earlier test ever parsed a rendered
+    ring for simplicity or tested two rendered rings against each other,
+    which is exactly how both defects shipped green:
+
+    - SIMPLE: every emitted aura ring must have zero self-intersections.
+      Before the resample-before-offset + fold-pruning repair, feeding
+      offsetPolygonInward the raw Chaikin output rendered every ring in
+      the 3-fixture strip scene with 5 self-crossing bowtie loops at the
+      hardness slider's REST position.
+    - SEPARATED: no ring vertex may sit inside a neighbouring fixture's
+      ring by more than ~1px, at ANY hardness. Before the repair the
+      4-downlight square scene penetrated 6.0px at hardness 0, and the
+      strip's ring genuinely crossed its neighbour's at 6 segment pairs
+      at -100 — hardCapPx's "can never eat the gap" argument was void
+      because the inset ring never had the gap to begin with.
+
+    Two scenes on purpose: the 4-pack of even circles (the symmetric
+    common case) and the 10x4m strip room whose 240cm rotated bar takes
+    weight 2.5 and carves concave neighbour cells (the hard case that
+    produced the worst folds). Hardness sweeps the full slider: -100
+    spikes, 0 straight polygons, +100 Catmull-Rom curves (whose on-curve
+    points are the ring's own vertices — the same ring, parsed from the
+    C endpoints)."""
+    NOW = 1_000_000_000_000
+    pack_model = {
+        "room_geometry_m": {"Sq": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [5, 0], [5, 5], [0, 5]]}},
+        "light_positions_m": {
+            "light.p1": {"x_m": 1.5, "y_m": 1.5, "floor_id": "main"},
+            "light.p2": {"x_m": 3.5, "y_m": 1.5, "floor_id": "main"},
+            "light.p3": {"x_m": 1.5, "y_m": 3.5, "floor_id": "main"},
+            "light.p4": {"x_m": 3.5, "y_m": 3.5, "floor_id": "main"},
+        },
+    }
+    pack_lbe = {
+        f"light.p{i}": {"entity_id": f"light.p{i}", "state": "on", "code": f"A0{i}",
+                        "shape": "circle", "isMotion": False, "last_changed": None}
+        for i in (1, 2, 3, 4)
+    }
+    strip_model = {
+        "room_geometry_m": {"Wide": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [10, 0], [10, 4], [0, 4]]}},
+        "light_positions_m": {
+            "light.a": {"x_m": 1.5, "y_m": 2, "floor_id": "main"},
+            "light.b": {"x_m": 5.0, "y_m": 2, "floor_id": "main", "width_cm": 240, "height_cm": 5, "rotation": 30},
+            "light.c": {"x_m": 8.5, "y_m": 2, "floor_id": "main"},
+        },
+    }
+    strip_lbe = {
+        "light.a": {"entity_id": "light.a", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.b": {"entity_id": "light.b", "state": "on", "code": "A02", "shape": "bar", "isMotion": False, "last_changed": None},
+        "light.c": {"entity_id": "light.c", "state": "on", "code": "A03", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const PACK={json.dumps(pack_model)};\n"
+        f"const PACKL={json.dumps(pack_lbe)};\n"
+        f"const STRIP={json.dumps(strip_model)};\n"
+        f"const STRIPL={json.dumps(strip_lbe)};\n"
+        "const FLOORS=[{id:'main',name:'Main',level:0}];\n"
+        "const pip=(pts,x,y)=>{let s=false;for(let i=0,j=pts.length-1;i<pts.length;j=i++){"
+        "const xi=pts[i][0],yi=pts[i][1],xj=pts[j][0],yj=pts[j][1];"
+        "if(((yi>y)!==(yj>y))&&(x<(xj-xi)*(y-yi)/(yj-yi)+xi))s=!s;}return s;};\n"
+        "const dTo=(pts,x,y)=>{let b=Infinity;for(let i=0;i<pts.length;i++){"
+        "const a=pts[i],c=pts[(i+1)%pts.length];const dx=c[0]-a[0],dy=c[1]-a[1],L2=dx*dx+dy*dy;"
+        "let t=L2>0?((x-a[0])*dx+(y-a[1])*dy)/L2:0;t=Math.max(0,Math.min(1,t));"
+        "b=Math.min(b,Math.hypot(x-a[0]-dx*t,y-a[1]-dy*t));}return b;};\n"
+        "const segX=(a,b,c,d)=>{const d1x=b[0]-a[0],d1y=b[1]-a[1],d2x=d[0]-c[0],d2y=d[1]-c[1];"
+        "const den=d1x*d2y-d1y*d2x;if(Math.abs(den)<1e-12)return false;"
+        "const t=((c[0]-a[0])*d2y-(c[1]-a[1])*d2x)/den,u=((c[0]-a[0])*d1y-(c[1]-a[1])*d1x)/den;"
+        "return t>1e-9&&t<1-1e-9&&u>1e-9&&u<1-1e-9;};\n"
+        "const selfX=(r)=>{let c=0;const n=r.length;for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){"
+        "if((j+1)%n===i||(i+1)%n===j)continue;if(segX(r[i],r[(i+1)%n],r[j],r[(j+1)%n]))c++;}return c;};\n"
+        "const parseRing=(d)=>{\n"
+        "  if(d.includes('C')){\n"
+        "    const m0=d.match(/^M(-?[\\d.]+),(-?[\\d.]+)/);\n"
+        "    const pts=[[+m0[1],+m0[2]]];\n"
+        "    for(const c of d.matchAll(/C(-?[\\d.]+),(-?[\\d.]+) (-?[\\d.]+),(-?[\\d.]+) (-?[\\d.]+),(-?[\\d.]+)/g)) pts.push([+c[5],+c[6]]);\n"
+        "    if(pts.length>1&&pts[0][0]===pts[pts.length-1][0]&&pts[0][1]===pts[pts.length-1][1]) pts.pop();\n"
+        "    return pts;\n"
+        "  }\n"
+        "  return [...d.matchAll(/[ML](-?[\\d.]+),(-?[\\d.]+)/g)].map(m=>[+m[1],+m[2]]);\n"
+        "};\n"
+        "const rings=(model,lbe,h)=>{\n"
+        "  const svg=M.buildIsoSVG(model,{},new Set(),null,150,0,lbe,false,FLOORS,\n"
+        "    {nowMs:1000000000000,automorph:true,automorphRoomPct:100,automorphHardness:h,automorphStyle:'glow'});\n"
+        "  return [...svg.matchAll(/<path d=\"([^\"]+)\" fill=\"url\\(#psautomorphduo_(?:on|off)\\)\" fill-opacity=\"[\\d.]+\" stroke=\"#/g)].map(m=>parseRing(m[1]));\n"
+        "};\n"
+        "const audit=(model,lbe,h)=>{\n"
+        "  const rs=rings(model,lbe,h);\n"
+        "  let pen=0;\n"
+        "  for(let i=0;i<rs.length;i++)for(let j=0;j<rs.length;j++){if(i===j)continue;\n"
+        "    for(const [x,y] of rs[i]) if(pip(rs[j],x,y)) pen=Math.max(pen,dTo(rs[j],x,y));}\n"
+        "  return {n:rs.length, pen:+pen.toFixed(2), selfX:rs.reduce((a,r)=>a+selfX(r),0)};\n"
+        "};\n"
+        "const out={};\n"
+        "for(const h of [-100,0,100]){ out['pack_'+h]=audit(PACK,PACKL,h); out['strip_'+h]=audit(STRIP,STRIPL,h); }\n"
+        "console.log(JSON.stringify(out));\n"
+    ))
+    for h in (-100, 0, 100):
+        pack, strip = out[f"pack_{h}"], out[f"strip_{h}"]
+        assert pack["n"] == 4 and strip["n"] == 3, (
+            f"expected one edgeCore ring per fixture at hardness {h}: {out}"
+        )
+        assert pack["selfX"] == 0 and strip["selfX"] == 0, (
+            f"every rendered aura ring must be SIMPLE at hardness {h} — a self-crossing "
+            f"bowtie means the offset stage folded and nothing pruned it: {out}"
+        )
+        assert pack["pen"] <= 1.0 and strip["pen"] <= 1.0, (
+            f"no ring vertex may sit inside a neighbouring fixture's ring by more than "
+            f"~1px at hardness {h} — the non-overlap gap was spent before hardness even "
+            f"ran: {out}"
+        )
+
+
+# ── Automorph icon endpoint: the fixture's REAL manual footprint ────────────
+# (Garry, 2026-09-07: "the existing manual shapes are still meant to be a
+# guide for the overall look, don't throw that info away.") The morph's
+# starting shape is automorphIconRing — iconRingLocal scaled and rotated by
+# the SAME markerScale transform the real glyph already draws with — so a
+# strip's aura grows from its own long, angled footprint, not a generic hex.
+
+def test_automorph_icon_ring_without_manual_size_is_exactly_the_plain_icon(tmp_path):
+    """No recorded width/height and no rotation must be a byte-for-byte
+    no-op — the same identity contract every other Automorph control's rest
+    position holds, so no existing fixture's aura moves a pixel."""
+    out = _run_js(tmp_path, (
+        "import { automorphIconRing, iconRingLocal } from './iso_lights.mjs';\n"
+        "const a=automorphIconRing('circle', 0, 0, 0, 30, 10);\n"
+        "const b=iconRingLocal('circle', 10);\n"
+        "console.log(JSON.stringify({equal: JSON.stringify(a)===JSON.stringify(b)}));\n"
+    ))
+    assert out["equal"], "no manual size + no rotation must return iconRingLocal's own points untouched"
+
+
+def test_automorph_icon_ring_scales_per_axis_and_rotates_like_the_real_glyph(tmp_path):
+    """A wide manual footprint must stretch the ring along x (and leave y at
+    its soft-floored height); rotating the same fixture 90° must carry that
+    long axis to y — the same scale-then-rotate order the real glyph's own
+    `rotate(rot) scale(sx,sy)` transform applies to each point."""
+    out = _run_js(tmp_path, (
+        "import { automorphIconRing } from './iso_lights.mjs';\n"
+        "const ext=(pts)=>{let x=0,y=0;for(const p of pts){x=Math.max(x,Math.abs(p[0]));y=Math.max(y,Math.abs(p[1]));}return {x,y};};\n"
+        "const plain=ext(automorphIconRing('square', 0, 0, 0, 30, 10));\n"
+        "const wide=ext(automorphIconRing('square', 400, 20, 0, 30, 10));\n"
+        "const wideTurned=ext(automorphIconRing('square', 400, 20, 90, 30, 10));\n"
+        "console.log(JSON.stringify({plain, wide, wideTurned}));\n"
+    ))
+    plain, wide, turned = out["plain"], out["wide"], out["wideTurned"]
+    assert wide["x"] > plain["x"] * 2, f"a 4 m width must visibly stretch the ring along x: {out}"
+    assert wide["x"] > wide["y"] * 2, f"the stretched ring must actually be wide, not scaled uniformly: {out}"
+    assert abs(turned["x"] - wide["y"]) < 1e-6 and abs(turned["y"] - wide["x"]) < 1e-6, (
+        f"rotating 90° must swap the long axis exactly: {out}"
+    )
+
+
+def test_automorph_aura_grows_from_the_real_manual_footprint_not_a_generic_hex(tmp_path):
+    """End-to-end: at a low room%, a fixture with a real 240cm-wide manual
+    footprint must render a much WIDER aura outline than the identical
+    fixture with no manual size — before this, both started from the same
+    small default-radius icon and the manual shape information never reached
+    the morph at all."""
+    NOW = 1_000_000_000_000
+
+    def render(extra_lp):
+        model = {
+            "room_geometry_m": {"Office": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 8], [0, 8]]}},
+            "light_positions_m": {"light.strip": {"x_m": 4, "y_m": 4, "floor_id": "main", **extra_lp}},
+        }
+        lbe = {"light.strip": {"entity_id": "light.strip", "state": "on", "code": "W01", "shape": "bar", "isMotion": False, "last_changed": None}}
+        floors = [{"id": "main", "name": "Main", "level": 0}]
+        out = _run_js(tmp_path, (
+            "import * as M from './iso_lights.mjs';\n"
+            f"const MODEL={json.dumps(model)};\n"
+            f"const LBE={json.dumps(lbe)};\n"
+            f"const FLOORS={json.dumps(floors)};\n"
+            f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+            f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:1, automorphHardness:0, automorphStyle:'blueprint'}});\n"
+            "const m = svg.match(/<path d=\"([^\"]+)\"[^>]*stroke-dasharray=\"4,3\"/);\n"
+            "if(!m){ console.log(JSON.stringify({w: null})); }\n"
+            "else {\n"
+            "  const nums=[...m[1].matchAll(/(-?[\\d.]+),(-?[\\d.]+)/g)].map(mm=>[parseFloat(mm[1]),parseFloat(mm[2])]);\n"
+            "  const xs=nums.map(p=>p[0]);\n"
+            "  console.log(JSON.stringify({w: Math.max(...xs)-Math.min(...xs)}));\n"
+            "}\n"
+        ))
+        return out["w"]
+
+    plain_w = render({})
+    manual_w = render({"width_cm": 240, "height_cm": 5, "rotation": 0})
+    assert plain_w is not None and manual_w is not None, (plain_w, manual_w)
+    assert manual_w > plain_w * 2, (
+        f"a 240cm manual width must make the aura's outline visibly wider than the "
+        f"default icon's ({manual_w} vs {plain_w}) — the manual footprint must reach the morph"
+    )
+
+
+# ── Automorph aura draw order, room clip and interior margin ────────────────
+# (the composition/craft round of the 2026-09-07 design critique)
+# The aura used to be appended from the placed-lights loop — after the
+# deferred label pass, interleaved fixture by fixture, unclipped, and inset
+# by a margin tuned only for the wall case. Each test below pins one of the
+# corrections.
+
+def test_automorph_aura_paints_under_room_labels_in_two_floor_tiers(tmp_path):
+    """Composition: labels must paint over every boundary line on the floor
+    — the file's own documented rule — so every aura tier flushes BEFORE the
+    label pass, never after it the way the placed-lights loop used to.
+    Craft: the tiers are floor-wide, all blurred glow then all crisp edges,
+    so one fixture's wash can never paint over the crisp bisector edge its
+    neighbour already drew (the same underlay discipline the light pools
+    document for markers). Final order, bottom to top: room fills/borders,
+    all aura glow, all aura edges, labels, markers/glyphs."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]}},
+        "light_positions_m": {
+            "light.a": {"x_m": 1.5, "y_m": 2, "floor_id": "main"},
+            "light.b": {"x_m": 6.5, "y_m": 2, "floor_id": "main"},
+        },
+    }
+    lbe = {
+        "light.a": {"entity_id": "light.a", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.b": {"entity_id": "light.b", "state": "on", "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:60, automorphHardness:0, automorphStyle:'glow'}});\n"
+        # In working mode only the aura's glow tier carries psaurasoft, and
+        # only the aura's edgeCore layer strokes in the on-state grey.
+        "console.log(JSON.stringify({\n"
+        "  glowCount: (svg.match(/filter=\"url\\(#psaurasoft\\)\"/g)||[]).length,\n"
+        "  glowLast: svg.lastIndexOf('filter=\"url(#psaurasoft)\"'),\n"
+        "  edgeFirst: svg.indexOf('stroke=\"#94a3b8\"'),\n"
+        "  edgeLast: svg.lastIndexOf('stroke=\"#94a3b8\"'),\n"
+        "  labelFirst: svg.indexOf('<g class=\"lroom\"'),\n"
+        "  markerFirst: svg.indexOf('<g class=\"lhex\"'),\n"
+        "}));\n"
+    ))
+    assert out["glowCount"] == 2, (
+        f"expected exactly ONE blur group per fixture — the shadow/AO/wash/bloom "
+        f"layers must share a single feGaussianBlur, never carry one each: {out}"
+    )
+    assert out["edgeFirst"] >= 0 and out["labelFirst"] >= 0 and out["markerFirst"] >= 0, out
+    assert out["glowLast"] < out["edgeFirst"], (
+        f"every fixture's glow must flush before any fixture's crisp edge — interleaving "
+        f"lets a wash muddy a neighbour's already-drawn bisector edge: {out}"
+    )
+    assert out["edgeLast"] < out["labelFirst"], (
+        f"every aura tier must land before the first room label — auras were painting "
+        f"over the room's own name: {out}"
+    )
+    assert out["labelFirst"] < out["markerFirst"], (
+        f"markers/glyphs must stay above the labels, unchanged by the aura move: {out}"
+    )
+
+
+def test_automorph_aura_is_clipped_to_its_room_in_both_modes(tmp_path):
+    """The aura is gated on its own slider, never on Showcase — so its room
+    clip must exist and be APPLIED on the working map too. While the
+    clipPath defs were built only under if(SHOW), roomClip stayed empty for
+    the whole working-mode render and the aura's blur/hardness overshoot
+    had nothing stopping it at the room's own wall. The defs are gated on
+    (SHOW || Automorph): present the moment anything can reference them,
+    absent otherwise — the working map with Automorph off is contractually
+    byte-identical to the pre-Automorph render (see
+    test_automorph_off_render_carries_no_automorph_defs)."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Office": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]}},
+        "light_positions_m": {"light.lamp": {"x_m": 3, "y_m": 3, "floor_id": "main"}},
+    }
+    lbe = {"light.lamp": {"entity_id": "light.lamp", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None}}
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const mk=(o)=>M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,o);\n"
+        f"const on=mk({{nowMs:{NOW}, automorph:true, automorphRoomPct:50, automorphStyle:'glow'}});\n"
+        f"const off=mk({{nowMs:{NOW}}});\n"
+        "console.log(JSON.stringify({\n"
+        "  defOn: /<clipPath id=\"psclip_0\"><polygon /.test(on),\n"
+        "  appliedOn: (on.match(/clip-path=\"url\\(#psclip_0\\)\"/g)||[]).length,\n"
+        "  defOff: /<clipPath id=\"psclip_0\"><polygon /.test(off),\n"
+        "  appliedOff: (off.match(/clip-path=/g)||[]).length,\n"
+        "}));\n"
+    ))
+    assert out["defOn"], "working mode with Automorph on defined no room clipPath"
+    # glow style: the blurred wash clips inside its filter group AND the
+    # edge/gloss tier clips — two applications for one fixture.
+    assert out["appliedOn"] >= 2, f"the aura tiers must be clipped to their room: {out}"
+    assert not out["defOff"], (
+        "with Automorph off nothing can reference a room clip on the working map, "
+        "so no psclip_ def may be emitted — the off render is byte-identical to pre-Automorph"
+    )
+    assert out["appliedOff"] == 0, f"nothing may APPLY a clip on the working map with Automorph off: {out}"
+
+
+def test_automorph_off_render_carries_no_automorph_defs(tmp_path):
+    """The byte-identity contract, policed structurally: with Automorph off
+    the render may carry NONE of the aura-only defs — psautomorphduo_*,
+    psaurasoft, psglossauto_*, psclip_* (and, in working mode, the
+    Showcase-owned psclipsoft too) — because nothing in that render can
+    reference them. They were briefly emitted unconditionally: ~1-1.7KB of
+    dead DOM per render in the most common configuration (working map,
+    feature off), and a byte-level break of the automorph-off identity
+    contract. With the slider up they must all appear. In showcase-off the
+    Showcase-owned psclipsoft/psclip_ defs sit at their pre-Automorph
+    position AFTER the pool gradients, so def ORDER is byte-identical to
+    that era too; with Automorph on they sit BEFORE if(SHOW), because the
+    working map needs them regardless of Showcase."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {
+            "Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 4], [0, 4]]},
+            "Office": {"type": "poly", "floor_id": "main", "points_m": [[0, 4], [6, 4], [6, 8], [0, 8]]},
+        },
+        "light_positions_m": {
+            "light.a": {"x_m": 3, "y_m": 2, "floor_id": "main"},
+            "light.b": {"x_m": 3, "y_m": 6, "floor_id": "main"},
+        },
+    }
+    lbe = {
+        "light.a": {"entity_id": "light.a", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.b": {"entity_id": "light.b", "state": "off", "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        "const mk=(o)=>M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,o);\n"
+        "const auto={automorph:true, automorphRoomPct:50, automorphStyle:'glow'};\n"
+        f"const workOff=mk({{nowMs:{NOW}}});\n"
+        f"const workOn=mk({{nowMs:{NOW}, ...auto}});\n"
+        f"const showOff=mk({{nowMs:{NOW}, showcase:true}});\n"
+        f"const showOn=mk({{nowMs:{NOW}, showcase:true, ...auto}});\n"
+        "const hits=(s)=>({duo:s.includes('psautomorphduo_'), aura:s.includes('psaurasoft'),"
+        " gloss:s.includes('psglossauto_'), clip:s.includes('psclip_'), soft:s.includes('psclipsoft')});\n"
+        "const clipVsGlow=(s)=>s.indexOf('<clipPath id=\"psclip_0\"')-s.indexOf('<radialGradient id=\"psglow_0\"');\n"
+        "console.log(JSON.stringify({\n"
+        "  workOff: hits(workOff), workOn: hits(workOn), showOff: hits(showOff),\n"
+        "  showOffOrder: clipVsGlow(showOff), showOnOrder: clipVsGlow(showOn),\n"
+        "}));\n"
+    ))
+    assert out["workOff"] == {"duo": False, "aura": False, "gloss": False, "clip": False, "soft": False}, (
+        f"the working map with Automorph off must carry NO aura or Showcase defs at all: {out['workOff']}"
+    )
+    assert out["workOn"] == {"duo": True, "aura": True, "gloss": True, "clip": True, "soft": True}, (
+        f"with the slider up every aura def must be present on the working map: {out['workOn']}"
+    )
+    assert out["showOff"] == {"duo": False, "aura": False, "gloss": False, "clip": True, "soft": True}, (
+        f"showcase with Automorph off keeps its own psclipsoft/psclip_ defs but no aura-only ones: {out['showOff']}"
+    )
+    assert out["showOffOrder"] > 0, (
+        "showcase-off must emit psclip_0 AFTER psglow_0 — the pre-Automorph def order the "
+        "byte-identity contract covers"
+    )
+    assert out["showOnOrder"] < 0, (
+        "with Automorph on psclip_0 is emitted before the Showcase-only defs — the working "
+        "map needs it regardless of Showcase"
+    )
+
+
+def test_automorph_interior_margin_is_a_larger_multiple_of_the_wall_margin():
+    """One inset constant was serving two different composition jobs:
+    defaultPerimeterMarginM is tuned for a shape a plausible cove-distance
+    off a static WALL, but a resolved cell's inset separates two
+    comparably-weighted aura objects from EACH OTHER — and 2x a wall-tuned
+    margin between neighbours read as tiles laid nearly edge-to-edge. The
+    interior case gets a distinctly larger multiple (1.6x) of the same
+    frame-scaled base; the room-outline fallback keeps 1x; the
+    roomHalfMinDim clamp (now inside the shared automorphInsetRing helper,
+    so the perimeter trace gets it for free too) stays outside the
+    multiplier so a tight cell can never be inset past its own middle.
+    Pinned structurally, the same way the single chaikinSmooth call site
+    is."""
+    src = _code_only((_VIEWS / "iso_lights.js").read_text(encoding="utf-8"))
+    assert "const hasCell=!!(cellPtsM && cellPtsM.length>=3);" in src, (
+        "the margin multiplier must key on the same cell test the targetPts choice uses"
+    )
+    assert "automorphInsetRing(hasCell?cellPtsM:room.pts,\n        defaultPerimeterMarginM(frame)*(hasCell?1.6:1));" in src, (
+        "the interior (resolved-cell) inset must be 1.6x the wall-tuned base margin, the "
+        "room fallback 1x, passed into the shared inset helper"
+    )
+    assert "const marginM=Math.max(0, Math.min(baseMarginM, roomHalfMinDim(targetPts)*0.85));" in src, (
+        "the half-min-dimension clamp must still bound the margin inside the shared inset helper"
+    )
+
+
+def test_automorph_cornered_fixture_loses_its_cell_but_never_its_aura(tmp_path):
+    """The hasCell=false fallback (room.pts target, 1x margin) is reachable
+    through the REAL partition, not just a code path the pins above
+    protect: a weight-0.25 fixture 5cm into a corner, crowded by three
+    weight-2.5 neighbours packed around it, is squeezed to nothing by the
+    field competition and comes back ABSENT from buildRoomFixtureCells —
+    its cue to fall back to the full-room shape rather than draw nothing.
+    Every other aura render in this file resolves a cell, so a runtime
+    break of only the fallback (`if(!hasCell) return null;`) left both
+    structural pins intact and the whole suite green while the cornered
+    fixture silently lost the aura the code comment promises it keeps.
+    The weights go through automorphFixtureWeight from the SAME footprints
+    the render sees, so the direct partition call proves the render scene
+    itself takes the fallback branch."""
+    NOW = 1_000_000_000_000
+    room_pts = [[0, 0], [8, 0], [8, 4], [0, 4]]
+    model = {
+        "room_geometry_m": {"Hall": {"type": "poly", "floor_id": "main", "points_m": room_pts}},
+        "light_positions_m": {
+            "light.t":  {"x_m": 0.05, "y_m": 0.05, "floor_id": "main", "width_cm": 5,   "height_cm": 5},
+            "light.b1": {"x_m": 0.3,  "y_m": 0.3,  "floor_id": "main", "width_cm": 300, "height_cm": 300},
+            "light.b2": {"x_m": 0.05, "y_m": 0.5,  "floor_id": "main", "width_cm": 300, "height_cm": 300},
+            "light.b3": {"x_m": 0.5,  "y_m": 0.05, "floor_id": "main", "width_cm": 300, "height_cm": 300},
+        },
+    }
+    lbe = {
+        eid: {"entity_id": eid, "state": "on", "code": f"A0{i}", "shape": "circle",
+              "isMotion": False, "last_changed": None}
+        for i, eid in enumerate(("light.t", "light.b1", "light.b2", "light.b3"), 1)
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const ROOM={json.dumps(room_pts)};\n"
+        "const wT=M.automorphFixtureWeight(5,5), wB=M.automorphFixtureWeight(300,300);\n"
+        "const cells=M.buildRoomFixtureCells(ROOM,[\n"
+        "  {id:'t',x:0.05,y:0.05,weight:wT},{id:'b1',x:0.3,y:0.3,weight:wB},\n"
+        "  {id:'b2',x:0.05,y:0.5,weight:wB},{id:'b3',x:0.5,y:0.05,weight:wB}]);\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:100, automorphHardness:0, automorphStyle:'glow'}});\n"
+        "console.log(JSON.stringify({wT, wB, keys:[...cells.keys()].sort(),\n"
+        "  auraGroups:(svg.match(/filter=\"url\\(#psaurasoft\\)\"/g)||[]).length}));\n"
+    ))
+    assert out["wT"] == 0.25 and out["wB"] == 2.5, (
+        f"the scene leans on the weight clamps — a 5x5cm footprint must floor at 0.25 and "
+        f"a 300x300cm one ceiling at 2.5, or the crowding below proves nothing: {out}"
+    )
+    assert out["keys"] == ["b1", "b2", "b3"], (
+        f"the partition itself must omit the crowded corner fixture (and ONLY it) — "
+        f"otherwise this scene never exercises the fallback branch: {out}"
+    )
+    assert out["auraGroups"] == 4, (
+        f"one glow-tier aura group per fixture: the cell-less fixture must still paint "
+        f"its aura through the room-shape fallback, never silently lose it: {out}"
+    )
+
+
+def test_automorph_suppresses_the_glyph_only_where_an_aura_really_painted(tmp_path):
+    """The suppressGlyph decision must track what the floor-wide aura pass
+    ACTUALLY emitted, per fixture — not the bare slider value. A fixture in
+    a room gets an aura, so its old glyph body hides (transparent hit
+    silhouette only); a hallway fixture outside every room polygon gets no
+    aura, and hiding its glyph too would leave nothing drawn there at all.
+    Guards the aura-generation move into the tier pass: the placed-lights
+    loop no longer computes the aura itself, so it must consult the pass's
+    own per-fixture record."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Office": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]}},
+        "light_positions_m": {
+            "light.inroom": {"x_m": 3, "y_m": 3, "floor_id": "main"},
+            "light.hallway": {"x_m": 9, "y_m": 9, "floor_id": "main"},
+        },
+    }
+    lbe = {
+        "light.inroom": {"entity_id": "light.inroom", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.hallway": {"entity_id": "light.hallway", "state": "on", "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:50, automorphStyle:'glow'}});\n"
+        "const grab=(eid)=>{const g=new RegExp('<g class=\"lhex\" data-eid=\"'+eid+'\"[^>]*>([\\\\s\\\\S]*?)</g>').exec(svg); return g?g[1]:null;};\n"
+        "const visible=(b)=>/<(rect(?! data-hit)|polygon|circle|path)[^>]*fill=\"(?!transparent|none)/.test(b);\n"
+        "const hit=(b)=>/data-hit=\"1\" fill=\"transparent\"/.test(b);\n"
+        "const inroom=grab('light\\\\.inroom'), hall=grab('light\\\\.hallway');\n"
+        "console.log(JSON.stringify({\n"
+        "  found: !!(inroom&&hall),\n"
+        "  inroomVisible: inroom?visible(inroom):null, inroomHit: inroom?hit(inroom):null,\n"
+        "  hallVisible: hall?visible(hall):null,\n"
+        "}));\n"
+    ))
+    assert out["found"], "one of the two markers lost its lhex group entirely"
+    assert not out["inroomVisible"], "the aura'd fixture's old glyph body must be suppressed"
+    assert out["inroomHit"], "the suppressed glyph must keep its transparent hit silhouette"
+    assert out["hallVisible"], (
+        "a fixture outside every room polygon gets no aura — suppressing its glyph too "
+        "would leave nothing drawn there at all"
+    )
+
+
+def test_automorph_never_auras_or_suppresses_motion_fan_or_temp_markers(tmp_path):
+    """Live regression, reported by Garry (2026-09-08): "the center not
+    activating on motion... only some sensors" — a motion sensor sharing a
+    room with a real light was pulled into the non-overlap partition (only
+    l.shape==="perimeter" was excluded), got a real aura, and had its own
+    glyph body suppressed exactly like a real light's — even though motion
+    sensors read activity through motionActive() + their own pulse ring
+    (a separate code path, unaffected), never through an aura. The pulse
+    kept firing; the glyph underneath it silently went transparent. Same
+    root cause for isFan/isTemp: neither was excluded either. A real light
+    in the SAME room still gets its normal aura+suppression."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Room": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]}},
+        "light_positions_m": {
+            "light.real":              {"x_m": 1.5, "y_m": 1.5, "floor_id": "main"},
+            "binary_sensor.motion":    {"x_m": 4.5, "y_m": 1.5, "floor_id": "main"},
+            "fan.ceiling":             {"x_m": 1.5, "y_m": 4.5, "floor_id": "main"},
+            "sensor.temp":             {"x_m": 4.5, "y_m": 4.5, "floor_id": "main"},
+        },
+    }
+    lbe = {
+        "light.real":           {"entity_id": "light.real", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "binary_sensor.motion": {"entity_id": "binary_sensor.motion", "state": "on", "code": "M01", "shape": "hex", "isMotion": True, "last_changed": None},
+        "fan.ceiling":          {"entity_id": "fan.ceiling", "state": "on", "code": "F01", "shape": "hex", "isFan": True, "last_changed": None},
+        "sensor.temp":          {"entity_id": "sensor.temp", "state": "on", "code": "T01", "shape": "hex", "isTemp": True, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:100, automorphStyle:'glow'}});\n"
+        "const grab=(eid)=>{const g=new RegExp('<g class=\"lhex\" data-eid=\"'+eid.replace(/\\\\./g,'\\\\\\\\.')+'\"[^>]*>([\\\\s\\\\S]*?)</g>').exec(svg); return g?g[1]:null;};\n"
+        "const visible=(b)=>/<(rect(?! data-hit)|polygon|circle|path)[^>]*fill=\"(?!transparent|none)/.test(b);\n"
+        "console.log(JSON.stringify({\n"
+        "  realVisible: (b=>b?visible(b):null)(grab('light.real')),\n"
+        "  motionVisible: (b=>b?visible(b):null)(grab('binary_sensor.motion')),\n"
+        "  fanVisible: (b=>b?visible(b):null)(grab('fan.ceiling')),\n"
+        "  tempVisible: (b=>b?visible(b):null)(grab('sensor.temp')),\n"
+        "}));\n"
+    ))
+    assert not out["realVisible"], "the real light's glyph must still be suppressed by its own aura (unchanged behaviour)"
+    assert out["motionVisible"], "a motion sensor's glyph body must never be suppressed — it must never be pulled into the partition or get an aura in the first place"
+    assert out["fanVisible"], "a fan's glyph body must never be suppressed"
+    assert out["tempVisible"], "a temp readout's glyph body must never be suppressed"
+
+
+# ── Automorph material stack (the light/composition round of the 2026-09-07
+# design critique) ──────────────────────────────────────────────────────────
+# The glow style used to be three layers stamped in one position — wash,
+# flat stroke, gloss — a decal. The stack now gives the aura a material
+# read: a displaced cast shadow (it sits ON the floor), an ambient-
+# occlusion ring (it has a cross-section), a rim stroked with the floor's
+# own psglossauto ramp (lit from the drawing's one upper-left sun), an
+# on-only masked inner bloom (a lit fixture EMITS; an inert one doesn't),
+# and fill ceilings rebalanced to stay under the room's own colour weight.
+# All of it blurs through ONE group filter per fixture, and every layer
+# routes opacity/width through the same subtlety multipliers as the
+# originals.
+
+def _aura_probe(tmp_path, *, state="on", pct=100, style="glow", subtlety=0):
+    """Working-mode render of one lit-or-not fixture with Automorph up —
+    the smallest scene that exercises the full aura material stack — with
+    each layer's numbers extracted for assertion. In working mode the aura
+    is the only filter user, and #020617 is the aura's shadow/AO ink
+    alone, so the probes cannot alias anything else on the map."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Office": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]}},
+        "light_positions_m": {"light.lamp": {"x_m": 3, "y_m": 3, "floor_id": "main"}},
+    }
+    lbe = {"light.lamp": {"entity_id": "light.lamp", "state": state, "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None}}
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    return _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:{pct}, automorphStyle:{json.dumps(style)}, automorphSubtlety:{subtlety}}});\n"
+        "const num=(re)=>{const m=re.exec(svg); return m?parseFloat(m[1]):null;};\n"
+        "console.log(JSON.stringify({\n"
+        "  shadow: (()=>{const m=/<g transform=\"translate\\(([\\d.]+),([\\d.]+)\\)\"><path d=\"[^\"]+\" fill=\"#020617\" fill-opacity=\"([\\d.]+)\"/.exec(svg);"
+        " return m?{dx:parseFloat(m[1]),dy:parseFloat(m[2]),op:parseFloat(m[3])}:null;})(),\n"
+        "  ao: (()=>{const m=/stroke=\"#020617\" stroke-opacity=\"([\\d.]+)\" stroke-width=\"([\\d.]+)\"/.exec(svg);"
+        " return m?{op:parseFloat(m[1]),w:parseFloat(m[2])}:null;})(),\n"
+        "  washOp: num(/fill=\"url\\(#psautomorphduo_(?:on|off)\\)\" fill-opacity=\"([\\d.]+)\"/),\n"
+        "  bloomOp: num(/fill=\"url\\(#psautomorphduo_(?:on|off)\\)\" fill-opacity=\"([\\d.]+)\" stroke=\"none\" mask=\"url\\(#psautomorphmask\\)\"/),\n"
+        "  edgeCoreFillOp: num(/fill=\"url\\(#psautomorphduo_(?:on|off)\\)\" fill-opacity=\"([\\d.]+)\" stroke=\"#/),\n"
+        "  glossMaxStop: (()=>{const m=/<linearGradient id=\"psglossauto_\\d+\"[^>]*>(?:<stop [^>]+\\/>)+/.exec(svg);"
+        " return m?Math.max(...[...m[0].matchAll(/stop-opacity=\"([\\d.]+)\"/g)].map(x=>parseFloat(x[1]))):null;})(),\n"
+        "  roomFillOp: num(/<polygon points=\"[^\"]+\" fill=\"[^\"]+\" fill-opacity=\"([\\d.]+)\" stroke=\"[^\"]+\" stroke-width=\"1.6\" opacity=\"1\"\\/>/),\n"
+        "  roomGlowCentre: num(/<radialGradient id=\"psroomglow_0\"><stop offset=\"0%\" stop-color=\"[^\"]+\" stop-opacity=\"([\\d.]+)\"/),\n"
+        "  bloomCount: (svg.match(/mask=\"url\\(#psautomorphmask\\)\"/g)||[]).length,\n"
+        "  rim: (()=>{const m=/fill=\"none\" stroke=\"url\\(#psglossrim\\)\" stroke-opacity=\"([\\d.]+)\" stroke-width=\"([\\d.]+)\"/.exec(svg);"
+        " return m?{op:parseFloat(m[1]),w:parseFloat(m[2])}:null;})(),\n"
+        "  glossOp: num(/fill=\"url\\(#psglossauto_\\d+\\)\" fill-opacity=\"([\\d.]+)\"/),\n"
+        "  blurGroups: (svg.match(/filter=\"url\\(#psaurasoft\\)\"/g)||[]).length,\n"
+        "  filterApps: (svg.match(/ filter=\"url\\(/g)||[]).length,\n"
+        "  shadowIdx: svg.indexOf('fill=\"#020617\"'),\n"
+        "  washIdx: svg.search(/fill=\"url\\(#psautomorphduo_(?:on|off)\\)\" fill-opacity=/),\n"
+        "}));\n"
+    ))
+
+
+def test_automorph_glow_aura_casts_a_displaced_contact_shadow(tmp_path):
+    """The aura floated: glow, edge and gloss were all stamped in the exact
+    same position, so nothing separated 'object' from 'floor it rests on'.
+    The bottom-most glow-tier layer is now a copy of the same `d` displaced
+    along psgloss's own light-to-dark diagonal (0.41,0.91 — down and to the
+    right of the drawing's one upper-left sun), scaled off the ring's own
+    bbox diagonal so it stays proportionate at any t. Gated to the glow
+    style: blueprint is deliberately a flat dashed wireframe, and nebula's
+    mask-faded orb has no cutout edge for a paper-shadow to sell."""
+    on = _aura_probe(tmp_path)
+    assert on["shadow"], "glow style must cast a displaced contact shadow"
+    assert on["shadow"]["dx"] > 0 and on["shadow"]["dy"] > 0, on["shadow"]
+    # psgloss's normalized light vector is (0.41, 0.91): more drop than slide.
+    assert on["shadow"]["dy"] > on["shadow"]["dx"], (
+        f"the shadow must fall along the shared light direction, mostly downward: {on['shadow']}"
+    )
+    assert 0 <= on["shadowIdx"] < on["washIdx"], (
+        f"the shadow is the bottom-most layer — it must be emitted before the wash: {on}"
+    )
+    for style in ("blueprint", "nebula"):
+        other = _aura_probe(tmp_path, style=style)
+        assert other["shadow"] is None and other["ao"] is None and other["rim"] is None, (
+            f"{style} must not grow the glow style's bevel/shadow language: {other}"
+        )
+
+
+def test_automorph_glow_soft_layers_share_one_blur_group(tmp_path):
+    """Shadow, AO, wash and bloom all want the same soft blur — done the
+    obvious way (a filter attribute per path) that is up to 4 rasterized
+    feGaussianBlur passes per fixture, ~400 at the ~100-fixture scale the
+    feature targets. They must share ONE group filter instead: exactly one
+    filter application in the whole working-mode render. And it must be the
+    aura's own psaurasoft clone with the wider region — the group's bbox
+    now includes the shadow's offset copy, and widening psclipsoft itself
+    would silently grow every Showcase pool's raster cost too."""
+    out = _aura_probe(tmp_path)
+    assert out["blurGroups"] == 1, f"the four soft layers must share one blur group: {out}"
+    assert out["filterApps"] == 1, (
+        f"no aura layer may carry its own filter attribute beside the group's: {out}"
+    )
+    src = (_VIEWS / "iso_lights.js").read_text(encoding="utf-8")
+    assert '<filter id="psaurasoft" x="-12%" y="-12%" width="124%" height="124%">' in src, (
+        "the aura's blur def must keep the widened region that covers the shadow-bearing "
+        "group's blur bleed"
+    )
+    assert '<filter id="psclipsoft" x="-8%" y="-8%" width="116%" height="116%">' in src, (
+        "the Showcase pools' clip-soften filter must keep its original tighter region — "
+        "the aura got a clone precisely so this one never had to grow"
+    )
+
+
+def test_automorph_on_and_off_differ_by_material_not_just_hex(tmp_path):
+    """On vs off used to differ ONLY by which grey base was picked — a
+    colour swap on a static sticker. Lit now gets the masked inner bloom
+    (light welling up from inside) plus a heavier wash/gloss/rim; off gets
+    no bloom, lighter fills, and DEEPER ambient occlusion — a matte, inert
+    surface shows more contact darkening, a lit one pushes light out."""
+    on = _aura_probe(tmp_path, state="on")
+    off = _aura_probe(tmp_path, state="off")
+    assert on["bloomCount"] == 1, f"a lit fixture must carry exactly one masked bloom: {on}"
+    assert off["bloomCount"] == 0, f"an off fixture must carry no bloom: {off}"
+    assert off["ao"]["op"] > on["ao"]["op"], (on["ao"], off["ao"])
+    assert on["washOp"] > off["washOp"], (on["washOp"], off["washOp"])
+    assert on["glossOp"] > off["glossOp"], (on["glossOp"], off["glossOp"])
+    assert on["rim"]["op"] > off["rim"]["op"], (on["rim"], off["rim"])
+
+
+def test_automorph_aura_fill_weight_stays_under_the_rooms_own_colour(tmp_path):
+    """Garry's standing directive: the grey aura stays QUIET next to the
+    room's own colour. The first rebalance cut wash/gloss to numbers that
+    LOOKED right per-layer, but the same edit series added bloom, the
+    duotone edge fill and an untapered 0.16 shadow on top, and nobody
+    re-summed: the five fills composited to ~0.58-0.64 at ring centre —
+    ~4x the 'under roughly half the room's own fill+glow' target the
+    in-code comment asserted, and heavier than the room's colour outright.
+    So this test no longer pins raw numbers alone: it rebuilds the
+    composited stack (1 - PROD(1-o), every fill at its centre-worst —
+    bloom's mask is 1.0 at the ring's own centre, gloss at its ramp's max
+    white stop) and asserts the RELATIONSHIP against the same render's own
+    room fill + glow-centre weights, so no future per-layer edit can drift
+    the total silently again. The exact constants are pinned too — they
+    are the budget's ledger — and the shadow must taper with t, so an
+    icon-sized low-t aura is never out-shadowed by its own shadow."""
+    on = _aura_probe(tmp_path, state="on", pct=100)
+    off = _aura_probe(tmp_path, state="off", pct=100)
+    # The ledger: change any of these and the composited assertion below is
+    # the number that has to survive the change.
+    assert on["shadow"]["op"] == 0.04 and off["shadow"]["op"] == 0.04, (on["shadow"], off["shadow"])
+    assert on["washOp"] == 0.04 and off["washOp"] == 0.03, (on["washOp"], off["washOp"])
+    assert on["bloomOp"] == 0.04 and off["bloomOp"] is None, (on["bloomOp"], off["bloomOp"])
+    assert on["edgeCoreFillOp"] == 0.02 and off["edgeCoreFillOp"] == 0.02, (
+        on["edgeCoreFillOp"], off["edgeCoreFillOp"])
+    assert on["glossOp"] == 0.05 and off["glossOp"] == 0.04, (on["glossOp"], off["glossOp"])
+
+    def composited(p):
+        stack = [p["shadow"]["op"], p["washOp"], p["edgeCoreFillOp"],
+                 p["glossOp"] * p["glossMaxStop"]]
+        if p["bloomOp"] is not None:
+            stack.append(p["bloomOp"])
+        prod = 1.0
+        for o in stack:
+            prod *= 1.0 - o
+        return 1.0 - prod
+
+    for p in (on, off):
+        room = p["roomFillOp"] + p["roomGlowCentre"]
+        # The budget's denominator comes from the render itself; if the
+        # room's own weight ever moves, the aura must be re-budgeted, not
+        # silently rescaled here.
+        assert room == 0.32, (p["roomFillOp"], p["roomGlowCentre"])
+        assert composited(p) <= 0.5 * room + 1e-9, (
+            f"the aura's composited fill weight ({composited(p):.3f}) must sit at or "
+            f"under half the room's own fill+glow ({room})"
+        )
+    assert composited(off) < composited(on), (composited(off), composited(on))
+    # Shadow taper: at t=1 the shadow may match the wash, never beat it, and
+    # it must shrink with t rather than sit at a flat weight sized for the
+    # room-large ring.
+    small = _aura_probe(tmp_path, state="on", pct=30)
+    assert small["shadow"]["op"] < on["shadow"]["op"], (small["shadow"], on["shadow"])
+    assert small["shadow"]["op"] <= small["washOp"], (small["shadow"], small["washOp"])
+    assert on["shadow"]["op"] <= on["washOp"], (on["shadow"], on["washOp"])
+
+
+def test_automorph_subtlety_fades_the_new_material_layers_too(tmp_path):
+    """House rule for every layer the material stack added: opacity and
+    stroke-width route through the same opac()/swid() multipliers as the
+    originals, so the subtlety slider keeps fading EVERYTHING — thinner and
+    fainter at 100, never zero (the slider's own 'almost completely lost,
+    not gone' contract)."""
+    a0 = _aura_probe(tmp_path, subtlety=0)
+    a100 = _aura_probe(tmp_path, subtlety=100)
+    for label, hi, lo in (
+        ("shadow opacity", a0["shadow"]["op"], a100["shadow"]["op"]),
+        ("AO opacity", a0["ao"]["op"], a100["ao"]["op"]),
+        ("AO width", a0["ao"]["w"], a100["ao"]["w"]),
+        ("rim opacity", a0["rim"]["op"], a100["rim"]["op"]),
+        ("rim width", a0["rim"]["w"], a100["rim"]["w"]),
+    ):
+        assert lo < hi, f"subtlety=100 must fade the {label} ({lo} !< {hi})"
+        assert lo > 0, f"subtlety=100 must fade the {label}, never erase it"
+
+
+# ── Automorph colour & finish (the craft/composition colour round of the
+# 2026-09-07 design critique) ───────────────────────────────────────────────
+# Fill interiors move from flat state greys to TWO shared duotone radial
+# gradients (lighter centre fading to the base tone at the rim — the
+# distance-from-the-light depth cue); the rim/gloss sheen moves from the
+# per-shape psgloss to ONE userSpaceOnUse psglossauto per floor (every cell
+# on the slab lit from the same sun); a deterministic per-fixture lightness
+# offset derived from automorphFixtureWeight rides the flat ink; and the
+# final ring carries a small deterministic hand-inked jitter. The
+# colour-ownership split both fill features live by: the SHARED gradients
+# own the fill interiors (and so can carry no per-fixture offset), while
+# the weight offset expresses only through the flat-colour ink (and, for
+# inkless nebula, a narrow fill-opacity delta).
+
+def test_lighten_is_identity_at_zero_and_monotone_toward_white_or_black(tmp_path):
+    """pct=0 must return the INPUT STRING untouched — the contract that
+    keeps every default-weight fixture's ink byte-identical to before the
+    weight offset existed (weight 1 -> offset 0 -> today's exact hex).
+    Positive pct moves every channel toward white, negative toward black,
+    and ±100 clamps cleanly at the extremes."""
+    out = _run_js(tmp_path, (
+        "import { lighten } from './iso_lights.mjs';\n"
+        "console.log(JSON.stringify({\n"
+        "  idSame: lighten('#94a3b8', 0)==='#94a3b8',\n"
+        "  up: lighten('#94a3b8', 18), down: lighten('#94a3b8', -18),\n"
+        "  white: lighten('#94a3b8', 100), black: lighten('#94a3b8', -100),\n"
+        "}));\n"
+    ))
+    assert out["idSame"], "lighten(hex, 0) must be the exact input string"
+    base = [0x94, 0xA3, 0xB8]
+    up = [int(out["up"][i:i + 2], 16) for i in (1, 3, 5)]
+    down = [int(out["down"][i:i + 2], 16) for i in (1, 3, 5)]
+    assert all(u > b for u, b in zip(up, base)), (out["up"], base)
+    assert all(d < b for d, b in zip(down, base)), (out["down"], base)
+    assert out["white"] == "#ffffff" and out["black"] == "#000000", out
+
+
+def test_automorph_duotone_interiors_are_exactly_two_shared_defs(tmp_path):
+    """The aura's fill interiors key the one signal the partition computes
+    per fixture — distance from its own light — as a duotone: lighter at
+    the centre, the state's base tone at the rim. The defs must be exactly
+    TWO shared radialGradients, one per state and never per fixture (the
+    psautomorphgrad O(2) discipline), gated on the slider because only the
+    aura ever references them — with Automorph off they are not emitted at
+    all (the off render is byte-identical to pre-Automorph). Stops
+    carry colour only — the referencing path's fill-opacity stays the
+    single authority on layer weight, so the pinned ceilings hold."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]}},
+        "light_positions_m": {
+            "light.a": {"x_m": 1.5, "y_m": 2, "floor_id": "main"},
+            "light.b": {"x_m": 6.5, "y_m": 2, "floor_id": "main"},
+        },
+    }
+    lbe = {
+        "light.a": {"entity_id": "light.a", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.b": {"entity_id": "light.b", "state": "off", "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const mk=(o)=>M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,o);\n"
+        f"const on=mk({{nowMs:{NOW}, automorph:true, automorphRoomPct:60, automorphStyle:'glow'}});\n"
+        f"const plain=mk({{nowMs:{NOW}}});\n"
+        "const def=/<radialGradient id=\"psautomorphduo_on\"><stop offset=\"0%\" stop-color=\"(#[0-9a-f]{6})\"\\/>[^]*?offset=\"100%\" stop-color=\"(#[0-9a-f]{6})\"\\/><\\/radialGradient>/.exec(on);\n"
+        "console.log(JSON.stringify({\n"
+        "  defs: (on.match(/<radialGradient id=\"psautomorphduo_/g)||[]).length,\n"
+        "  onRefs: (on.match(/fill=\"url\\(#psautomorphduo_on\\)\"/g)||[]).length,\n"
+        "  offRefs: (on.match(/fill=\"url\\(#psautomorphduo_off\\)\"/g)||[]).length,\n"
+        "  plainDefs: (plain.match(/<radialGradient id=\"psautomorphduo_/g)||[]).length,\n"
+        "  centre: def?def[1]:null, rim: def?def[2]:null,\n"
+        "}));\n"
+    ))
+    assert out["defs"] == 2, f"exactly two shared duotone defs, never per fixture: {out}"
+    assert out["onRefs"] >= 1 and out["offRefs"] >= 1, (
+        f"each state's fill interiors must reference its own shared gradient: {out}"
+    )
+    assert out["plainDefs"] == 0, (
+        "the duotone defs are aura-only — with Automorph off they may not be emitted "
+        "(automorph-off byte-identity contract)"
+    )
+    assert out["rim"] == "#94a3b8", f"the on-gradient's rim stop must be the on base tone itself: {out}"
+    centre = [int(out["centre"][i:i + 2], 16) for i in (1, 3, 5)]
+    rim = [int(out["rim"][i:i + 2], 16) for i in (1, 3, 5)]
+    assert all(c > r for c, r in zip(centre, rim)), (
+        f"the centre stop must be lighter than the rim on every channel: {out}"
+    )
+
+
+def test_automorph_sheen_is_one_userspace_ramp_per_floor(tmp_path):
+    """The gloss FILL used to stretch psgloss (objectBoundingBox) across
+    each cell's own bbox — a different highlight angle/spread on every
+    differently-proportioned cell, the exact 'two suns' drift psgloss's own
+    comment exists to prevent, and invisible in working mode besides (that
+    def is Showcase-gated). The fill now points at psglossauto: ONE ungated
+    userSpaceOnUse gradient per FLOOR spanning the slab's projected bbox,
+    so every cell's interior on the slab agrees where the sun is. The RIM
+    deliberately does NOT share it — a floor-wide ramp decided a rim's
+    bright-vs-dark by position on the slab; it sweeps each shape's own
+    bbox through psglossrim instead (see
+    test_automorph_rim_sweeps_each_shapes_own_bbox_not_the_floor). psgloss
+    itself stays byte-identical for markers/rooms."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Office": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]}},
+        "light_positions_m": {"light.lamp": {"x_m": 3, "y_m": 3, "floor_id": "main"}},
+    }
+    lbe = {"light.lamp": {"entity_id": "light.lamp", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None}}
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:60, automorphStyle:'glow'}});\n"
+        "console.log(JSON.stringify({\n"
+        "  defs: (svg.match(/<linearGradient id=\"psglossauto_/g)||[]).length,\n"
+        "  userSpace: svg.includes('<linearGradient id=\"psglossauto_0\" gradientUnits=\"userSpaceOnUse\"'),\n"
+        "  refs: (svg.match(/url\\(#psglossauto_0\\)/g)||[]).length,\n"
+        "  oldRefs: (svg.match(/url\\(#psgloss\\)/g)||[]).length,\n"
+        "}));\n"
+    ))
+    assert out["defs"] == 1, f"one psglossauto per floor — a one-floor scene defines exactly one: {out}"
+    assert out["userSpace"], "psglossauto must be userSpaceOnUse — per-floor, not per-shape"
+    assert out["refs"] == 1, (
+        f"the gloss FILL alone rides the floor ramp — the rim moved to its own "
+        f"per-shape psglossrim sweep: {out}"
+    )
+    assert out["oldRefs"] == 0, (
+        f"the aura may no longer lean on Showcase-gated psgloss anywhere in working mode: {out}"
+    )
+    src = (_VIEWS / "iso_lights.js").read_text(encoding="utf-8")
+    assert '<linearGradient id="psgloss" x1="0.15" y1="0" x2="0.6" y2="1">' in src, (
+        "psgloss itself must stay untouched — markers and rooms keep exactly what they have"
+    )
+
+
+def test_automorph_sheen_ramp_is_defined_and_referenced_per_floor_on_two_floors(tmp_path):
+    """The one-floor sheen test above cannot tell psglossauto_${lidx} from
+    a hardcoded psglossauto_0 — and that regression is exactly the
+    wrong-sun defect the per-floor def exists to prevent: an upper floor's
+    gloss sampling floor 0's user-space bbox, which sits elsewhere in iso
+    space, gets an off-range near-uniform ramp. Two floors, one lit
+    fixture each: each floor defines its own userSpaceOnUse ramp and each
+    fixture's gloss FILL references its OWN floor's — exactly one ref per
+    id, because the rim moved to the per-shape psglossrim sweep and the
+    gloss fill is the floor ramp's only consumer. Floors render in level
+    order, so the ref order also pins WHICH fixture holds which id — a
+    swapped-but-count-balanced mapping fails too."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {
+            "Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]},
+            "Loft":    {"type": "poly", "floor_id": "up",   "points_m": [[0, 0], [5, 0], [5, 5], [0, 5]]},
+        },
+        "light_positions_m": {
+            "light.down": {"x_m": 3.0, "y_m": 3.0, "floor_id": "main"},
+            "light.up":   {"x_m": 2.5, "y_m": 2.5, "floor_id": "up"},
+        },
+    }
+    lbe = {
+        "light.down": {"entity_id": "light.down", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.up":   {"entity_id": "light.up",   "state": "on", "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}, {"id": "up", "name": "Upper", "level": 1}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:60, automorphStyle:'glow'}});\n"
+        "console.log(JSON.stringify({\n"
+        "  defs: (svg.match(/<linearGradient id=\"psglossauto_/g)||[]).length,\n"
+        "  upperUserSpace: svg.includes('<linearGradient id=\"psglossauto_1\" gradientUnits=\"userSpaceOnUse\"'),\n"
+        "  refs0: (svg.match(/url\\(#psglossauto_0\\)/g)||[]).length,\n"
+        "  refs1: (svg.match(/url\\(#psglossauto_1\\)/g)||[]).length,\n"
+        "  lowerFirst: svg.indexOf('url(#psglossauto_0)') < svg.indexOf('url(#psglossauto_1)'),\n"
+        "}));\n"
+    ))
+    assert out["defs"] == 2, f"two floors must define two per-floor ramps, one each: {out}"
+    assert out["upperUserSpace"], (
+        f"the upper floor's ramp must exist and be userSpaceOnUse like floor 0's: {out}"
+    )
+    assert out["refs0"] == 1 and out["refs1"] == 1, (
+        f"each fixture's gloss fill must ride its OWN floor's ramp exactly once — "
+        f"refs0=2/refs1=0 is the hardcoded-floor-0 wrong-sun regression: {out}"
+    )
+    assert out["lowerFirst"], (
+        f"floors render in level order, so the floor-0 fixture's ref must come first — "
+        f"a swapped mapping still lights the upper floor from the wrong sun: {out}"
+    )
+
+
+def test_automorph_weight_offset_rides_the_ink_and_stays_inside_the_state_gap(tmp_path):
+    """A fixture with a big recorded manual footprint must read very
+    slightly more present: its flat INK (edgeCore's stroke) lightens by a
+    deterministic offset from automorphFixtureWeight. Two default-weight
+    neighbours — the common case — must keep byte-identical ink, and the
+    whole ±7% band must sit far inside the on/off gap so state stays
+    unambiguous. The shared duotone fills carry no offset by construction —
+    the ink is the offset's only channel in the glow style."""
+    NOW = 1_000_000_000_000
+
+    def render(b_extra):
+        model = {
+            "room_geometry_m": {"Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]}},
+            "light_positions_m": {
+                "light.a": {"x_m": 1.5, "y_m": 2, "floor_id": "main"},
+                "light.b": {"x_m": 6.5, "y_m": 2, "floor_id": "main", **b_extra},
+            },
+        }
+        lbe = {
+            "light.a": {"entity_id": "light.a", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+            "light.b": {"entity_id": "light.b", "state": "on", "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+        }
+        floors = [{"id": "main", "name": "Main", "level": 0}]
+        return _run_js(tmp_path, (
+            "import * as M from './iso_lights.mjs';\n"
+            f"const MODEL={json.dumps(model)};\n"
+            f"const LBE={json.dumps(lbe)};\n"
+            f"const FLOORS={json.dumps(floors)};\n"
+            f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+            f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:60, automorphStyle:'glow'}});\n"
+            "const inks=[...svg.matchAll(/fill=\"url\\(#psautomorphduo_on\\)\" fill-opacity=\"[\\d.]+\" stroke=\"(#[0-9a-f]{6})\"/g)].map(m=>m[1]);\n"
+            "import { lighten } from './iso_lights.mjs';\n"
+            "console.log(JSON.stringify({inks, onFloor: lighten('#94a3b8', -7), offCeil: lighten('#475569', 7)}));\n"
+        ))
+
+    sized = render({"width_cm": 300, "height_cm": 300})
+    assert len(sized["inks"]) == 2, f"expected one edgeCore ink per fixture: {sized}"
+    assert "#94a3b8" in sized["inks"], f"the default-weight fixture must keep today's exact ink: {sized}"
+    other = next(i for i in sized["inks"] if i != "#94a3b8")
+    big = [int(other[i:i + 2], 16) for i in (1, 3, 5)]
+    base = [0x94, 0xA3, 0xB8]
+    assert all(b >= s for b, s in zip(big, base)) and any(b > s for b, s in zip(big, base)), (
+        f"a heavier fixture's ink must lighten, never darken or hold: {sized}"
+    )
+    plain = render({})
+    assert plain["inks"] == ["#94a3b8", "#94a3b8"], (
+        f"two default-weight neighbours must stay essentially identical — exact same ink: {plain}"
+    )
+    on_floor = [int(sized["onFloor"][i:i + 2], 16) for i in (1, 3, 5)]
+    off_ceil = [int(sized["offCeil"][i:i + 2], 16) for i in (1, 3, 5)]
+    assert all(a > b for a, b in zip(on_floor, off_ceil)), (
+        f"the darkest possible on-ink must stay clearly lighter than the lightest possible "
+        f"off-ink — the offset band may never blur the on/off state read: {sized}"
+    )
+
+
+def test_automorph_nebula_weight_delta_rides_the_wash_inside_the_state_gap(tmp_path):
+    """Nebula has no ink channel, so the per-fixture weight offset rides a
+    narrow fill-opacity delta on its single wash (weightOffPct*0.004,
+    ±0.028 at the weight clamps) — the contract the colour-ownership
+    comment states, tested nowhere until now: every nebula render in this
+    file used unsized fixtures, and the glow weight test's ink regex only
+    matches stroked paths, which nebula's stroke="none" wash never is.
+    Deleting the term (delta 0) or fat-fingering it x100 (delta 2.8,
+    swamping the ~0.09 on/off split) both kept the suite green. Two
+    probes: a both-on pair — the delta exists and stays at the 0.028
+    ceiling (the emitted attribute is quantized to 0.01 steps by opac's
+    toFixed(2), so it reads as at most 0.03) — and the worst direction, a
+    max-weight OFF fixture pushed UP toward an unsized ON one: the state
+    split must stay clearly ordered by more than the whole weight band."""
+    NOW = 1_000_000_000_000
+
+    def washes(b_extra, a_state, b_state):
+        model = {
+            "room_geometry_m": {"Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]}},
+            "light_positions_m": {
+                "light.a": {"x_m": 1.5, "y_m": 2, "floor_id": "main"},
+                "light.b": {"x_m": 6.5, "y_m": 2, "floor_id": "main", **b_extra},
+            },
+        }
+        lbe = {
+            "light.a": {"entity_id": "light.a", "state": a_state, "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+            "light.b": {"entity_id": "light.b", "state": b_state, "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+        }
+        floors = [{"id": "main", "name": "Main", "level": 0}]
+        out = _run_js(tmp_path, (
+            "import * as M from './iso_lights.mjs';\n"
+            f"const MODEL={json.dumps(model)};\n"
+            f"const LBE={json.dumps(lbe)};\n"
+            f"const FLOORS={json.dumps(floors)};\n"
+            f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+            f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:60, automorphStyle:'nebula'}});\n"
+            "const washes=[...svg.matchAll(/fill=\"url\\(#psautomorphduo_(on|off)\\)\" "
+            "fill-opacity=\"([\\d.]+)\" stroke=\"none\" mask=\"url\\(#psautomorphmask\\)\"/g)]"
+            ".map(m=>({state:m[1], op:parseFloat(m[2])}));\n"
+            "console.log(JSON.stringify({washes}));\n"
+        ))
+        return out["washes"]
+
+    both_on = washes({"width_cm": 300, "height_cm": 300}, "on", "on")
+    assert len(both_on) == 2 and all(w["state"] == "on" for w in both_on), (
+        f"expected one masked nebula wash per fixture, both lit: {both_on}"
+    )
+    delta = max(w["op"] for w in both_on) - min(w["op"] for w in both_on)
+    assert delta > 0, (
+        f"a max-weight fixture's wash must read very slightly heavier than a default "
+        f"neighbour's — the weight term vanished from nebula's one channel: {both_on}"
+    )
+    assert delta <= 0.03 + 1e-9, (
+        f"the weight delta must hold the ±0.028 ceiling (0.03 once quantized) — "
+        f"anything bigger starts competing with the on/off intensity split: {both_on}"
+    )
+    mixed = washes({"width_cm": 300, "height_cm": 300}, "on", "off")
+    on_op = next(w["op"] for w in mixed if w["state"] == "on")
+    off_op = next(w["op"] for w in mixed if w["state"] == "off")
+    assert on_op - off_op > 0.03, (
+        f"worst direction: a max-weight OFF wash pushed up its full delta must stay "
+        f"clearly under an unsized ON wash — by more than the whole weight band, or "
+        f"state stops being readable as intensity: {mixed}"
+    )
+
+
+def test_automorph_ring_jitter_is_deterministic_bounded_and_fades_hard(tmp_path):
+    """The hand-inked jitter follows the cell wobble's own discipline: a
+    seeded sine of position, never Math.random(), so the fabric alone
+    reproduces a render. Zero amplitude (t=0, or hardness=-100) returns the
+    SAME array — the applyHardness passthrough convention. Amplitude scales
+    exactly linearly with t, fades linearly to zero on the negative-
+    hardness side (jitter on a 'geometrically aligned' shape reads as dirt,
+    not craft), never fades on the soft side, and is capped ~1px — far
+    inside the marginM non-overlap gap."""
+    out = _run_js(tmp_path, (
+        "import { automorphRingJitter } from './iso_lights.mjs';\n"
+        "const ring=[]; for(let i=0;i<24;i++){const a=i/24*2*Math.PI; ring.push([100+Math.cos(a)*40, 100+Math.sin(a)*40]);}\n"
+        "const disp=(o)=>Math.max(...o.map((p,i)=>Math.hypot(p[0]-ring[i][0], p[1]-ring[i][1])));\n"
+        "const j1=automorphRingJitter(ring,100,100,1,0);\n"
+        "console.log(JSON.stringify({\n"
+        "  identT0: automorphRingJitter(ring,100,100,0,0)===ring,\n"
+        "  identHard: automorphRingJitter(ring,100,100,1,-100)===ring,\n"
+        "  same: JSON.stringify(j1)===JSON.stringify(automorphRingJitter(ring,100,100,1,0)),\n"
+        "  seedMoves: JSON.stringify(automorphRingJitter(ring,120,80,1,0))!==JSON.stringify(j1),\n"
+        "  full: disp(j1),\n"
+        "  half: disp(automorphRingJitter(ring,100,100,0.5,0)),\n"
+        "  faded: disp(automorphRingJitter(ring,100,100,1,-50)),\n"
+        "  soft: disp(automorphRingJitter(ring,100,100,1,60)),\n"
+        "}));\n"
+    ))
+    assert out["identT0"] and out["identHard"], f"zero amplitude must be the same-array passthrough: {out}"
+    assert out["same"], "the jitter must be fully deterministic — two identical calls, identical output"
+    assert out["seedMoves"], "a different fixture position must seed a different waviness"
+    assert 0 < out["full"] <= 1.1 + 1e-9, f"amplitude must be real but capped ~1px: {out}"
+    assert abs(out["half"] - out["full"] * 0.5) < 1e-9, f"amplitude must scale linearly with t: {out}"
+    assert abs(out["faded"] - out["full"] * 0.5) < 1e-9, (
+        f"hardness -50 must halve the amplitude on its way to zero at -100: {out}"
+    )
+    assert abs(out["soft"] - out["full"]) < 1e-9, (
+        f"positive (soft) hardness must not fade the jitter — only the hard side reads it as dirt: {out}"
+    )
+
+
+def test_ring_jitter_applied_once_before_hardness_and_skipped_for_nebula():
+    """Structural pin, same discipline as the chaikinSmooth call-site pin:
+    exactly ONE jitter application, sitting between the morph and
+    applyHardness — so hardness spikes grow from inked points and the soft
+    spline runs through them — and skipped entirely for nebula, whose mask
+    fades the edge the jitter would decorate."""
+    src = _code_only((_VIEWS / "iso_lights.js").read_text(encoding="utf-8"))
+    calls = re.findall(r"(?<!function )automorphRingJitter\(", src)
+    assert len(calls) == 1, f"expected exactly one automorphRingJitter call site, found {len(calls)}"
+    assert 'const inked=(AUTOMORPH_STYLE==="nebula") ? morphed' in src, (
+        "nebula must skip the jitter at the one call site"
+    )
+    assert "automorphRingJitter(morphed, hx, hy, AUTOMORPH_PCT/100, AUTOMORPH_HARDNESS)" in src, (
+        "the jitter must ride the morphed ring, seeded from the fixture's own position"
+    )
+    assert "applyHardness(inked, AUTOMORPH_HARDNESS, hardCapPx)" in src, (
+        "hardness must operate on the inked ring — jitter before spikes, spikes before pathing"
+    )
+
+
+# ── Automorph per-ring fade, per-shape rim, blueprint state split (the
+# 2026-09-08 five-lens review: svg lens f0, completeness lens f1/f2) ────────
+
+def test_automorph_mask_fades_at_the_rings_own_edge_not_the_viewports(tmp_path):
+    """psautomorphmask's content rect used percentage coordinates under the
+    default maskContentUnits=userSpaceOnUse, where percentage lengths
+    resolve against the VIEWPORT (SVG 1.1 §7.10/§14.4): the fade was one
+    canvas-centred vignette. Rasterized (resvg), three identical masked
+    squares read ~0.11 alpha at the canvas corners vs 1.0 at its centre,
+    and a real bloom/nebula ring had NO fade at its own edge — its whole
+    strength a function of where the room sat on the canvas, worst on tall
+    multi-floor stacks. The def must carry
+    maskContentUnits="objectBoundingBox" with FRACTION coordinates, so the
+    -0.2..1.4 rect (and psautomorphgrad, objectBoundingBox itself, centred
+    on it) hugs each REFERENCING ring: per-fixture centre-to-edge fade
+    from ONE shared def (post-fix raster: bloom centre 1.0, own bbox edge
+    ~0.1, corner 0.0, identical at any canvas position). The defect is
+    invisible to string matching, so the exact def string IS the pin —
+    both in the emitted render and at its single source site."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Office": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]}},
+        "light_positions_m": {"light.lamp": {"x_m": 3, "y_m": 3, "floor_id": "main"}},
+    }
+    lbe = {"light.lamp": {"entity_id": "light.lamp", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None}}
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    def_pin = (
+        '<mask id="psautomorphmask" maskContentUnits="objectBoundingBox">'
+        '<rect x="-0.2" y="-0.2" width="1.4" height="1.4" fill="url(#psautomorphgrad)"/></mask>'
+    )
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const mk=(o)=>M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,o);\n"
+        f"const glow=mk({{nowMs:{NOW}, automorph:true, automorphRoomPct:100, automorphStyle:'glow'}});\n"
+        f"const nebula=mk({{nowMs:{NOW}, automorph:true, automorphRoomPct:100, automorphStyle:'nebula'}});\n"
+        f"const PIN={json.dumps(def_pin)};\n"
+        "console.log(JSON.stringify({\n"
+        "  glowDefs: (glow.match(/<mask id=\"psautomorphmask\"/g)||[]).length,\n"
+        "  glowPinned: glow.includes(PIN), nebulaPinned: nebula.includes(PIN),\n"
+        "  pctLeak: /<mask id=\"psautomorphmask\"[^>]*>[^]*?%[^]*?<\\/mask>/.test(glow),\n"
+        "  glowRefs: (glow.match(/mask=\"url\\(#psautomorphmask\\)\"/g)||[]).length,\n"
+        "  nebulaRefs: (nebula.match(/mask=\"url\\(#psautomorphmask\\)\"/g)||[]).length,\n"
+        "}));\n"
+    ))
+    assert out["glowDefs"] == 1, f"one shared mask def, never per fixture: {out}"
+    assert out["glowPinned"] and out["nebulaPinned"], (
+        "psautomorphmask must be the objectBoundingBox fraction-rect def — percentage "
+        "coordinates under default maskContentUnits resolve against the viewport and "
+        f"turn the fade into a canvas-centred vignette: {out}"
+    )
+    assert not out["pctLeak"], f"no percentage length may creep back into the mask content: {out}"
+    assert out["glowRefs"] == 1 and out["nebulaRefs"] >= 1, (
+        f"the lit bloom and the nebula wash must still fade through the shared mask: {out}"
+    )
+    src = (_VIEWS / "iso_lights.js").read_text(encoding="utf-8")
+    assert def_pin in src, "the fixed mask def must sit at its single source site, byte-exact"
+
+
+def test_automorph_rim_sweeps_each_shapes_own_bbox_not_the_floor(tmp_path):
+    """edgeRim stroked with the floor-wide userSpaceOnUse psglossauto, so
+    bright-vs-dark on a shape's rim was decided by the fixture's POSITION
+    on the floor, not by which side of each shape faces the light: on a
+    16x8m two-room floor the right-hand fixture's ENTIRE rim projected
+    past the ramp's 45% stop (offset fractions ~0.60..1.04 — max white
+    opacity ~0.07, a near-uniform dark outline, the exact flat-sticker
+    tell the rim exists to kill), while the left fixture's rim was bright
+    on most of its perimeter. The rim must stroke psglossrim — psgloss's
+    exact stops on default objectBoundingBox units, ONE shared aura-gated
+    def — so every shape's rim sweeps bright upper-left to dark
+    lower-right across its OWN bbox (offsets 0..1 by construction). The
+    gloss FILL keeps the floor-wide psglossauto: the one-sun rule was
+    moved for the interiors, not the bevel."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {
+            "West": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 8], [0, 8]]},
+            "East": {"type": "poly", "floor_id": "main", "points_m": [[8, 0], [16, 0], [16, 8], [8, 8]]},
+        },
+        "light_positions_m": {
+            "light.a": {"x_m": 1.5, "y_m": 4, "floor_id": "main"},
+            "light.b": {"x_m": 6.5, "y_m": 4, "floor_id": "main"},
+            "light.c": {"x_m": 14.5, "y_m": 4, "floor_id": "main"},
+        },
+    }
+    lbe = {
+        eid: {"entity_id": eid, "state": "on", "code": f"A0{i}", "shape": "circle", "isMotion": False, "last_changed": None}
+        for i, eid in enumerate(["light.a", "light.b", "light.c"], start=1)
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    def_pin = (
+        '<linearGradient id="psglossrim" x1="0.15" y1="0" x2="0.6" y2="1">'
+        '<stop offset="0%" stop-color="#fff" stop-opacity="0.5"/>'
+        '<stop offset="45%" stop-color="#fff" stop-opacity="0.1"/>'
+        '<stop offset="100%" stop-color="#000" stop-opacity="0.18"/></linearGradient>'
+    )
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const mk=(o)=>M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,o);\n"
+        f"const on=mk({{nowMs:{NOW}, automorph:true, automorphRoomPct:100, automorphHardness:0, automorphStyle:'glow'}});\n"
+        f"const off=mk({{nowMs:{NOW}}});\n"
+        f"const PIN={json.dumps(def_pin)};\n"
+        "console.log(JSON.stringify({\n"
+        "  rimRefs: (on.match(/fill=\"none\" stroke=\"url\\(#psglossrim\\)\"/g)||[]).length,\n"
+        "  rimOnFloorRamp: (on.match(/fill=\"none\" stroke=\"url\\(#psglossauto_/g)||[]).length,\n"
+        "  glossFillRefs: (on.match(/fill=\"url\\(#psglossauto_0\\)\"/g)||[]).length,\n"
+        "  rimDefs: (on.match(/<linearGradient id=\"psglossrim\"/g)||[]).length,\n"
+        "  pinned: on.includes(PIN),\n"
+        "  userSpaceLeak: on.includes('id=\"psglossrim\" gradientUnits'),\n"
+        "  offCarriesRim: off.includes('psglossrim'),\n"
+        "}));\n"
+    ))
+    assert out["rimRefs"] == 3, f"every fixture's rim must stroke the per-shape ramp: {out}"
+    assert out["rimOnFloorRamp"] == 0, (
+        f"no rim may stroke the floor-wide ramp — that decided bright-vs-dark by slab "
+        f"position instead of per shape: {out}"
+    )
+    assert out["glossFillRefs"] == 3, f"the gloss FILL must keep the one-sun floor ramp: {out}"
+    assert out["rimDefs"] == 1 and out["pinned"], (
+        f"psglossrim is ONE shared def carrying psgloss's exact stops: {out}"
+    )
+    assert not out["userSpaceLeak"], (
+        f"psglossrim must stay on default objectBoundingBox units — user space would "
+        f"recreate the position-dependent rim: {out}"
+    )
+    assert not out["offCarriesRim"], (
+        f"psglossrim is aura-only — the automorph-off render may not carry it "
+        f"(byte-identity contract): {out}"
+    )
+
+
+def test_automorph_blueprint_carries_state_in_its_one_channel(tmp_path):
+    """light[3]'s problem statement — every aura opacity formula identical
+    for on and off, the sole difference the base hex — stayed literally
+    true for the blueprint style: a lit and an unlit fixture rendered
+    byte-identically except for the grey (both 0.80/1.10 at pct=100).
+    Blueprint's one channel is linework brightness, so state must ride it:
+    lit dashes and nodes a step brighter than unlit at every t
+    (0.45+0.40t vs 0.30+0.40t), while width, dash pattern and node radius
+    stay state-independent — heavier lit linework would read as a
+    different pen, not a lit fixture."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]}},
+        "light_positions_m": {
+            "light.a": {"x_m": 1.5, "y_m": 2, "floor_id": "main"},
+            "light.b": {"x_m": 6.5, "y_m": 2, "floor_id": "main"},
+        },
+    }
+    lbe = {
+        "light.a": {"entity_id": "light.a", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.b": {"entity_id": "light.b", "state": "off", "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:100, automorphStyle:'blueprint'}});\n"
+        "const dashes=[...svg.matchAll(/<path d=\"[^\"]+\" fill=\"none\" stroke=\"(#[0-9a-f]{6})\""
+        " stroke-opacity=\"([\\d.]+)\" stroke-width=\"([\\d.]+)\" stroke-dasharray=\"([^\"]+)\"/g)]"
+        ".map(m=>({hex:m[1], op:parseFloat(m[2]), w:m[3], dash:m[4]}));\n"
+        "const nodeOps={};\n"
+        "for(const m of svg.matchAll(/<circle cx=\"[-\\d.]+\" cy=\"[-\\d.]+\" r=\"1.6\" fill=\"(#[0-9a-f]{6})\" fill-opacity=\"([\\d.]+)\"/g))"
+        " nodeOps[m[1]]=parseFloat(m[2]);\n"
+        "console.log(JSON.stringify({dashes, nodeOps}));\n"
+    ))
+    assert len(out["dashes"]) == 2, f"expected one dashed outline per fixture: {out}"
+    by_hex = {d["hex"]: d for d in out["dashes"]}
+    on, off = by_hex["#94a3b8"], by_hex["#475569"]
+    assert on["op"] == 0.85 and off["op"] == 0.70, (
+        f"blueprint linework must carry state — lit brighter than unlit at every t: {out}"
+    )
+    assert on["w"] == off["w"] and on["dash"] == off["dash"], (
+        f"width and dash pattern stay state-independent — brightness is the one channel: {out}"
+    )
+    assert out["nodeOps"]["#94a3b8"] == on["op"] and out["nodeOps"]["#475569"] == off["op"], (
+        f"the vertex nodes ride the same dashOp as their outline: {out}"
+    )
+
+
+# ── Determinism of the WHOLE automorph render, not just its helpers ─────────
+
+def test_automorph_full_map_two_renders_are_byte_identical(tmp_path):
+    """Determinism is a hard invariant, but it was pinned only per helper —
+    applyHardness, chaikinSmooth and automorphRingJitter each compare two
+    of their own calls — so entropy introduced in any unpinned painted
+    formula (the shadow's displacement, an opacity, a duotone stop, a
+    seed taken from Date.now() outside the pinned jitter site) passed
+    every existing test: helper units call helpers with fixed args, and
+    every render probe compares within one render. This closes the CLASS:
+    one scene with everything live — two floors, a sized rotated strip
+    (jitter + weight offset), negative hardness (spikes + jitter fade),
+    an off fixture — rendered twice per style in one node run with the
+    same nowMs. The fabric alone must reproduce the bytes."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {
+            "Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 4], [0, 4]]},
+            "Loft":    {"type": "poly", "floor_id": "up",   "points_m": [[0, 0], [5, 0], [5, 5], [0, 5]]},
+        },
+        "light_positions_m": {
+            "light.plain": {"x_m": 3.0, "y_m": 2.0, "floor_id": "main"},
+            "light.strip": {"x_m": 4.0, "y_m": 1.0, "floor_id": "main",
+                            "width_cm": 240, "height_cm": 5, "rotation": 30},
+            "light.up":    {"x_m": 2.5, "y_m": 2.5, "floor_id": "up"},
+        },
+    }
+    lbe = {
+        "light.plain": {"entity_id": "light.plain", "state": "on",  "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.strip": {"entity_id": "light.strip", "state": "on",  "code": "W01", "shape": "bar",    "isMotion": False, "last_changed": None},
+        "light.up":    {"entity_id": "light.up",    "state": "off", "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}, {"id": "up", "name": "Upper", "level": 1}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        "const res={};\n"
+        "for(const style of ['glow','nebula','blueprint']){\n"
+        f"  const opts={{nowMs:{NOW}, automorph:true, automorphRoomPct:100, automorphHardness:-60, automorphStyle:style}};\n"
+        "  const s1=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,opts);\n"
+        "  const s2=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,opts);\n"
+        "  res[style]={same:s1===s2, len:s1.length};\n"
+        "}\n"
+        "console.log(JSON.stringify(res));\n"
+    ))
+    for style in ("glow", "nebula", "blueprint"):
+        assert out[style]["len"] > 0, f"the {style} scene must actually render: {out}"
+        assert out[style]["same"], (
+            f"two identical {style} renders must be byte-identical — the fabric alone "
+            f"reproduces a render, no Math.random()/Date.now() anywhere in the paint path: {out}"
+        )
+    # Byte equality alone cannot see entropy smaller than the emitted
+    # quantization (a 1% Math.random() factor on a toFixed(1) coordinate
+    # usually rounds away — measured: that exact mutation stayed green), so
+    # the no-entropy discipline is ALSO pinned at the source, the hardCapPx
+    # pin's own rationale: Math.random appears nowhere in code, Date.now
+    # exactly once — buildIsoSVG's deliberate nowMs fallback, which every
+    # render test here pins away by passing nowMs.
+    src = _code_only((_VIEWS / "iso_lights.js").read_text(encoding="utf-8"))
+    assert "Math.random(" not in src, (
+        "Math.random must appear nowhere in the renderer's code — even sub-quantization "
+        "entropy breaks the fabric-reproduces-the-render contract"
+    )
+    assert src.count("Date.now(") == 1 and "const NOW_MS=Number(opts.nowMs)||Date.now();" in src, (
+        "Date.now may appear exactly once: the deliberate nowMs fallback at the top of "
+        "buildIsoSVG — a second site would seed paint from wall-clock time"
+    )
+
+
+def test_motion_legend_strip_indexes_every_real_pulse_colour_in_proportion(tmp_path):
+    """Garry (2026-09-08), in order: "a small line at the bottom, very
+    narrow, with an index of the color order for the motion, starting at
+    blue, and thru the colors to ending on green" — then, seeing only the
+    first three stops, "I ask for all the colors in the shift from blue to
+    green for motion. Every color in the rainbow" — then "make sure that's
+    actually aligned with what is happening on the map." All three land
+    here: every one of MOTION_COLOR_STOPS' seven hues appears (not just the
+    first three), as hard-edged bands (never a smooth blend — the real fade
+    is discrete held stages, per motionRecentHue's own step function) whose
+    WIDTHS are proportional to each colour's real held duration, with a
+    fixed terminal band for magenta (held indefinitely past 2h, so no
+    finite width could honestly represent it)."""
+    model = {
+        "room_geometry_m": {"Room": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]}},
+        "light_positions_m": {"light.a": {"x_m": 2, "y_m": 2, "floor_id": "main"}},
+    }
+    lbe = {"light.a": {"entity_id": "light.a", "state": "on", "code": "A01", "shape": "circle"}}
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        "const svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,{});\n"
+        "const grad=/<linearGradient id=\"psmotionlegend\"[^>]*>([\\s\\S]*?)<\\/linearGradient>/.exec(svg);\n"
+        "const body=grad?grad[1]:'';\n"
+        "const stops=[...body.matchAll(/<stop offset=\"([0-9.]+)%\" stop-color=\"hsl\\((\\d+),75%,58%\\)\"\\/>/g)]\n"
+        "  .map(m=>({pct:Number(m[1]), hue:Number(m[2])}));\n"
+        "console.log(JSON.stringify({\n"
+        "  gradDefs: (svg.match(/id=\"psmotionlegend\"/g)||[]).length,\n"
+        "  stripRef: (svg.match(/fill=\"url\\(#psmotionlegend\\)\"/g)||[]).length,\n"
+        "  hasLabel: svg.includes('>Motion<'),\n"
+        "  noCaptionRow: !svg.includes('just triggered') && !svg.includes('quiet a few min'),\n"
+        "  stripBeforeSvgClose: svg.lastIndexOf('url(#psmotionlegend)') < svg.lastIndexOf('</svg>'),\n"
+        "  stops,\n"
+        "}));\n"
+    ))
+    assert out["gradDefs"] == 1, "exactly one shared gradient def, not one per render call"
+    assert out["stripRef"] == 1, "exactly one strip drawn"
+    assert out["hasLabel"], out
+    assert out["noCaptionRow"], "no extra row of text below the strip"
+    assert out["stripBeforeSvgClose"], out
+    stops = out["stops"]
+    # 7 colours x 2 stops each (hard step edges) = 14.
+    assert len(stops) == 14, stops
+    hues_in_order = [s["hue"] for s in stops[::2]]
+    assert hues_in_order == [240, 180, 120, 60, 30, 0, 300], (
+        "every one of MOTION_COLOR_STOPS' seven hues, in order — not just the first three", hues_in_order
+    )
+    # Each colour is a hard-edged band: both its own stops share one offset pair,
+    # and the next colour starts exactly where the previous one ended (no gap,
+    # no blend region).
+    for i in range(0, len(stops), 2):
+        assert stops[i]["hue"] == stops[i + 1]["hue"], stops
+    for i in range(1, len(stops) - 1, 2):
+        assert abs(stops[i]["pct"] - stops[i + 1]["pct"]) < 0.01, (
+            "a colour band must end exactly where the next one begins — no blended transition", stops
+        )
+    # Widths proportional to real held duration: cyan's real window (5-20min =
+    # 15min) must be visibly wider than blue's (0-5min = 5min) — 3x, roughly.
+    blue_w = stops[1]["pct"] - stops[0]["pct"]
+    cyan_w = stops[3]["pct"] - stops[2]["pct"]
+    red_w = stops[11]["pct"] - stops[10]["pct"]
+    assert cyan_w > blue_w * 2, (blue_w, cyan_w)
+    assert red_w > blue_w * 2, (blue_w, red_w)
+    # Magenta (the final, indefinitely-held colour) gets a fixed terminal
+    # band, not a proportional one — and it must reach exactly 100%.
+    assert abs(stops[13]["pct"] - 100.0) < 0.01, stops
+    magenta_w = stops[13]["pct"] - stops[12]["pct"]
+    assert 5 <= magenta_w <= 15, ("fixed terminal band, not proportional", magenta_w)
+
+
+def test_motion_legend_strip_reserves_its_own_row_past_the_floor_legend(tmp_path):
+    """A multi-floor render must not clip or overlap the strip under the
+    last floor row — LEGEND_H reserves exactly one extra row for it."""
+    model = {
+        "room_geometry_m": {
+            "R1": {"type": "poly", "floor_id": "f1", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]},
+            "R2": {"type": "poly", "floor_id": "f2", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]},
+            "R3": {"type": "poly", "floor_id": "f3", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]},
+        },
+        "light_positions_m": {},
+    }
+    floors = [{"id": "f1", "name": "One", "level": 0}, {"id": "f2", "name": "Two", "level": 1}, {"id": "f3", "name": "Three", "level": 2}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        "const svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,{},false,FLOORS,{});\n"
+        "const h=/height=\"([0-9.]+)\"/.exec(svg);\n"
+        "const stripM=/<rect x=\"70\" y=\"([0-9.]+)\"[^>]*fill=\"url\\(#psmotionlegend\\)\"/.exec(svg);\n"
+        "console.log(JSON.stringify({height:h?Number(h[1]):null, stripY:stripM?Number(stripM[1]):null}));\n"
+    ))
+    assert out["height"] is not None and out["stripY"] is not None, out
+    assert out["stripY"] + 12 <= out["height"], (
+        "the motion legend strip must fit fully inside the SVG's own declared height", out
+    )

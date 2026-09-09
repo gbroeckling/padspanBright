@@ -19,7 +19,7 @@ Organisation:
 
 DOMAIN = "padspan_bright"
 NAME = "PadSpan Bright"
-VERSION = "0.38.22"
+VERSION = "0.38.23"
 
 # ── Config-flow option keys ───────────────────────────────────────────────────
 CONF_ENABLE_CLOUD = "enable_cloud"
@@ -59,6 +59,7 @@ DATA_BEACON_LAST_MACS = "beacon_last_macs"
 DATA_CALIBRATION = "calibration"
 DATA_ALERTS = "alerts"
 DATA_MOVEMENT = "movement"
+DATA_LOST_AND_FOUND = "lost_and_found"
 DATA_ADAPTIVE = "adaptive"
 DATA_OBJECT_HISTORY = "object_history"
 DATA_TRACEBACK = "traceback"
@@ -78,6 +79,7 @@ OBJECT_STORE_KEY = "padspan_bright.objects"
 CALIBRATION_STORE_KEY = "padspan_bright.calibration"
 ALERTS_STORE_KEY = "padspan_bright.follow_alerts"
 MOVEMENT_STORE_KEY = "padspan_bright.movement_history"
+LOST_AND_FOUND_STORE_KEY = "padspan_bright.lost_and_found"
 ADAPTIVE_STORE_KEY = "padspan_bright.adaptive"
 BACKUPS_STORE_KEY = "padspan_bright.backups"
 OBJECT_HISTORY_STORE_KEY = "padspan_bright.object_history"
@@ -127,7 +129,7 @@ CRITIC_WARNING_ERROR_M = 1.2
 LIGHT_SHAPE_KINDS = frozenset({
     "hex", "circle", "bar", "line", "square", "triangle", "diamond",
     "fan", "sconce", "pendant", "chandelier", "perimeter", "motion",
-    "tempreadout",
+    "tempreadout", "lock", "door",
 })
 
 # ── Light type overrides (Pro) ──────────────────────────────────────────────
@@ -138,7 +140,7 @@ LIGHT_SHAPE_KINDS = frozenset({
 # in www/padspan-bright/views/light_codes.js — a test holds the two equal, the
 # same discipline as LIGHT_SHAPE_KINDS above ("auto" is the UI's word for
 # "no override" and is expressed by omitting the entity, never stored).
-LIGHT_TYPE_OVERRIDE_KINDS = frozenset({"wled", "partition", "plain"})
+LIGHT_TYPE_OVERRIDE_KINDS = frozenset({"wled", "partition", "plain", "fan"})
 
 # ── Outdoors ────────────────────────────────────────────────────────────────
 # What "the outdoor floor" is called: the fabric's sentinel and the names a

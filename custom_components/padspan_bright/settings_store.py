@@ -67,6 +67,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "kalman_q": 0.125,             # Kalman process noise (RSSI responsiveness)
     "kalman_r": 8.0,               # Kalman measurement noise (smoothing strength)
     "assumed_device_height_m": 1.0,  # carry height above the floor for 3D distance (pocketed phone)
+    # GPS bridge (gap #5, best-in-class roadmap): the fabric's own metre
+    # plane has no inherent relationship to true north or a real-world
+    # location — these three anchor it, so a tracked object's x_m/y_m can
+    # become a real latitude/longitude for HA's map. None until a person
+    # sets them; a device_tracker with no origin configured reports no GPS
+    # rather than fabricating one at (0, 0).
+    "fabric_origin_lat": None,   # latitude of the fabric's (x_m=0, y_m=0) point
+    "fabric_origin_lon": None,   # longitude of the fabric's (x_m=0, y_m=0) point
+    "fabric_bearing_deg": 0.0,   # compass bearing (clockwise from true north) the fabric's +Y axis points toward
     "light_theme": False,   # invert the panel colours (accessibility — dark theme unusable for some)
     # Panel chrome skin. "2025" loads the styles-2025.css overlay and the
     # grouped icon nav; "classic" is v0.35.0 chrome byte-for-byte, kept as a
@@ -81,8 +90,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "lights_fit_rooms": False,  # Mapping -> Lights Showcase: never draw a fixture larger than its room
     "lights_isolux": False,  # Mapping -> Lights Showcase: relative-illuminance contours on the metre grid
     "lights_hide_untouched": False,  # Mapping -> Lights: draw only fixtures that have been sized/rotated/coloured/shaped
+    "lights_hide_device_codes": False,  # Mapping -> Lights: hide every marker's A01/M08-style code label, everywhere the map renders
+    "lights_automorph_enabled": False,  # Mapping -> Lights: room-alignment aura, off = today's rendering exactly
+    "lights_automorph_room_pct": 0,     # 0-100: how far each fixture's aura has grown toward its room's own shape
+    "lights_automorph_hardness": 0,     # -100..100, centered: negative sharpens/spikes the aura's edges, positive smooths them into a closed spline; 0 = today's straight edge
+    "lights_automorph_style": "glow",   # "glow" | "blueprint" | "nebula" — which visual treatment paints the same morphed shape
+    "lights_automorph_subtlety": 0,     # 0-100: 0 = full opacity/line-weight (today's look), 100 = thinned lines + faded near-invisible
     "overview_show_walls": False,   # Overview: draw RF barrier walls over the map
     "overview_show_outdoor": False, # Overview: draw outdoor areas (sheds, driveways) as an overlay
+    "overview_show_trails": False,  # Overview/Pure Live: fading movement trail behind each tracked object
     "health_reminder_enabled": False,  # monthly calibration accuracy reminder (off by default)
     "health_reminder_last_ts":  None,  # epoch seconds when reminder was last shown
     "adaptive_learning_enabled": False,  # experimental: passive room fingerprint learning

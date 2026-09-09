@@ -111,6 +111,7 @@ from .const import (
     DEFAULT_REF_POWER, DEFAULT_PATH_LOSS_EXP,
 )
 from . import fabric_truth as _fabric_truth
+from .beacon_drift import compute_drift_m, drift_severity
 from .presence_rules import (
     indoor_coverage_floor, is_outdoor_floor, modelled_coverage_floor,
     coverage_evidence, coverage_window_polls, outdoor_attribution,
@@ -680,6 +681,9 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._floor_bounds: dict[str, tuple[float, float, float, float]] = {}
         # List of barrier dicts: [{points, attenuation_dbm, map_id}, ...]
         self._rf_barriers: list[dict] = []
+        # {linked_entity_id: (raw_state, consecutive_count, confirmed_state)}
+        # — 2-poll debounce for door/window barrier attenuation overrides.
+        self._door_debounce: dict[str, tuple[str | None, int, str | None]] = {}
         # Phase 2: True when spatial data is in metres (not map fractions)
         self._use_metres: bool = False
 
@@ -1178,9 +1182,11 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "attenuation_dbm": float(b.get("attenuation_dbm", 6)),
                         "material": str(b.get("material", "custom")),
                         "floor_id": str(b.get("floor_id", "")),
+                        "linked_entity_id": b.get("linked_entity_id"),
                     }
                     for b in _mb if len(b.get("points_m") or []) >= 2
                 ]
+                self._resolve_door_attenuation()
                 if self._room_centroids or self._scanner_positions:
                     self._use_metres = True
         except Exception:
@@ -1284,6 +1290,11 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 obj["x_m"] = _pos["x_m"]
                                 obj["y_m"] = _pos["y_m"]
                                 obj["floor_id"] = _pos.get("floor_id", obj.get("floor_id", ""))
+                            # k-NN's weighted room vote, normalised to fractions —
+                            # the "why this room" breakdown. Only present when
+                            # _pos came from k-NN (spatial has no vote to show).
+                            if _pos.get("room_scores"):
+                                obj["room_scores"] = _pos["room_scores"]
                         # Store Kalman-smoothed per-source RSSI for scanner distance sensors
                         obj["_source_rssi"] = dict(self._ema_rssi.get(smooth_addr, {}))
                         # Propagate TX power if seen in advertisements
@@ -1291,6 +1302,7 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             obj.setdefault("tx_power", addr_tx_power[smooth_addr])
                         elif raw_addr in addr_tx_power:
                             obj.setdefault("tx_power", addr_tx_power[raw_addr])
+                        obj["source_distances_m"] = self._source_distances_m(obj["_source_rssi"], obj)
                         self._known_objs[key] = dict(obj)  # refresh with smoothed data
                     elif obj.get("kind") == "ibeacon":
                         obj = dict(obj)
@@ -1322,8 +1334,11 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 obj["x_m"] = _pos_ib["x_m"]
                                 obj["y_m"] = _pos_ib["y_m"]
                                 obj["floor_id"] = _pos_ib.get("floor_id", obj.get("floor_id", ""))
+                            if _pos_ib.get("room_scores"):
+                                obj["room_scores"] = _pos_ib["room_scores"]
                         # Store Kalman-smoothed per-source RSSI for scanner distance sensors
                         obj["_source_rssi"] = dict(self._ema_rssi.get(key, {}))
+                        obj["source_distances_m"] = self._source_distances_m(obj["_source_rssi"], obj)
                         self._known_objs[key] = dict(obj)  # refresh with smoothed data
 
                     # ── Pinned beacon room override ──────────────────────────────────
@@ -1339,6 +1354,21 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             obj["room"] = _pin["room"]
                             self._confirmed_room[key] = _pin["room"]
                         obj["_pinned"] = True
+                        # Drift (gap #6, best-in-class roadmap): this branch
+                        # only ever overrides room — x_m/y_m above is still
+                        # the solver's own live SOLVED position, computed the
+                        # same way as for any other object. The pin's x_m/y_m
+                        # is the declared TRUE position. The gap between them
+                        # is a continuously-refreshed ground-truth check a
+                        # one-off calibration walk point can never give.
+                        if _pin.get("x_m") is not None:
+                            obj["anchor_true_x_m"] = _pin["x_m"]
+                            obj["anchor_true_y_m"] = _pin["y_m"]
+                            obj["anchor_true_floor_id"] = _pin.get("floor_id", "")
+                            obj["anchor_drift_m"] = compute_drift_m(
+                                obj.get("x_m"), obj.get("y_m"), _pin["x_m"], _pin["y_m"],
+                            )
+                            obj["anchor_drift_severity"] = drift_severity(obj["anchor_drift_m"])
 
                     # Every object, whichever branch produced it — BLE, iBeacon,
                     # a pinned beacon, an entity tracker that arrived pre-smoothed
@@ -1967,6 +1997,10 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # RSSI margin confidence (for entity attributes)
             sorted_vals = sorted(ema.values(), reverse=True)
             if len(sorted_vals) >= 2:
+                # 15.0 dBm is the best-vs-second-best scanner gap treated as
+                # fully (1.0) confident; confidence tapers linearly to 0.0 as
+                # the gap closes. No empirical derivation for this figure is
+                # recorded in history or elsewhere in this file.
                 rssi_margin_confidence = round(
                     min(1.0, max(0.0, (sorted_vals[0] - sorted_vals[1]) / 15.0)), 2
                 )
@@ -3005,6 +3039,43 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Corroboration check for %s failed: %s", room, _corr_err)
             return None
 
+    # ── Door/window barrier attenuation (IDEA_DOOR_WINDOW_BARRIERS.md step 4) ──
+
+    def _resolve_door_attenuation(self) -> None:
+        """Override a linked steel door/window barrier's live attenuation.
+
+        Closed leaves the barrier's authored (material) attenuation_dbm
+        alone; open drops it to ~0. Resolved here, once, server-side, so the
+        solver and the client-side what-if preview — which only ever reads
+        attenuation_dbm — stay correct automatically. A non-metal or
+        unlinked barrier is untouched, unconditionally.
+
+        Debounced across 2 consecutive polls: a flip must be read twice in a
+        row before it's applied, so a flapping sensor can't jitter the
+        solver right at a transition.
+        """
+        for _bar in self._rf_barriers:
+            _eid = _bar.get("linked_entity_id")
+            if not _eid or _bar.get("material") != "metal":
+                continue
+            try:
+                _state = self.hass.states.get(_eid)
+                _raw = _state.state if _state is not None else None
+                if _raw not in ("on", "off"):
+                    continue
+                _prev_raw, _count, _confirmed = self._door_debounce.get(
+                    _eid, (None, 0, None)
+                )
+                _count = _count + 1 if _raw == _prev_raw else 1
+                if _count >= 2:
+                    _confirmed = _raw
+                self._door_debounce[_eid] = (_raw, _count, _confirmed)
+                # binary_sensor door/window device_class: "on" == open.
+                if _confirmed == "on":
+                    _bar["attenuation_dbm"] = 0.0
+            except Exception as _door_err:
+                _LOGGER.debug("Door attenuation resolve for %s failed: %s", _eid, _door_err)
+
     # ── Object state cleanup ─────────────────────────────────────────────
 
     def _evict_object(self, key: str) -> None:
@@ -3072,6 +3143,43 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._kalman_p.pop(prev_addr, None)
             self._silence_miss.pop(prev_addr, None)
         self._kalman_addr_key[key] = smooth_addr
+
+    def _source_distances_m(self, source_rssi: dict[str, float], obj: dict) -> dict[str, float]:
+        """Per-scanner distance estimate (metres) from Kalman-smoothed RSSI.
+
+        Display-only — the spatial solver's own multilateration in
+        _update_positions is the position of record. This mirrors that
+        solver's per-scanner fit selection (self._pl_fits, else the tag's
+        own measured power, else the global setting) so a ring drawn for
+        a scanner here uses the same number the solve itself would have,
+        without touching the solver's WLS/IDW loop to get it.
+        """
+        if not source_rssi:
+            return {}
+        _st = self.hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
+        _sd = (_st.data if _st else {}) or {}
+        _ref = float(_sd.get("ref_power", DEFAULT_REF_POWER))
+        _n_exp = float(_sd.get("path_loss_exp", DEFAULT_PATH_LOSS_EXP))
+        _tag_ref = None
+        _tp = obj.get("tx_power")
+        if _tp is not None:
+            try:
+                _tpf = float(_tp)
+            except (TypeError, ValueError):
+                _tpf = None
+            if _tpf is not None and -90.0 <= _tpf <= -30.0:
+                _tag_ref = _tpf
+        out: dict[str, float] = {}
+        for src, rssi in source_rssi.items():
+            fit = self._pl_fits.get(src)
+            if fit:
+                ref_s = float(fit.get("rssi_1m", _ref))
+                n_s = float(fit.get("n", _n_exp))
+            else:
+                ref_s = _tag_ref if _tag_ref is not None else _ref
+                n_s = _n_exp
+            out[src] = round(max(0.0, 10 ** ((ref_s - rssi) / (10.0 * n_s))), 1)
+        return out
 
     def is_identified_object(self, key: str) -> bool:
         """Whether the engine treats this object as someone's — a labelled

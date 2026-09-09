@@ -40,19 +40,39 @@ export function isPartitionLight(l) {
 
 // A fan.* entity riding the lights pipeline — the map shows the whole
 // ceiling, and half of what hangs from a ceiling that switches is a fan.
-// Class comes from the entity domain alone; overrides don't apply (a light
-// cannot become a fan by declaration — the services wouldn't exist).
+// A real fan.* entity is never overridden either way (gatherLights never
+// attaches a type_override to one — see its own comment). "fan" IS a valid
+// override for a light.*, though (Garry, 2026-09-07: "some light switches
+// are fan switches") — cosmetic only: it changes the marker's shape, code
+// bucket and filter grouping, never which HA services get called. Every
+// control this map actually offers a fan (speed, oscillate, direction —
+// see openControlCard) already gates on the entity's OWN real attributes
+// (percentage_step, oscillating, ...), which a light.* entity simply does
+// not have, so an overridden light safely falls back to plain on/off.
 export function isFan(l) {
+  if (l.type_override) return l.type_override === "fan";
   return String(l.entity_id || "").startsWith("fan.");
 }
 
 // A motion (or occupancy — HA's other PIR presence class) sensor on the
-// same ceiling. gatherLights only admits binary_sensor entities whose
-// device_class is "motion" or "occupancy", so the domain prefix is a
-// sufficient test past that gate. Read-only: no toggle, no popup — its
-// job on the map is the blue pulse while triggered.
+// same ceiling. gatherLights admits binary_sensor entities of TWO distinct
+// device_class families now (motion/occupancy here, door/window below), so
+// the domain prefix alone is no longer sufficient to tell them apart —
+// device_class (captured onto l by gatherLights) is the real test. Read-
+// only: no toggle, no popup — its job on the map is the blue pulse while
+// triggered.
 export function isMotionSensor(l) {
-  return String(l.entity_id || "").startsWith("binary_sensor.");
+  return String(l.entity_id || "").startsWith("binary_sensor.")
+    && ["motion", "occupancy"].includes(l.device_class);
+}
+
+// A door or window sensor (door/window barrier project, step 1, Garry
+// 2026-09-08: "add that device type to the list of devices in mapping,
+// lighting"). Read-only, same reasoning as motion above — its job on the
+// map is a static "open or closed" glyph, not a toggle.
+export function isDoorSensor(l) {
+  return String(l.entity_id || "").startsWith("binary_sensor.")
+    && ["door", "window"].includes(l.device_class);
 }
 
 // A sensor.* entity reporting device_class "temperature" — "same as WLED or
@@ -64,6 +84,82 @@ export function isTempSensor(l) {
   return String(l.entity_id || "").startsWith("sensor.");
 }
 
+// A lock.* entity riding the lights pipeline (gap #8, best-in-class
+// roadmap: generalizing this pipeline beyond light.* to other HA domains).
+// Chosen as the FIRST domain to generalize to because its shape already
+// matches everything this pipeline assumes: one glyph, a small closed set
+// of states (locked/unlocked/jammed) rather than a numeric range, and one
+// unambiguous tap action — the same shape a light's on/off already has.
+// Class comes from the entity domain alone, like fan/motion/temp above.
+export function isLock(l) {
+  return String(l.entity_id || "").startsWith("lock.");
+}
+
+// Health — a device can be reachable and still not actually be DOING its
+// job. What "healthy" means differs by class, so this isn't one check:
+//
+//  - Every class: HA itself says "unavailable" or "unknown" — the one
+//    domain-agnostic failure signal every entity type can report.
+//  - WLED strip: reachable, but its effect_list has gone empty — the whole
+//    reason it's classed WLED rather than a plain light. Still turns on
+//    and off; has quietly lost what made it a strip (a firmware update, an
+//    ESPHome effects: block removed, a JSON API hiccup).
+//  - Motion sensor: reachable, but stuck reporting "on" past the same
+//    outer cutoff the map's own glow rendering already treats as "stuck
+//    hardware, not continuous motion" (see iso_lights.js's
+//    MOTION_RECENT_MS) — a real PIR trip does not last six hours.
+//  - Temperature sensor: reachable, but its last reading is older than the
+//    same freshness window the map's own display gate already requires
+//    before showing a number at all (iso_lights.js's TEMP_FRESH_MS) — a
+//    sensor that stopped updating a while ago, even if HA hasn't yet
+//    flipped it to unavailable.
+//  - Fan / partition segment / plain light: reachability is the whole
+//    question — there's no established second signal for these the way
+//    there is for the three above, so inventing one would just be noise.
+//
+// MOTION_STUCK_MS/TEMP_FRESH_MS are the SAME durations as iso_lights.js's
+// own constants, not new numbers — kept local rather than imported since
+// iso_lights.js scopes them inside buildIsoSVG.
+const MOTION_STUCK_MS = 6 * 60 * 60 * 1000;
+const TEMP_FRESH_MS = 60 * 60 * 1000;
+
+export function healthOf(l, nowMs) {
+  if (l.state === "unavailable" || l.state === "unknown") {
+    return { healthy: false, reason: `Entity is ${l.state}` };
+  }
+  const now = Number(nowMs) || Date.now();
+  if (l.isMotion) {
+    const changed = l.last_changed ? Date.parse(l.last_changed) : NaN;
+    if (l.state === "on" && Number.isFinite(changed) && (now - changed) > MOTION_STUCK_MS) {
+      const hrs = Math.round((now - changed) / 3600000);
+      return { healthy: false, reason: `Stuck "on" for ~${hrs}h — likely a hardware fault, not continuous motion` };
+    }
+    return { healthy: true, reason: "" };
+  }
+  if (l.isTemp) {
+    const updated = l.last_changed ? Date.parse(l.last_changed) : NaN;
+    if (!Number.isFinite(updated)) return { healthy: false, reason: "No reading timestamp" };
+    if ((now - updated) > TEMP_FRESH_MS) {
+      const hrs = Math.round((now - updated) / 3600000);
+      return { healthy: false, reason: `No reading in over ${hrs}h` };
+    }
+    return { healthy: true, reason: "" };
+  }
+  if (isWledLight(l)) {
+    if (!Array.isArray(l.effect_list) || !l.effect_list.length) {
+      return { healthy: false, reason: "No effects reported — this WLED strip may have lost its effect list" };
+    }
+    return { healthy: true, reason: "" };
+  }
+  if (l.isLock) {
+    if (l.state === "jammed") {
+      return { healthy: false, reason: "Lock is jammed" };
+    }
+    return { healthy: true, reason: "" };
+  }
+  return { healthy: true, reason: "" };
+}
+
 // The type-override chooser's vocabulary — the UI's copy of const.py's
 // LIGHT_TYPE_OVERRIDE_KINDS ("auto" = no override, expressed by omitting
 // the entity, never stored). A test holds the two equal.
@@ -72,6 +168,7 @@ export const LIGHT_TYPE_OVERRIDES = [
   ["wled",      "WLED / effect strip"],
   ["partition", "ESPHome partition"],
   ["plain",     "Plain light"],
+  ["fan",       "Fan (switch only)"],
 ];
 
 // Distinct marker border/stroke per class, in both views.
@@ -83,6 +180,8 @@ export const MOTION_BORDER = "#3b82f6";
 // room hue so a triggered sensor reads at a glance across the whole map.
 export const MOTION_PULSE = "#3b82f6";
 export const TEMP_BORDER = "#fb923c";
+export const LOCK_BORDER = "#a78bfa";
+export const DOOR_BORDER = "#fb7185";
 
 // ── Fixture shape ────────────────────────────────────────────────────────────
 // The marker's OUTLINE answers "what kind of light is that" without reading
@@ -111,6 +210,8 @@ export const LIGHT_SHAPES = [
   ["perimeter", "Room perimeter / cove"],
   ["motion",    "Motion sensor"],
   ["tempreadout", "Temperature readout"],
+  ["lock",      "Door lock"],
+  ["door",      "Door/window sensor"],
 ];
 
 // "perimeter" is drawn once, structurally differently from every shape
@@ -138,7 +239,9 @@ export function deriveLightShape(l) {
   // no name needed.
   if (isFan(l)) return "fan";
   if (isMotionSensor(l)) return "motion";
+  if (isDoorSensor(l)) return "door";
   if (isTempSensor(l)) return "tempreadout";
+  if (isLock(l)) return "lock";
   // A fan exposed as a light entity is not a light at all — worth seeing.
   if (has("fan")) return "fan";
   if (has("chandelier")) return "chandelier";
@@ -173,32 +276,40 @@ export function resolveLightShape(l, overrides) {
 // Letters reserved for a class series, skipped as the generic series counts
 // past them — precomputed once so another reserved letter is a one-line
 // change here, not new arithmetic.
-const _SERIES_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").filter(c => c !== "F" && c !== "M" && c !== "P" && c !== "T" && c !== "W");
+const _SERIES_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").filter(c => c !== "D" && c !== "F" && c !== "L" && c !== "M" && c !== "P" && c !== "T" && c !== "W");
 
 // Mutates each light in place: sets l.code, l.isWled, l.isPartition,
-// l.isFan, l.isMotion and l.isTemp. Pass EVERY entity (including hidden ones) so
-// codes stay stable when visibility changes. Domain classes first — a fan
-// is a fan, a sensor is a sensor, whatever they advertise; then WLED before
-// partition: a partition segment that ALSO carries effects reads as
-// WLED-class — the more capable identity wins.
+// l.isFan, l.isMotion, l.isDoor and l.isTemp. Pass EVERY entity (including
+// hidden ones) so codes stay stable when visibility changes. Domain classes
+// first — a fan is a fan, a sensor is a sensor, whatever they advertise;
+// then WLED before partition: a partition segment that ALSO carries
+// effects reads as WLED-class — the more capable identity wins.
 export function assignLightCodes(lights) {
   const sorted = [...lights].sort((a, b) => a.entity_id.localeCompare(b.entity_id));
-  let f = 0, m = 0, w = 0, p = 0, t = 0, n = 0;
+  let f = 0, m = 0, w = 0, p = 0, t = 0, lk = 0, d = 0, n = 0;
   const seriesCode = (idx) =>
     _SERIES_LETTERS[Math.floor(idx / 99)] + String((idx % 99) + 1).padStart(2, "0");
   for (const l of sorted) {
     l.isFan = isFan(l);
     l.isMotion = isMotionSensor(l);
+    l.isDoor = isDoorSensor(l);
     l.isTemp = isTempSensor(l);
+    l.isLock = isLock(l);
     if (l.isFan) {
       l.isWled = false; l.isPartition = false;
       l.code = "F" + String((f++ % 99) + 1).padStart(2, "0");
     } else if (l.isMotion) {
       l.isWled = false; l.isPartition = false;
       l.code = "M" + String((m++ % 99) + 1).padStart(2, "0");
+    } else if (l.isDoor) {
+      l.isWled = false; l.isPartition = false;
+      l.code = "D" + String((d++ % 99) + 1).padStart(2, "0");
     } else if (l.isTemp) {
       l.isWled = false; l.isPartition = false;
       l.code = "T" + String((t++ % 99) + 1).padStart(2, "0");
+    } else if (l.isLock) {
+      l.isWled = false; l.isPartition = false;
+      l.code = "L" + String((lk++ % 99) + 1).padStart(2, "0");
     } else if (isWledLight(l)) {
       l.isWled = true; l.isPartition = false;
       l.code = "W" + String((w++ % 99) + 1).padStart(2, "0");

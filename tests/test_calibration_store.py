@@ -15,6 +15,7 @@ from custom_components.padspan_bright.calibration_store import (
     _gaussian,
     _mean,
     _std,
+    _summarize_room_confusion,
 )
 from custom_components.padspan_bright.random_forest import RandomForestLocator
 
@@ -611,6 +612,87 @@ class TestLooAlgorithm:
 
 
 # ---------------------------------------------------------------------------
+# Tests: _summarize_room_confusion (gap #12 — per-room scoreboard)
+# ---------------------------------------------------------------------------
+
+
+class TestSummarizeRoomConfusion:
+    """Tests for the pure _summarize_room_confusion() aggregator."""
+
+    def test_all_correct_yields_no_confusion_pairs(self) -> None:
+        pairs = [("kitchen", "kitchen"), ("kitchen", "kitchen"), ("bedroom", "bedroom")]
+        result = _summarize_room_confusion(pairs)
+        assert result["confusion_pairs"] == []
+        assert result["overall_accuracy"] == 1.0
+        assert result["rooms"]["kitchen"] == {"point_count": 2, "correct": 2, "accuracy": 1.0}
+        assert result["rooms"]["bedroom"] == {"point_count": 1, "correct": 1, "accuracy": 1.0}
+
+    def test_mismatches_become_confusion_pairs_sorted_by_count(self) -> None:
+        pairs = [
+            ("kitchen", "bedroom"),
+            ("kitchen", "bedroom"),
+            ("kitchen", "hallway"),
+            ("bedroom", "kitchen"),
+        ]
+        result = _summarize_room_confusion(pairs)
+        assert result["confusion_pairs"][0] == {"true_room": "kitchen", "pred_room": "bedroom", "count": 2}
+        counts = [p["count"] for p in result["confusion_pairs"]]
+        assert counts == sorted(counts, reverse=True)
+        assert result["rooms"]["kitchen"]["correct"] == 0
+        assert result["rooms"]["kitchen"]["accuracy"] == 0.0
+
+    def test_overall_accuracy_is_correct_over_total(self) -> None:
+        pairs = [("a", "a"), ("a", "b"), ("b", "b"), ("b", "b")]
+        result = _summarize_room_confusion(pairs)
+        assert result["overall_accuracy"] == 0.75
+
+    def test_empty_pairs_yields_zero_accuracy_and_empty_rooms(self) -> None:
+        result = _summarize_room_confusion([])
+        assert result == {"rooms": {}, "confusion_pairs": [], "overall_accuracy": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# Tests: loo_accuracy room_confusion (gap #12 — per-room scoreboard)
+# ---------------------------------------------------------------------------
+
+
+class TestLooRoomConfusion:
+    """Tests for room_confusion surfaced on loo_accuracy() (both algorithms)."""
+
+    def test_knn_reports_room_confusion_when_points_are_labeled(self) -> None:
+        store = _make_store(points=_grid_points())
+        result = store.loo_accuracy()
+        assert result is not None
+        assert "room_confusion" in result
+        rc = result["room_confusion"]
+        assert set(rc["rooms"]) <= {"kitchen", "bedroom"}
+        assert 0.0 <= rc["overall_accuracy"] <= 1.0
+
+    def test_knn_omits_room_confusion_when_points_unlabeled(self) -> None:
+        pts = [
+            _make_point(x_m=float(i), y_m=float(i), room="",
+                        readings={"s1": -40.0 - i, "s2": -70.0 + i})
+            for i in range(4)
+        ]
+        result = _make_store(points=pts).loo_accuracy()
+        assert result is not None
+        assert "room_confusion" not in result
+
+    def test_rf_oob_reports_room_confusion_when_trained(self) -> None:
+        pts = _grid_points()
+        store = _make_store(points=pts)
+        rf = RandomForestLocator()
+        rf.train(pts)
+        store._rf = rf
+
+        result = store.loo_accuracy(algorithm="rf")
+        assert result is not None
+        if "room_confusion" in result:
+            rc = result["room_confusion"]
+            assert set(rc["rooms"]) <= {"kitchen", "bedroom"}
+
+
+# ---------------------------------------------------------------------------
 # Tests: async_remap_from_metres safety (issue #56 — corner pile-up)
 # ---------------------------------------------------------------------------
 
@@ -990,6 +1072,39 @@ def test_knn_room_is_topk_vote_not_single_nearest() -> None:
     res = store.knn_locate({"s1": -60.0, "s2": -70.0}, map_id="map1")
     assert res is not None
     assert res["nearest_room"] == "Kitchen"
+
+
+def test_knn_room_scores_expose_the_runner_up_not_just_the_winner() -> None:
+    """The best-in-class 'why this room' breakdown (gap #2): the weighted
+    room vote behind nearest_room must be visible, not discarded the moment
+    argmax picks a winner — a near-tie should show as two comparable
+    fractions, not a single 100% answer with no runner-up."""
+    pts = [
+        _make_point(x_frac=0.1, y_frac=0.1, room="Kitchen",
+                    readings={"s1": -60.0, "s2": -70.0}),
+        _make_point(x_frac=0.11, y_frac=0.11, room="Kitchen",
+                    readings={"s1": -60.5, "s2": -70.5}),
+        _make_point(x_frac=0.5, y_frac=0.5, room="Hallway",
+                    readings={"s1": -61.0, "s2": -71.0}),
+    ]
+    store = _make_store(pts)
+    res = store.knn_locate({"s1": -60.0, "s2": -70.0}, map_id="map1", k=3)
+    assert res is not None
+    assert res["nearest_room"] == "Kitchen"
+    scores = res["room_scores"]
+    assert set(scores) == {"Kitchen", "Hallway"}
+    assert scores["Kitchen"] > scores["Hallway"], \
+        "the winning room's fraction must exceed the runner-up's"
+    assert math.isclose(sum(scores.values()), 1.0, abs_tol=0.01), \
+        "room_scores is a probability-like breakdown — it must sum to 1"
+
+
+def test_knn_room_scores_is_empty_when_no_point_has_a_room_label() -> None:
+    pts = [_make_point(x_frac=0.2, y_frac=0.2, room="", readings={"s1": -60.0})]
+    store = _make_store(pts)
+    res = store.knn_locate({"s1": -60.0}, map_id="map1")
+    assert res is not None
+    assert res["room_scores"] == {}
 
 
 def test_knn_missing_penalty_is_symmetric() -> None:

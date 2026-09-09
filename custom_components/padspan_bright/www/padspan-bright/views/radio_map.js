@@ -31,15 +31,15 @@ const IDW_POWER = 2.5;     // IDW exponent (higher = more local, sharper near ba
 // dBm penalty per slab crossed. Tracks _SLAB_PENALTY_DB in presence_coordinator:
 // the picture and the solver must model cross-floor loss the same way, or the
 // heatmap shows a cross-floor reading the engine never believed.
-const FLOOR_ATTEN_DB = 10;
+export const FLOOR_ATTEN_DB = 10;
 const KNN_K = 3;           // k for LOO cross-validation
 const BARRIER_PENALTY_DB_TO_DIST = 0.01; // each dB of barrier attenuation adds this much "virtual distance"
 
 // ── Model-Based RF Propagation ───────────────────────────────────────────────
 // Computes predicted RSSI at any point based on scanner positions + path-loss
 // model. No calibration data needed — pure physics + wall attenuation.
-const DEFAULT_REF_POWER = -59;   // dBm at 1 meter
-const DEFAULT_PATH_LOSS_N = 2.5; // indoor path-loss exponent
+export const DEFAULT_REF_POWER = -59;   // dBm at 1 meter
+export const DEFAULT_PATH_LOSS_N = 2.5; // indoor path-loss exponent
 
 /**
  * Scanners for a modelled heatmap, in stack-world coordinates, from the fabric.
@@ -250,6 +250,8 @@ function _segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
  * Compute total barrier attenuation (dBm) between two points.
  * Checks every barrier segment for intersections with the line (x1,y1)→(x2,y2).
  */
+export function barrierAttenuation(x1, y1, x2, y2, barriers) { return _barrierAttenuation(x1, y1, x2, y2, barriers); }
+
 function _barrierAttenuation(x1, y1, x2, y2, barriers) {
   let totalDb = 0;
   for (const bar of barriers) {
@@ -512,8 +514,10 @@ export function isoStoreyDistortionSVG(storey, iso, liveSnap, settings, range) {
   const wW = bb.maxX - bb.minX, wH = bb.maxY - bb.minY;
   // Square cells: one size for both axes.
   const cellSize = Math.min(wW, wH) / DISTORTION_GRID;
-  const resX = Math.max(2, Math.ceil(wW / cellSize));
-  const resY = Math.max(2, Math.ceil(wH / cellSize));
+  // Cap columns/rows: a long narrow storey (corridor-shaped) would otherwise
+  // produce hundreds of cells instead of the intended ~DISTORTION_GRID.
+  const resX = Math.min(90, Math.max(2, Math.ceil(wW / cellSize)));
+  const resY = Math.min(90, Math.max(2, Math.ceil(wH / cellSize)));
   const cellW = wW / resX, cellH = wH / resY;
   const f = v => v.toFixed(1);
   const z = storey.z;
@@ -1057,8 +1061,10 @@ export function floorDistortionSVG(calPoints, floorMaps, mapPtFns, w2v, wBB, all
 
   // Square cells
   const _flCellSize = Math.min(wW, wH) / DISTORTION_GRID;
-  const _flResX = Math.max(2, Math.ceil(wW / _flCellSize));
-  const _flResY = Math.max(2, Math.ceil(wH / _flCellSize));
+  // Cap columns/rows: a long narrow storey (corridor-shaped) would otherwise
+  // produce hundreds of cells instead of the intended ~DISTORTION_GRID.
+  const _flResX = Math.min(90, Math.max(2, Math.ceil(wW / _flCellSize)));
+  const _flResY = Math.min(90, Math.max(2, Math.ceil(wH / _flCellSize)));
   const cellW = wW / _flResX, cellH = wH / _flResY;
   const idwPts = calWorldPts.map(p => ({ x_frac: p.wx, y_frac: p.wy, rssi: p.rssi }));
   const fv = v => v.toFixed(5);

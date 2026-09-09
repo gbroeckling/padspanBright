@@ -118,13 +118,14 @@ function renderFor(tier) {
   const byRoom = {};
   for (const l of lights) if (l.area_name) (byRoom[l.area_name] = byRoom[l.area_name] || []).push(l);
   let svg = "";
-  const calls = { showcase: 0, fit: 0, hide: 0 };
+  const calls = { showcase: 0, fit: 0, hide: 0, hideCodes: 0 };
   const host = {
     el, floors: model.floors, model, tier, byRoom, lightsByEid, lightsLoading: false,
     hiddenEids: new Set(), hiddenEidsMap: new Set(["light.loft"]),   // "hide untouched" would hide the loft lamp
     view: { floorGap: 150, horizGap: 0, focusIdx: 0, zoom: 1 },
     showcase: true, fitRooms: true, hideUntouched: true, untouchedCount: 1,
     onShowcase: () => calls.showcase++, onFitRooms: () => calls.fit++, onHideUntouched: () => calls.hide++,
+    hideDeviceCodes: false, onHideDeviceCodes: () => calls.hideCodes++,
     isolux: false, onIsolux: () => {}, sceneName: null, onScene: () => {},
     onSceneAngle: () => {}, onSceneApply: () => {}, rippleArmed: false, onRipple: () => {},
     onRippleFire: () => {},
@@ -156,6 +157,7 @@ function renderFor(tier) {
     hasShowcaseBtn: buttons.some(t => t.includes("Showcase")),
     hasFitBtn: buttons.some(t => t.includes("Fit room")),
     hasUntouchedBtn: buttons.some(t => t.includes("ntouched")),
+    hasHideCodesBtn: buttons.some(t => t.includes("ide codes") || t.includes("odes hidden")),
     hasIsoluxBtn: buttons.some(t => t.includes("Isolux")),
     hasSceneBtn: buttons.some(t => t.includes("Scene")),
     hasRippleBtn: buttons.some(t => t.includes("Ripple")),
@@ -238,6 +240,15 @@ def test_free_withholds_the_presentation_modes(out):
         assert out[tier]["hasShowcaseBtn"] and out[tier]["hasFitBtn"] and out[tier]["hasUntouchedBtn"], (tier, out[tier]["buttons"])
         assert out[tier]["hasIsoluxBtn"] and out[tier]["hasSceneBtn"] and out[tier]["hasRippleBtn"], (tier, out[tier]["buttons"])
         assert not out[tier]["loftDrawn"], tier
+
+
+def test_hide_device_codes_is_available_at_every_tier(out):
+    """Unlike the paid presentation modes (Showcase, Fit room, Hide
+    untouched, Isolux, Scene, Ripple), "Hide device codes" (Garry,
+    2026-09-08) is a basic decluttering option in the same spirit as
+    codeChip/hitHalo — not withheld by lightsHostForTier at free."""
+    for tier in ("free", "bright", "pro"):
+        assert out[tier]["hasHideCodesBtn"], (tier, out[tier]["buttons"])
 
 
 def test_paid_recognises_a_partition_light_without_effects(out):
@@ -354,10 +365,69 @@ console.log(JSON.stringify({pro: codesFor("pro"), bright: codesFor("bright"), no
     assert not bright["light.seg"]["p"], bright
 
 
+def test_fan_override_reclassifies_a_light_switch_cosmetically_only(tmp_path):
+    """Garry, 2026-09-07: "some light switches are fan switches" — a light.*
+    entity wired to a fan with no speed/oscillate control of its own can be
+    declared "fan" so it reads correctly on the map (F-series code, fan
+    glyph, groups under the Fan filter), without pretending it gained real
+    fan services: oscillating/pct stay null because gatherLights only reads
+    those off a real fan.* entity_id, never off l.type_override."""
+    out = _run_pipeline_script(tmp_path, """
+const AREA = {"light.ceiling_switch": "Bedroom"};
+const STATES = {
+  "light.ceiling_switch": {state: "on", attributes: {friendly_name: "Ceiling Switch"}},
+};
+const OVR = {"light.ceiling_switch": "fan"};
+const l = LM.gatherLights(STATES, AREA, {}, "pro", {}, OVR)[0];
+console.log(JSON.stringify({
+  isFan: !!l.isFan, code: l.code, shape: l.shape,
+  oscillating: l.oscillating, pct: l.pct,
+}));
+""")
+    assert out["isFan"] is True, out
+    assert out["code"].startswith("F"), out
+    assert out["shape"] == "fan", out
+    assert out["oscillating"] is None and out["pct"] is None, (
+        "an overridden light must never claim real fan attributes it does not have", out,
+    )
+
+
+def test_type_override_dropdown_survives_being_overridden_to_fan(tmp_path):
+    """Regression: the override dropdown used to hide itself for any row
+    where l.isFan was true, on the assumption isFan meant "a real fan.*
+    entity, nothing to override" — which broke the moment a light.* could
+    BECOME isFan via override, since there was then no way back to "auto"."""
+    out = _run_pipeline_script(tmp_path, _TABLE_EL + """
+const AREA = {"light.ceiling_switch": "Bedroom"};
+const STATES = {
+  "light.ceiling_switch": {state: "on", attributes: {friendly_name: "Ceiling Switch"}},
+};
+const OVR = {"light.ceiling_switch": "fan"};
+const lights = LM.gatherLights(STATES, AREA, {}, "pro", {}, OVR);
+const host = { el, hiddenEids: new Set(), lightsLoading: false, model: {},
+  typeOverrides: OVR, onTypeOverride: () => {} };
+const root = LM.buildLightsTable(host, lights);
+const row = [...root.querySelectorAll("tr")].find(r => r.getAttribute("data-eid") === "light.ceiling_switch");
+const overrideSelect = [...row.querySelectorAll("select")].find(s =>
+  [...s.querySelectorAll("option")].some(o => o.getAttribute("value") === "fan"));
+const selectedValue = overrideSelect
+  ? overrideSelect.querySelectorAll("option")[[...overrideSelect.querySelectorAll("option")].findIndex(o => o.selected)]?.getAttribute("value")
+  : null;
+console.log(JSON.stringify({ found: !!overrideSelect, selectedValue }));
+""")
+    assert out["found"], "the type-override dropdown must still render for a row already overridden to fan"
+    assert out["selectedValue"] == "fan", "the dropdown must reflect the CURRENT override, not reset to auto"
+
+
 def test_fans_and_motion_sensors_ride_the_pipeline(tmp_path):
     """Fans (F-series, fan glyph, their card's inputs) and motion sensors
     (M-series, motion glyph, admitted by device_class only) share the lights
-    pipeline. A door sensor is a binary_sensor too and must NOT appear.
+    pipeline. A door sensor is a binary_sensor too — since the door/window
+    barrier project's step 1 (2026-09-08) it DOES appear now, its own
+    D-series, never mistaken for motion (see
+    test_doors_and_windows_ride_the_pipeline_distinct_from_motion for that
+    contract's own dedicated coverage) — this test only needs to confirm
+    admitting doors did not disturb fan/motion's own numbering or glyphs.
 
     Found live on the house's own map (2026-09-03, Garry): the bathroom
     outlets' built-in PIRs report device_class "occupancy", not "motion" —
@@ -384,7 +454,7 @@ console.log(JSON.stringify({
   lamp: by["light.lamp"] && {code: by["light.lamp"].code},
 }));
 """)
-    assert out["ids"] == ["binary_sensor.hall_pir", "binary_sensor.invisoutlet_occupancy", "fan.ceiling", "light.lamp"], out["ids"]
+    assert out["ids"] == ["binary_sensor.front_door", "binary_sensor.hall_pir", "binary_sensor.invisoutlet_occupancy", "fan.ceiling", "light.lamp"], out["ids"]
     fan = out["fan"]
     assert fan["code"] == "F01" and fan["isFan"] and fan["shape"] == "fan", fan
     # A fan advertising an effect_list is STILL a fan, never WLED-class.
@@ -397,6 +467,62 @@ console.log(JSON.stringify({
     occ = out["occ"]
     assert occ["code"] == "M02" and occ["isMotion"] and occ["shape"] == "motion", occ
     # The plain lamp keeps the generic series — F and M are reserved.
+    assert out["lamp"]["code"] == "A01", out["lamp"]
+
+
+def test_lock_glyph_and_showcase_detail_are_well_formed_svg(tmp_path):
+    """shapeSvg("lock", ...) / shapeDetailSvg("lock", ...) are hand-written
+    path math (arcPts/sub — the same primitives "motion"'s dome already
+    uses) with no existing generic "render every LIGHT_SHAPES entry" test
+    to catch a malformed path — a self-intersecting or NaN-poisoned `d`
+    string would not throw, just render wrong, so check the output
+    directly rather than trust the shape registry cross-check alone."""
+    _stage(tmp_path)
+    script = ("const IL = await import('./iso_lights.mjs');\n"
+        "const body = IL.shapeSvg('lock', 50, 50, 12, 'fill=\"#fbbf24\" stroke=\"#071008\"');\n"
+        "const detail = IL.shapeDetailSvg('lock', 50, 50, 12, '#111827', 1.5);\n"
+        "console.log(JSON.stringify({body, detail}));\n")
+    (tmp_path / "run_lock_shape.mjs").write_text(script, encoding="utf-8")
+    res = subprocess.run([_NODE, str(tmp_path / "run_lock_shape.mjs")], capture_output=True,
+                         text=True, encoding="utf-8", timeout=60)
+    assert res.returncode == 0, f"node failed:\n{res.stderr[-4000:]}"
+    out = json.loads(res.stdout.strip().splitlines()[-1])
+    assert "<path" in out["body"] and "<rect" in out["body"], out["body"]
+    assert "NaN" not in out["body"], out["body"]
+    assert out["detail"] and "NaN" not in out["detail"], out["detail"]
+
+
+def test_locks_ride_the_pipeline(tmp_path):
+    """lock.* (gap #8, best-in-class roadmap: the first domain this pipeline
+    generalized to beyond light/fan/binary_sensor/sensor) — whole domain
+    admitted, no device_class gate needed (every lock entity is relevant),
+    L-series code, "lock" glyph, and never eligible for a type override
+    (the domain IS the class, same as a fan)."""
+    out = _run_pipeline_script(tmp_path, """
+const AREA = {"lock.front_door": "Entry", "light.lamp": "Kitchen"};
+const STATES = {
+  "lock.front_door": {state: "locked", attributes: {friendly_name: "Front Door"}},
+  "light.lamp": {state: "off", attributes: {friendly_name: "Lamp", supported_color_modes: ["onoff"]}},
+};
+const OVR = {"lock.front_door": "wled"};
+const lights = LM.gatherLights(STATES, AREA, {}, "pro", {}, OVR, {}, {});
+const by = Object.fromEntries(lights.map(l => [l.entity_id, l]));
+console.log(JSON.stringify({
+  ids: lights.map(l => l.entity_id).sort(),
+  lock: by["lock.front_door"] && {
+    code: by["lock.front_door"].code, isLock: by["lock.front_door"].isLock,
+    shape: by["lock.front_door"].shape, state: by["lock.front_door"].state,
+    typeOverride: by["lock.front_door"].type_override,
+  },
+  lamp: by["light.lamp"] && {code: by["light.lamp"].code},
+}));
+""")
+    assert out["ids"] == ["light.lamp", "lock.front_door"], out["ids"]
+    lock = out["lock"]
+    assert lock["code"] == "L01" and lock["isLock"] and lock["shape"] == "lock", lock
+    assert lock["state"] == "locked", lock
+    assert lock["typeOverride"] is None, "a lock's class is its domain, never overridable"
+    # L is reserved — the plain lamp keeps the generic series.
     assert out["lamp"]["code"] == "A01", out["lamp"]
 
 
@@ -447,6 +573,43 @@ console.log(JSON.stringify({loaded, areaMap: store.reg ? store.reg.areaMap : nul
         f"a temperature sensor's own room pick must resolve here — this is the ONLY place gatherLights reads area_name from: {areaMap}"
     assert "sensor.humidity1" not in areaMap, \
         f"a non-temperature sensor.* must stay excluded — the fix is scoped to gatherLights' own admission rule: {areaMap}"
+
+
+def test_ensure_lights_registry_resolves_ip_from_configuration_url(tmp_path):
+    """Garry: "when drilling into the wled controls, include a small chunk
+    that shows the ip address". WLED (and most ESPHome devices) already set
+    the device registry's own configuration_url to the unit's local web UI —
+    same registry fetch areaMap/manufacturerMap already use, no extra
+    network call per device. A device with no configuration_url (most
+    Zigbee/Tuya hardware) must read null, not throw or leave junk behind."""
+    out = _run_pipeline_script(tmp_path, """
+const AREAS = [];
+const REG = [
+  {entity_id: "light.strip", area_id: null, device_id: "d1", platform: "wled"},
+  {entity_id: "light.bulb", area_id: null, device_id: "d2", platform: "zha"},
+];
+const DEVREG = [
+  {id: "d1", configuration_url: "http://192.168.1.55/"},
+  {id: "d2"},
+];
+const hass = {
+  states: {"light.strip": {state: "on", attributes: {}}, "light.bulb": {state: "on", attributes: {}}},
+  callWS: async ({type}) => {
+    if (type === "config/entity_registry/list") return REG;
+    if (type === "config/device_registry/list") return DEVREG;
+    return [];
+  },
+};
+const store = {};
+let loaded = false;
+LM.ensureLightsRegistry(store, hass, AREAS, () => { loaded = true; });
+for (let i = 0; i < 1000 && !loaded; i++) await Promise.resolve();
+console.log(JSON.stringify({loaded, ipMap: store.reg ? store.reg.ipMap : null}));
+""")
+    assert out["loaded"], "the registry fetch never completed"
+    ipMap = out["ipMap"]
+    assert ipMap["light.strip"] == "192.168.1.55", ipMap
+    assert ipMap["light.bulb"] is None, "a device with no configuration_url must read null, not throw"
 
 
 _TABLE_EL = """
@@ -721,6 +884,36 @@ console.log(JSON.stringify({ids, state: primary && primary.state, last_changed: 
     assert out["code"] == "M01", out
 
 
+def test_brand_comes_from_the_device_registry_manufacturer_and_is_never_gated(tmp_path):
+    """Garry asked which two entities on the motion list were a specific
+    switch brand and there was no way to answer from inside PadSpan — the
+    index had no column for it. manufacturerMap threads the device
+    registry's OWN manufacturer string (often a raw Zigbee/Tuya firmware
+    signature, not the name on the box — that is what HA itself knows)
+    through gatherLights same as areaMap/platformMap already do. Unlike
+    platform, it is never tier-gated: identifying hardware is informational,
+    not a placement or styling control, so free tier sees it too."""
+    out = _run_pipeline_script(tmp_path, """
+const AREA = {"light.kitchen": "Kitchen", "light.hall": "Hall"};
+const MFR = {"light.kitchen": "_TZE204_ex3rcdha"};
+const STATES = {
+  "light.kitchen": {state: "on", attributes: {friendly_name: "Kitchen"}},
+  "light.hall":    {state: "off", attributes: {friendly_name: "Hall"}},
+};
+const free = LM.gatherLights(STATES, AREA, {}, "free", {}, {}, {}, MFR);
+const pro = LM.gatherLights(STATES, AREA, {}, "pro", {}, {}, {}, MFR);
+const byId = (lights, eid) => lights.find(l => l.entity_id === eid);
+console.log(JSON.stringify({
+  freeKnown: byId(free, "light.kitchen").brand,
+  freeUnknown: byId(free, "light.hall").brand,
+  proKnown: byId(pro, "light.kitchen").brand,
+}));
+""")
+    assert out["freeKnown"] == "_TZE204_ex3rcdha", "free tier must see the brand too — it is informational, not gated"
+    assert out["freeUnknown"] is None, "a device the registry has no manufacturer for reads null, not an empty string"
+    assert out["proKnown"] == "_TZE204_ex3rcdha", out
+
+
 # ── Temperature sensors ───────────────────────────────────────────────────────
 # Garry: "same as wled or any other objects, devices telling the temperature
 # can also act like a motion sensor, so rule is if they gave the temperature
@@ -758,14 +951,391 @@ console.log(JSON.stringify({
     assert t["dimmable"] is False, "a read-only sensor must never offer the brightness card"
 
 
+def test_health_flags_unavailable_or_unknown_regardless_of_class(tmp_path):
+    """Garry: "do a health check for all the devices". The one domain-agnostic
+    failure signal every entity type can report — HA's own "unavailable" or
+    "unknown" state — must fail the check no matter which class it's on."""
+    out = _run_pipeline_script(tmp_path, """
+const AREA = {"light.lamp": "Kitchen", "fan.ceiling": "Kitchen", "binary_sensor.pir": "Hall", "sensor.temp": "Hall"};
+const STATES = {
+  "light.lamp":       {state: "unavailable", attributes: {friendly_name: "Lamp"}},
+  "fan.ceiling":       {state: "unknown", attributes: {friendly_name: "Ceiling Fan"}},
+  "binary_sensor.pir": {state: "unavailable", attributes: {friendly_name: "PIR", device_class: "motion"}},
+  "sensor.temp":       {state: "unknown", attributes: {friendly_name: "Temp", device_class: "temperature"}},
+};
+const by = Object.fromEntries(LM.gatherLights(STATES, AREA, {}, "pro", {}, {}).map(l => [l.entity_id, l]));
+console.log(JSON.stringify(Object.fromEntries(Object.entries(by).map(([k, l]) => [k, {healthy: l.healthy, reason: l.healthReason}]))));
+""")
+    for eid in ("light.lamp", "fan.ceiling", "binary_sensor.pir", "sensor.temp"):
+        assert out[eid]["healthy"] is False, out
+        assert "unavailable" in out[eid]["reason"] or "unknown" in out[eid]["reason"], out[eid]
+
+
+def test_wled_health_flags_a_strip_that_lost_its_effect_list(tmp_path):
+    """A strip forced WLED-class (type_override, Pro) whose live effect_list
+    has gone empty is still reachable — still turns on and off — but has
+    quietly lost the one thing that made it a strip rather than a plain
+    light. That's worth surfacing even though the entity itself looks fine."""
+    out = _run_pipeline_script(tmp_path, """
+const AREA = {"light.strip": "Kitchen", "light.strip2": "Kitchen"};
+const STATES = {
+  "light.strip":  {state: "on", attributes: {friendly_name: "Forced WLED, effects gone"}},
+  "light.strip2": {state: "on", attributes: {friendly_name: "Real WLED", effect_list: ["Solid", "Rainbow"]}},
+};
+const OVR = {"light.strip": "wled"};
+const by = Object.fromEntries(LM.gatherLights(STATES, AREA, {}, "pro", {}, OVR).map(l => [l.entity_id, l]));
+console.log(JSON.stringify(Object.fromEntries(Object.entries(by).map(([k, l]) => [k, {isWled: l.isWled, healthy: l.healthy, reason: l.healthReason}]))));
+""")
+    assert out["light.strip"]["isWled"] is True
+    assert out["light.strip"]["healthy"] is False
+    assert "effect" in out["light.strip"]["reason"].lower(), out["light.strip"]
+    assert out["light.strip2"]["isWled"] is True and out["light.strip2"]["healthy"] is True, out["light.strip2"]
+
+
+def test_motion_health_flags_a_stuck_sensor_not_a_recent_trip(tmp_path):
+    """Mirrors iso_lights.js's own MOTION_RECENT_MS: a sensor still reporting
+    "on" six-plus hours after it last changed is stuck hardware, not a real
+    trip — the same line the map's own rendering already draws, reused here
+    rather than a second, possibly-disagreeing number."""
+    out = _run_pipeline_script(tmp_path, """
+const NOW = Date.parse("2026-09-05T12:00:00.000Z");
+const AREA = {"binary_sensor.stuck": "Hall", "binary_sensor.fresh": "Hall", "binary_sensor.quiet": "Hall"};
+const STATES = {
+  // 7h ago, still "on" — stuck.
+  "binary_sensor.stuck": {state: "on", last_changed: "2026-09-05T05:00:00.000Z", attributes: {friendly_name: "Stuck PIR", device_class: "motion"}},
+  // 1h ago, still "on" — a real, ongoing trip.
+  "binary_sensor.fresh": {state: "on", last_changed: "2026-09-05T11:00:00.000Z", attributes: {friendly_name: "Fresh PIR", device_class: "motion"}},
+  // "off" for 7h is just quiet, never "stuck" — only an "on" that never clears is.
+  "binary_sensor.quiet": {state: "off", last_changed: "2026-09-05T05:00:00.000Z", attributes: {friendly_name: "Quiet PIR", device_class: "motion"}},
+};
+const by = Object.fromEntries(LM.gatherLights(STATES, AREA, {}, "pro", {}, {}, {}, {}, NOW).map(l => [l.entity_id, l]));
+console.log(JSON.stringify(Object.fromEntries(Object.entries(by).map(([k, l]) => [k, {healthy: l.healthy, reason: l.healthReason}]))));
+""")
+    assert out["binary_sensor.stuck"]["healthy"] is False
+    assert "stuck" in out["binary_sensor.stuck"]["reason"].lower(), out["binary_sensor.stuck"]
+    assert out["binary_sensor.fresh"]["healthy"] is True, out["binary_sensor.fresh"]
+    assert out["binary_sensor.quiet"]["healthy"] is True, out["binary_sensor.quiet"]
+
+
+def test_temp_health_flags_a_stale_reading(tmp_path):
+    """Mirrors iso_lights.js's own TEMP_FRESH_MS ("if they gave the
+    temperature in the last hour" — Garry): a reading older than that, or
+    with no timestamp at all, is stale even if HA hasn't flipped the entity
+    to unavailable yet."""
+    out = _run_pipeline_script(tmp_path, """
+const NOW = Date.parse("2026-09-05T12:00:00.000Z");
+const AREA = {"sensor.stale": "Hall", "sensor.fresh": "Hall", "sensor.no_ts": "Hall"};
+const STATES = {
+  "sensor.stale": {state: "68", last_updated: "2026-09-05T09:00:00.000Z", attributes: {friendly_name: "Stale Temp", device_class: "temperature"}},
+  "sensor.fresh": {state: "68", last_updated: "2026-09-05T11:50:00.000Z", attributes: {friendly_name: "Fresh Temp", device_class: "temperature"}},
+  "sensor.no_ts": {state: "68", attributes: {friendly_name: "No Timestamp Temp", device_class: "temperature"}},
+};
+const by = Object.fromEntries(LM.gatherLights(STATES, AREA, {}, "pro", {}, {}, {}, {}, NOW).map(l => [l.entity_id, l]));
+console.log(JSON.stringify(Object.fromEntries(Object.entries(by).map(([k, l]) => [k, {healthy: l.healthy, reason: l.healthReason}]))));
+""")
+    assert out["sensor.stale"]["healthy"] is False, out["sensor.stale"]
+    assert out["sensor.fresh"]["healthy"] is True, out["sensor.fresh"]
+    assert out["sensor.no_ts"]["healthy"] is False, out["sensor.no_ts"]
+    assert "timestamp" in out["sensor.no_ts"]["reason"].lower(), out["sensor.no_ts"]
+
+
+def test_lock_health_flags_jammed_not_locked_or_unlocked(tmp_path):
+    """A jammed lock is reachable but not doing its job — the same "health"
+    frame WLED/motion/temp already use. Locked and unlocked are both
+    perfectly healthy states; only jammed is not."""
+    out = _run_pipeline_script(tmp_path, """
+const AREA = {"lock.a": "Entry", "lock.b": "Entry", "lock.c": "Entry"};
+const STATES = {
+  "lock.a": {state: "locked", attributes: {friendly_name: "A"}},
+  "lock.b": {state: "unlocked", attributes: {friendly_name: "B"}},
+  "lock.c": {state: "jammed", attributes: {friendly_name: "C"}},
+};
+const by = Object.fromEntries(LM.gatherLights(STATES, AREA, {}, "pro", {}, {}, {}, {}).map(l => [l.entity_id, l]));
+console.log(JSON.stringify(Object.fromEntries(Object.entries(by).map(([k, l]) => [k, {healthy: l.healthy, reason: l.healthReason}]))));
+""")
+    assert out["lock.a"]["healthy"] is True, out["lock.a"]
+    assert out["lock.b"]["healthy"] is True, out["lock.b"]
+    assert out["lock.c"]["healthy"] is False, out["lock.c"]
+    assert "jam" in out["lock.c"]["reason"].lower(), out["lock.c"]
+
+
+def test_health_column_and_filter_button_hide_healthy_rows(tmp_path):
+    """The Health dot sits right after Room, before the other stat columns —
+    Garry: "in front of the other stats". The filter button (separate from
+    the class dropdown) narrows the list to only what's testing unhealthy,
+    and its label carries the live unhealthy count."""
+    out = _run_pipeline_script(tmp_path, _TABLE_EL + """
+const AREA = {"light.ok": "Kitchen", "light.dead": "Kitchen", "binary_sensor.ok": "Hall", "binary_sensor.stuck": "Hall"};
+const STATES = {
+  "light.ok":          {state: "on", attributes: {friendly_name: "Good Lamp"}},
+  "light.dead":        {state: "unavailable", attributes: {friendly_name: "Dead Lamp"}},
+  "binary_sensor.ok":  {state: "off", attributes: {friendly_name: "OK PIR", device_class: "motion"}},
+  "binary_sensor.stuck": {state: "on", last_changed: "2020-01-01T00:00:00.000Z", attributes: {friendly_name: "Stuck PIR", device_class: "motion"}},
+};
+const lights = LM.gatherLights(STATES, AREA, {}, "pro", {}, {});
+const headerCols = [...LM.buildLightsTable({el, hiddenEids: new Set(), lightsLoading: false, model: {}, tableClassFilter: "all"}, lights)
+  .querySelectorAll("th")].map(th => th.textContent.replace(/[▲▼]/g, "").trim());
+
+let filterArg = "unset";
+const host = { el, hiddenEids: new Set(), lightsLoading: false, model: {},
+  tableClassFilter: "all", tableHealthFilter: false, onTableHealthFilter: (v) => { filterArg = v; } };
+const root1 = LM.buildLightsTable(host, lights);
+const rows1 = root1.querySelectorAll("tr[data-eid]").length;
+const btn1 = [...root1.querySelectorAll("button")].find(b => /unhealthy/i.test(b.textContent));
+
+host.tableHealthFilter = true;
+const root2 = LM.buildLightsTable(host, lights);
+const rows2 = [...root2.querySelectorAll("tr[data-eid]")].map(r => r.getAttribute("data-eid")).sort();
+const badge2 = root2.querySelectorAll(".lv-count")[0].textContent;
+
+btn1.dispatchEvent({ type: "click", stopPropagation(){}, preventDefault(){} });
+console.log(JSON.stringify({ headerCols, rows1, btn1Text: btn1.textContent, rows2, badge2, filterArg }));
+""")
+    assert "Health" in out["headerCols"]
+    assert out["headerCols"].index("Health") < out["headerCols"].index("Brand"), out["headerCols"]
+    assert out["headerCols"].index("Health") < out["headerCols"].index("State"), out["headerCols"]
+    assert out["rows1"] == 4, out
+    assert "(2)" in out["btn1Text"], "the button's own label carries the live unhealthy count"
+    assert out["rows2"] == ["binary_sensor.stuck", "light.dead"], out["rows2"]
+    assert out["badge2"] == "2 / 4", out["badge2"]
+    assert out["filterArg"] is True, "clicking the button while off must turn it on"
+
+
+def test_code_column_click_always_selects_even_for_motion(tmp_path):
+    """Regression (Garry, 2026-09-07): commit f091f5e made a motion row's
+    click always open its activity history (fixing a real free-tier bug —
+    it used to say "read-only") but that redirect applied on EVERY tier,
+    so a paid user lost the only way to re-select an already-placed motion
+    sensor for map placement (the "Place" queue button only exists while a
+    light has no position yet). The code/icon column is its own click
+    target specifically so it is never redirected, motion included."""
+    out = _run_pipeline_script(tmp_path, _TABLE_EL + """
+const AREA = {"light.lamp": "Kitchen", "binary_sensor.pir": "Hall"};
+const STATES = {
+  "light.lamp": {state: "on", attributes: {friendly_name: "Lamp"}},
+  "binary_sensor.pir": {state: "off", attributes: {friendly_name: "Hall PIR", device_class: "motion"}},
+};
+const lights = LM.gatherLights(STATES, AREA, {}, "pro", {}, {});
+
+let rowClicked = null, selectedFor = null;
+const host = { el, hiddenEids: new Set(), lightsLoading: false, model: {},
+  onRowClick: (l) => { rowClicked = l.entity_id; },
+  onSelectForPlacement: (l) => { selectedFor = l.entity_id; } };
+const root = LM.buildLightsTable(host, lights);
+const motionRow = root.querySelector('tr[data-eid="binary_sensor.pir"]');
+const codeCell = motionRow.querySelectorAll("td")[0];
+codeCell.dispatchEvent({ type: "click", stopPropagation(){}, preventDefault(){} });
+console.log(JSON.stringify({ rowClicked, selectedFor }));
+""")
+    assert out["selectedFor"] == "binary_sensor.pir", \
+        "clicking the code column on a motion row must select it for placement"
+    assert out["rowClicked"] is None, \
+        "the code column's click must not also fall through to onRowClick (motion's activity-calendar redirect)"
+
+
+def test_code_column_is_inert_without_the_new_host_callback(tmp_path):
+    """The sidebar host (lights_panel.js) never passes onSelectForPlacement —
+    it has no map-placement concept — so the code column there stays a plain,
+    unclickable cell exactly as before this feature existed."""
+    out = _run_pipeline_script(tmp_path, _TABLE_EL + """
+const AREA = {"light.lamp": "Kitchen"};
+const STATES = { "light.lamp": {state: "on", attributes: {friendly_name: "Lamp"}} };
+const lights = LM.gatherLights(STATES, AREA, {}, "pro", {}, {});
+let rowClicked = null;
+const host = { el, hiddenEids: new Set(), lightsLoading: false, model: {},
+  onRowClick: (l) => { rowClicked = l.entity_id; } };
+const root = LM.buildLightsTable(host, lights);
+const row = root.querySelector('tr[data-eid="light.lamp"]');
+const codeCell = row.querySelectorAll("td")[0];
+codeCell.dispatchEvent({ type: "click", stopPropagation(){}, preventDefault(){} });
+console.log(JSON.stringify({ rowClicked }));
+""")
+    assert out["rowClicked"] is None, "with no onSelectForPlacement, the code column must not call onRowClick either"
+
+
 def test_both_hosts_pass_the_tier():
     """The gate is only as good as its callers: both hosts hand settings.tier
     to gatherLights and to the card, and neither re-derives the ladder."""
     panel = (_WWW / "lights_panel.js").read_text(encoding="utf-8")
     maps = (_VIEWS / "maps.js").read_text(encoding="utf-8")
     assert "this.state._tier" in panel and "tier: this.state._tier" in panel
-    assert "gatherLights(this._hass?.states||{}, reg.areaMap, this.state._shapeOverrides, this.state._tier, reg.platformMap, this.state._typeOverrides, reg.pairMap)" in panel
-    assert "gatherLights(ctx.hass?.states || {}, reg.areaMap, shapeOverrides, tier, reg.platformMap, typeOverrides, reg.pairMap)" in maps
+    assert "gatherLights(this._hass?.states||{}, reg.areaMap, this.state._shapeOverrides, this.state._tier, reg.platformMap, this.state._typeOverrides, reg.pairMap, reg.manufacturerMap)" in panel
+    assert "gatherLights(ctx.hass?.states || {}, reg.areaMap, shapeOverrides, tier, reg.platformMap, typeOverrides, reg.pairMap, reg.manufacturerMap)" in maps
     assert "\n    tier,\n" in maps
     for src, name in ((panel, "lights_panel.js"), (maps, "maps.js")):
         assert "LIGHTING_TIER" not in src, f"{name} re-derives the lighting gate; lights_map.js owns it"
+
+
+def test_hide_device_codes_actually_suppresses_the_code_label(tmp_path):
+    """Garry (2026-09-08): "Add an option in mapping, lights, to turn off
+    the device identifier text." Confirms the rendering effect, not just
+    the button's presence: with hideDeviceCodes true, a placed light's code
+    (e.g. "A01") never appears in the emitted SVG; with it false, the
+    existing zoom-driven behaviour is untouched — codeChip is false here
+    (build mode), so codesShown stays true regardless, and the label must
+    show unless the new explicit toggle is on."""
+    model = {
+        "room_geometry_m": {"Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 4], [0, 4]]}},
+        "light_positions_m": {"light.lamp": {"x_m": 3, "y_m": 2, "floor_id": "main"}},
+    }
+    states = {"light.lamp": {"state": "on", "attributes": {"friendly_name": "Lamp"}}}
+    area = {"light.lamp": "Kitchen"}
+    out = _run_pipeline_script(tmp_path, f"""
+function el(tag, attrs = {{}}, children = []) {{
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {{}})) {{
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null) n.setAttribute(k, String(v));
+  }}
+  if (!Array.isArray(children)) children = [children];
+  for (const c of children) {{
+    if (c === null || c === undefined) continue;
+    if (typeof c === "string" || typeof c === "number") n.appendChild(document.createTextNode(String(c)));
+    else n.appendChild(c);
+  }}
+  return n;
+}}
+const MODEL = {json.dumps(model)};
+const STATES = {json.dumps(states)};
+const AREA = {json.dumps(area)};
+const lights = LM.gatherLights(STATES, AREA, {{}}, "pro", {{}});
+const lightsByEid = {{}}; for (const l of lights) lightsByEid[l.entity_id] = l;
+const byRoom = {{}}; for (const l of lights) if (l.area_name) (byRoom[l.area_name] = byRoom[l.area_name] || []).push(l);
+const code = lights[0].code;
+const render = (hideDeviceCodes) => {{
+  let svg = "";
+  const host = {{
+    el, floors: MODEL.floors, model: MODEL, tier: "pro", byRoom, lightsByEid, lightsLoading: false,
+    hiddenEids: new Set(), hiddenEidsMap: new Set(),
+    view: {{ floorGap: 150, horizGap: 0, focusIdx: 0, zoom: 1 }},
+    hideDeviceCodes, onHideDeviceCodes: () => {{}},
+    saveView: async () => {{}}, callWS: async () => ({{}}), toast: () => {{}},
+    onHexesBuilt: (isoDiv) => {{ svg = isoDiv.innerHTML; }},
+    onRowClick: () => {{}}, onToggleHidden: () => {{}}, afterAssign: () => {{}},
+  }};
+  LM.buildLightsMapCard(host);
+  return svg;
+}};
+console.log(JSON.stringify({{
+  code,
+  shown: render(false).includes(code),
+  hidden: render(true).includes(code),
+}}));
+""")
+    assert out["shown"], "the code must render by default (build mode, toggle off)"
+    assert not out["hidden"], "hideDeviceCodes:true must suppress the code label everywhere, build mode included"
+
+
+def test_door_glyph_and_showcase_detail_are_well_formed_svg(tmp_path):
+    """shapeSvg("door", ...) / shapeDetailSvg("door", ...) — same reasoning
+    as the lock glyph test above: hand-written path/rect math with no
+    generic well-formed-SVG check, so verify the output directly."""
+    _stage(tmp_path)
+    script = ("const IL = await import('./iso_lights.mjs');\n"
+        "const body = IL.shapeSvg('door', 50, 50, 12, 'fill=\"#fbbf24\" stroke=\"#071008\"');\n"
+        "const detail = IL.shapeDetailSvg('door', 50, 50, 12, '#111827', 1.5);\n"
+        "console.log(JSON.stringify({body, detail}));\n")
+    (tmp_path / "run_door_shape.mjs").write_text(script, encoding="utf-8")
+    res = subprocess.run([_NODE, str(tmp_path / "run_door_shape.mjs")], capture_output=True,
+                         text=True, encoding="utf-8", timeout=60)
+    assert res.returncode == 0, f"node failed:\n{res.stderr[-4000:]}"
+    out = json.loads(res.stdout.strip().splitlines()[-1])
+    assert "<rect" in out["body"] and "<circle" in out["body"], out["body"]
+    assert "NaN" not in out["body"], out["body"]
+    assert out["detail"] and "NaN" not in out["detail"], out["detail"]
+
+
+def test_doors_and_windows_ride_the_pipeline_distinct_from_motion(tmp_path):
+    """Door/window barrier project, step 1 (Garry, 2026-09-08: "Also add
+    that device type to the list of devices in mapping, lighting"). A door
+    and a window binary_sensor are BOTH admitted (D-series code, "door"
+    glyph, isDoor true), a motion/occupancy binary_sensor still rides its
+    own class untouched, and a binary_sensor of neither device_class family
+    is still excluded — the precision isMotionSensor/isDoorSensor now need,
+    since binary_sensor. is no longer a single-purpose domain prefix."""
+    out = _run_pipeline_script(tmp_path, """
+const AREA = {"binary_sensor.front_door": "Entry", "binary_sensor.kitchen_window": "Kitchen",
+               "binary_sensor.hall_motion": "Hall", "binary_sensor.mystery": "Attic"};
+const STATES = {
+  "binary_sensor.front_door":   {state: "on",  attributes: {friendly_name: "Front Door", device_class: "door"}},
+  "binary_sensor.kitchen_window": {state: "off", attributes: {friendly_name: "Kitchen Window", device_class: "window"}},
+  "binary_sensor.hall_motion":  {state: "on",  attributes: {friendly_name: "Hall Motion", device_class: "motion"}},
+  "binary_sensor.mystery":      {state: "on",  attributes: {friendly_name: "Mystery Sensor", device_class: "moisture"}},
+};
+const lights = LM.gatherLights(STATES, AREA, {}, "pro", {}, {}, {}, {});
+const by = Object.fromEntries(lights.map(l => [l.entity_id, l]));
+console.log(JSON.stringify({
+  ids: lights.map(l => l.entity_id).sort(),
+  door: by["binary_sensor.front_door"] && {
+    code: by["binary_sensor.front_door"].code, isDoor: by["binary_sensor.front_door"].isDoor,
+    isMotion: by["binary_sensor.front_door"].isMotion, shape: by["binary_sensor.front_door"].shape,
+  },
+  window: by["binary_sensor.kitchen_window"] && {
+    code: by["binary_sensor.kitchen_window"].code, isDoor: by["binary_sensor.kitchen_window"].isDoor,
+  },
+  motion: by["binary_sensor.hall_motion"] && {
+    code: by["binary_sensor.hall_motion"].code, isDoor: by["binary_sensor.hall_motion"].isDoor,
+    isMotion: by["binary_sensor.hall_motion"].isMotion,
+  },
+}));
+""")
+    assert out["ids"] == ["binary_sensor.front_door", "binary_sensor.hall_motion", "binary_sensor.kitchen_window"], out["ids"]
+    door = out["door"]
+    assert door["code"] == "D01" and door["isDoor"] and not door["isMotion"] and door["shape"] == "door", door
+    window = out["window"]
+    assert window["code"] == "D02" and window["isDoor"], "a window shares the door's D-series code, not its own"
+    motion = out["motion"]
+    assert motion["code"] == "M01" and motion["isMotion"] and not motion["isDoor"], (
+        "a motion sensor must stay motion-classed now that binary_sensor. admits two device_class families", motion
+    )
+
+
+def test_a_door_row_shows_link_status_not_a_place_button(tmp_path):
+    """Garry, 2026-09-08: "The placement in mapping and lights is not making
+    any sense... make usable based on opening up an area of a space with a
+    purple dot on each side of the opening." A door/window has no point to
+    place — the Map column reads doorLinkedIds/onConfigureDoor instead of
+    placements/onPlaceRow, and the code column's "arm for placement" click
+    is switched off, for a door row specifically."""
+    out = _run_pipeline_script(tmp_path, _TABLE_EL + """
+const AREA = {"binary_sensor.front_door": "Entry", "binary_sensor.back_door": "Entry", "light.lamp": "Kitchen"};
+const STATES = {
+  "binary_sensor.front_door": {state: "off", attributes: {friendly_name: "Front Door", device_class: "door"}},
+  "binary_sensor.back_door":  {state: "off", attributes: {friendly_name: "Back Door", device_class: "door"}},
+  "light.lamp": {state: "on", attributes: {friendly_name: "Lamp"}},
+};
+const lights = LM.gatherLights(STATES, AREA, {}, "pro", {}, {}, {}, {});
+
+let configuredFor = null, selectedFor = null;
+const host = { el, hiddenEids: new Set(), lightsLoading: false, model: {},
+  doorLinkedIds: new Set(["binary_sensor.front_door"]),
+  onConfigureDoor: (l) => { configuredFor = l.entity_id; },
+  onSelectForPlacement: (l) => { selectedFor = l.entity_id; },
+  onPlaceRow: (eid) => {}, placeQueue: new Set() };
+const root = LM.buildLightsTable(host, lights);
+
+const linkedRow = root.querySelector('tr[data-eid="binary_sensor.front_door"]');
+const unlinkedRow = root.querySelector('tr[data-eid="binary_sensor.back_door"]');
+const lampRow = root.querySelector('tr[data-eid="light.lamp"]');
+
+const linkedMapCell = linkedRow.querySelectorAll("td")[7].textContent;
+const unlinkedBtn = [...unlinkedRow.querySelectorAll("td")[7].querySelectorAll("button")]
+  .find(b => /Link in Rooms/.test(b.textContent));
+unlinkedBtn.dispatchEvent({ type: "click", stopPropagation(){}, preventDefault(){} });
+
+const doorCodeCell = unlinkedRow.querySelectorAll("td")[0];
+doorCodeCell.dispatchEvent({ type: "click", stopPropagation(){}, preventDefault(){} });
+
+const lampHasPlace = [...lampRow.querySelectorAll("td")[7].querySelectorAll("button")]
+  .some(b => /Place/.test(b.textContent));
+
+console.log(JSON.stringify({
+  linkedMapCell, hasUnlinkedBtn: !!unlinkedBtn, configuredFor, selectedFor, lampHasPlace,
+}));
+""")
+    assert "🔗 Linked" in out["linkedMapCell"], out["linkedMapCell"]
+    assert out["hasUnlinkedBtn"] is True, "an unlinked door must offer a Link in Rooms button"
+    assert out["configuredFor"] == "binary_sensor.back_door", "the button must call host.onConfigureDoor with the row's light"
+    assert out["selectedFor"] is None, "a door's code column must never arm point-placement"
+    assert out["lampHasPlace"] is True, "an ordinary light must keep its Place button unaffected"

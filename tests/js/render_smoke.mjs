@@ -143,7 +143,11 @@ const MODEL = {
     "AA:02": { x_m: 8, y_m: -12, z_m: 2.2, floor_id: "upper" },
     "AA:03": { x_m: 4, y_m: -14, z_m: 2.2, floor_id: "basement" },
   },
-  light_positions_m: { "light.kitchen": { x_m: 5, y_m: -3, floor_id: "main", shape: "circle" } },
+  // width_cm/rotation make this fixture "touched" (lights_map.js's
+  // lightIsTouched) so the lights table's conditional Revert button
+  // (Garry, 2026-09-06) actually renders in these smoke passes instead of
+  // every light silently taking the "nothing to revert" branch.
+  light_positions_m: { "light.kitchen": { x_m: 5, y_m: -3, floor_id: "main", shape: "circle", width_cm: 40, rotation: 30 } },
   beacon_positions_m: {},
   rf_barriers_m: [{ name: "w1", floor_id: "main", points_m: [[0, 0], [4, 0]], attenuation_dbm: 6 }],
   floor_elevations: { basement: 0, main: 3.0, upper: 5.3 },
@@ -269,12 +273,65 @@ const CALIB_STATE = (over) => ({
   stopFlag: false, readings: null, savedThisSession: 0, ...over,
 });
 
+// gap #12 (best-in-class roadmap): per-room accuracy scoreboard + confusion
+// pairs. Shared between the Model tab's scoreboard/tinted-link variant and
+// Roam's "collect more" priority-card variant so both exercise the SAME
+// shape calibration_store.py's loo_accuracy() actually returns.
+const ROOM_CONFUSION = {
+  rooms: {
+    Kitchen: { point_count: 5, correct: 3, accuracy: 0.6 },
+    Living:  { point_count: 4, correct: 4, accuracy: 1.0 },
+  },
+  confusion_pairs: [{ true_room: "Kitchen", pred_room: "Living", count: 2 }],
+  overall_accuracy: 0.78,
+};
+
 const VARIANTS = {
   "maps.js": [
     null,
     { name: "stack", state: { mapsTab: "stack", maps: { list: STACK_MAPS } } },
     { name: "upload", state: { mapsTab: "upload" } },
     { name: "edit", state: { mapsTab: "edit" } },
+    // Rooms tab was never smoke-tested at all before gap #7 (best-in-class
+    // roadmap) added floorplan import to it — the default fixture's
+    // mapsTab lands on "library", same trap the comment above already
+    // describes for "stack".
+    { name: "rooms", state: { mapsTab: "rooms" } },
+    // Same tab with an imported candidate active, so the level-picker,
+    // import-notes line, and the "imported" entry in the truth selector
+    // all get exercised too, not just the empty/no-import state.
+    { name: "rooms-imported", state: { mapsTab: "rooms", maps: { list: MAPS,
+      // _roomsFloorId/_roomsDraftFloorId pinned to match so the Rooms tab's
+      // own floor-switch reset (which nulls _roomsImportedRaw whenever
+      // _roomsDraftFloorId !== the resolved floorId) does not immediately
+      // wipe the fixture before the imported-candidate code ever sees it.
+      _roomsFloorId: "main", _roomsDraftFloorId: "main",
+      _roomsImportedRaw: {
+        levels: [{ id: "l1", name: "Ground", elevation_m: 0 }, { id: "l2", name: "Upper", elevation_m: 3 }],
+        rooms: [{ name: "Den", level_id: "l1", points_m: [[0, 0], [3, 0], [3, 3], [0, 3]] }],
+        warnings: ["Skipped room 'Sliver': fewer than 3 usable points"],
+      },
+      _roomsImportedLevelId: "l1",
+    } } },
+    // Ghost scanner active (gap #9, best-in-class roadmap) — exercises the
+    // live score readout and the draggable ghost pin, not just the toggle
+    // button's off state every other "rooms" variant leaves untouched.
+    { name: "rooms-whatif", state: { mapsTab: "rooms", maps: { list: MAPS,
+      _roomsFloorId: "main", _roomsDraftFloorId: "main",
+      _whatIfGhost: { x_m: 2, y_m: -2 },
+    } } },
+    // BLE + motion fusion badges (gap #14, best-in-class roadmap) — all
+    // three agreement states, so _occupancyBadge's full branch coverage
+    // actually renders, not just the "toggle off, nothing drawn" default.
+    { name: "rooms-occupancy", state: { mapsTab: "rooms", maps: { list: MAPS,
+      _roomsFloorId: "main", _roomsDraftFloorId: "main",
+      _roomsShowOccupancy: true,
+    },
+      _occupancyEstimate: { rooms: [
+        { room: "Kitchen", people: ["Garry"], phones: 1, occupancy: true, motion: false, agreement: "agree" },
+        { room: "Living", people: [], phones: 2, occupancy: false, motion: false, agreement: "ble_only" },
+      ] },
+    } },
     // The Setup Wizard short-circuits render() entirely — each step is its
     // own code path (_wizardUpload/_wizardScale/_wizardRooms/
     // _wizardScanners/_wizardFinish), all otherwise unreached by the plain
@@ -299,8 +356,69 @@ const VARIANTS = {
     { name: "pin-ready",      state: { view: "calibration", _calib: CALIB_STATE({ tab: "pin", deviceId: "AA:BB:CC:DD:EE:01", mapId: "ground" }) } },
     { name: "roam-unguarded", state: { view: "calibration", _calib: CALIB_STATE({ tab: "roam" }) } },
     { name: "roam-ready",     state: { view: "calibration", _calib: CALIB_STATE({ tab: "roam", deviceId: "AA:BB:CC:DD:EE:01", mapId: "ground" }) } },
+    // Roam's directed "collect more" priority card (gap #12) — otherwise
+    // only the purely-geometric coverage-gap crosshair ever renders.
+    { name: "roam-priority", state: { view: "calibration",
+      _calib: CALIB_STATE({ tab: "roam", deviceId: "AA:BB:CC:DD:EE:01", mapId: "ground" }),
+      calibration: {
+        points: [
+          { map_id: "ground", x_frac: 0.3, y_frac: 0.4, room: "Kitchen", x_m: 4, y_m: -3,
+            floor_id: "main", scanner_readings: [{ source: "AA:01", mean_rssi: -55 }] },
+          { map_id: "ground", x_frac: 0.6, y_frac: 0.7, room: "Living", x_m: 7, y_m: -6,
+            floor_id: "main", scanner_readings: [{ source: "AA:01", mean_rssi: -68 }] },
+        ],
+        model: { coverage_by_map: { ground: { loo_accuracy: { room_confusion: ROOM_CONFUSION } } } },
+      },
+    } },
     { name: "model", state: { view: "calibration", _calib: CALIB_STATE({ tab: "model" }) } },
+    // Per-room scoreboard + tinted confusion links on the mini floor plan
+    // (gap #12) — needs room_confusion on BOTH the global loo_accuracy (the
+    // scoreboard card) and the per-map coverage_by_map entry (the SVG
+    // links), plus room_bounds on the map so _roomCentroid resolves.
+    { name: "model-room-confusion", state: { view: "calibration", _calib: CALIB_STATE({ tab: "model" }),
+      calibration: {
+        points: [
+          { map_id: "ground", x_frac: 0.3, y_frac: 0.4, room: "Kitchen", x_m: 4, y_m: -3,
+            floor_id: "main", scanner_readings: [{ source: "AA:01", mean_rssi: -55 }, { source: "AA:02", mean_rssi: -78 }] },
+          { map_id: "ground", x_frac: 0.6, y_frac: 0.7, room: "Living", x_m: 7, y_m: -6,
+            floor_id: "main", scanner_readings: [{ source: "AA:01", mean_rssi: -68 }, { source: "AA:02", mean_rssi: -71 }] },
+        ],
+        model: {
+          loo_accuracy: { mean_error_m: 1.4, median_error_m: 1.1, max_error_m: 3.0, point_count: 9,
+            algorithm: "knn", room_confusion: ROOM_CONFUSION },
+          coverage_by_map: { ground: { loo_accuracy: { mean_error_m: 1.4, max_error_m: 3.0,
+            room_confusion: ROOM_CONFUSION } } },
+        },
+      },
+      maps: { list: [{ ...MAPS[0], room_bounds: {
+        Kitchen: { type: "poly", points: [[0.1, 0.1], [0.4, 0.1], [0.4, 0.4], [0.1, 0.4]] },
+        Living:  { type: "poly", points: [[0.5, 0.5], [0.9, 0.5], [0.9, 0.9], [0.5, 0.9]] },
+      } }] },
+    } },
     { name: "beacon", state: { view: "calibration", _calib: CALIB_STATE({ tab: "beacon" }) } },
+    // Matrix tab needs its own calibration override (state merge is shallow —
+    // a variant's `calibration` key replaces FIXTURE's, not deep-merges) with
+    // BOTH points and model.path_loss set, or the grid-building code (the
+    // part actually worth smoke-testing) never runs and only the empty state
+    // does.
+    { name: "matrix", state: { view: "calibration", _calib: CALIB_STATE({ tab: "matrix" }),
+      calibration: {
+        points: [
+          { map_id: "ground", x_frac: 0.3, y_frac: 0.4, room: "Kitchen", x_m: 4, y_m: -3,
+            floor_id: "main",
+            scanner_readings: [{ source: "AA:01", mean_rssi: -55 }, { source: "AA:02", mean_rssi: -78 }] },
+          { map_id: "ground", x_frac: 0.6, y_frac: 0.7, room: "Living", x_m: 7, y_m: -6,
+            floor_id: "main",
+            scanner_readings: [{ source: "AA:01", mean_rssi: -68 }] },  // AA:02 silent — grey cell
+        ],
+        model: {
+          path_loss: {
+            "AA:01": { rssi_1m: -50, n: 2.2, r_squared: 0.8, point_count: 6, units: "m", scanner_name: "kitchen-esp" },
+            "AA:02": { rssi_1m: -55, n: 2.6, r_squared: 0.5, point_count: 5, units: "m", scanner_name: "upper-esp" },
+          },
+        },
+      },
+    } },
     // Guided Calibration Wizard — each step its own code path
     // (_calibWizardTune/Setup/Roam/Model/Finish), otherwise unreached.
     { name: "wizard-tune",   state: { view: "calibration", _calibWizard: { step: 1 }, _calib: CALIB_STATE({}) } },

@@ -3,6 +3,8 @@
 // Licensed under the GNU General Public License v3.0
 // See LICENSE file or https://www.gnu.org/licenses/gpl-3.0.html
 import { estimateDistanceM, formatDistanceM } from "./path_loss.js";
+import { buildCalibrationMatrix, errorColor } from "./calibration_matrix.js";
+import { attachPanZoom } from "./pan_zoom.js";
 
 // PadSpan Bright — BLE Fingerprint Calibration
 // Phone-based signal collection for precise indoor location modelling.
@@ -45,8 +47,14 @@ function _metresToFracFactory(model) {
   };
 }
 
-const { mapXform, worldGauge, metresToWorld } =
+const { mapXform, worldGauge, metresToWorld, mapFracToMetres,
+        metresToMapFrac } =
   await import(`./stack_transform.js${new URL(import.meta.url).search}`);
+const { tuneSavePlanInit, tuneDiffMapDraft, tuneMissingFabricPins, tuneConflictingSources,
+        tuneReconcileDraft, tuneSyncTuneDrafts, tuneSnapBaseline,
+        tuneTryAcquire, tuneRelease } =
+  await import(`./tune_save_plan.js${new URL(import.meta.url).search}`);
+tuneSavePlanInit({ mapFracToMetres, metresToMapFrac });
 
 // ── Exports ──────────────────────────────────────────────────────────────────
 export function render(ctx) {
@@ -108,7 +116,7 @@ export function render(ctx) {
   ]));
 
   // Tab bar
-  const TABS = [["tune","Tune"],["beacon","Beacon Tune"],["setup","Setup"],["pin","Pin & Listen"],["roam","Roam"],["model","Model"]];
+  const TABS = [["tune","Tune"],["beacon","Beacon Tune"],["setup","Setup"],["pin","Pin & Listen"],["roam","Roam"],["model","Model"],["matrix","Error Matrix"]];
   const tabBar = el("div", { class: "tabs", style: "margin-bottom:14px;flex-wrap:wrap;gap:4px" });
   for (const [id, label] of TABS) {
     tabBar.appendChild(el("button", {
@@ -122,6 +130,7 @@ export function render(ctx) {
   if (cs.tab === "pin")   root.appendChild(_pinAndListen(ctx, el, cs, calData));
   if (cs.tab === "roam")  root.appendChild(_roam(ctx, el, cs, calData));
   if (cs.tab === "model") root.appendChild(_modelTab(ctx, el, cs, calData));
+  if (cs.tab === "matrix") root.appendChild(_matrixTab(ctx, el, cs, calData));
   if (cs.tab === "tune")  root.appendChild(_tuneTab(ctx, el, cs, calData));
   if (cs.tab === "beacon") root.appendChild(_beaconTuneTab(ctx, el, cs, calData));
 
@@ -201,7 +210,7 @@ function _calibWizardRoam(ctx, el, cs, calData, w) {
   const pts = (calData.points || []).filter(p => p.map_id === cs.mapId);
   wrap.appendChild(el("div", { class: "muted", style: "margin-bottom:10px;line-height:1.5" },
     "Walk to the blue crosshair, stand still, and press collect — the map tells you where to go next, and fills in as you cover the floor. " +
-    "There's no fixed number of points; more is always better, but the coverage bar below is a fair guide. Prefer tapping the map yourself instead of being guided? Pin & Listen (the ordinary Calibration tabs) does the same collection without the guidance."));
+    "There's no fixed number of points; more is always better, but the coverage bar below is a fair guide. Prefer tapping the map yourself instead of being guided? Click ✕ Exit guide above, then the Pin & Listen tab — it does the same collection without the guidance."));
   wrap.appendChild(_roam(ctx, el, cs, calData));
   wrap.appendChild(_calibWizardFooter(ctx, el, w, {
     skip: pts.length === 0, skipLabel: "Skip — I'll collect points later",
@@ -292,7 +301,15 @@ function _calibWizard(ctx, el, cs, calData) {
   const head = el("div", { class: "card", style: "margin-bottom:12px" });
   const hrow = el("div", { style: "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px" });
   hrow.appendChild(el("div", { style: "font-weight:700;font-size:16px" }, "Guided calibration"));
-  const closeBtn = el("button", { class: "btn inline", style: "font-size:12px" }, "Exit guide");
+  // Label/title spell out what this does, not just its name: the wizard
+  // fully replaces the ordinary tab bar while open (see render() above), so
+  // this is the ONLY way back to Pin & Listen or any other non-wizard tab —
+  // a real user got stuck here (GitHub #69) with no idea "Exit guide" was
+  // the door out.
+  const closeBtn = el("button", {
+    class: "btn inline", style: "font-size:12px",
+    title: "Close the wizard and return to the full Calibration tabs (Tune, Beacon Tune, Pin & Listen, Roam, Model)",
+  }, "✕ Exit guide → full tabs");
   closeBtn.addEventListener("click", () => {
     if (w.step < 5 && ctx.actions.telemetryEvent) ctx.actions.telemetryEvent("wizard_calib_exited_early");
     ctx.state._calibWizard = null;
@@ -712,7 +729,14 @@ function _pinAndListen(ctx, el, cs, calData) {
   }
 
   // ── Interactive map ──────────────────────────────────────────────────────
-  const mapWrap = el("div", { style: "position:relative;border-radius:10px;overflow:hidden;border:2px solid #1b3526;touch-action:none" });
+  // mapWrap is the pan/zoom viewport (gap #11, best-in-class roadmap);
+  // mapInner is the transformed layer the SVG actually lives in. Tap-to-
+  // place still works unmodified: getBoundingClientRect() on the SVG
+  // already reflects its current on-screen (post-transform) box, so the
+  // existing fraction-of-bounding-box math needs no changes.
+  const mapWrap = el("div", { style: "position:relative;border-radius:10px;overflow:hidden;border:2px solid #1b3526;touch-action:none;cursor:grab" });
+  const mapInner = el("div", { style: "position:absolute;top:0;left:0;width:100%;transform-origin:0 0" });
+  mapWrap.appendChild(mapInner);
   const snap = (ctx.state.live && ctx.state.live.snapshot) || null;
 
   // Build SVG string
@@ -747,10 +771,11 @@ function _pinAndListen(ctx, el, cs, calData) {
     ${pinSvg}
   </svg>`;
 
-  mapWrap.innerHTML = svgStr;
+  mapInner.innerHTML = svgStr;
+  attachPanZoom(mapWrap, mapInner);
 
   // Tap handler — must attach after setting innerHTML
-  const svgEl = mapWrap.querySelector("svg");
+  const svgEl = mapInner.querySelector("svg");
   if (svgEl && !cs.collecting) {
     const onTap = (ev) => {
       const rect = svgEl.getBoundingClientRect();
@@ -1112,6 +1137,25 @@ function _roam(ctx, el, cs, calData) {
       : "Keep going — more points needed for a reliable model."));
   wrap.appendChild(progCard);
 
+  // Directed collect-more guidance (gap #12, best-in-class roadmap): the
+  // crosshair below only knows about geometric coverage gaps — it has no
+  // idea the model is actually WRONG in a room it already has points in.
+  // room_confusion (from LOO on this same map) does, so surface it as a
+  // priority card ahead of the purely-geometric next target.
+  const roomConf = calData.model?.coverage_by_map?.[cs.mapId]?.loo_accuracy?.room_confusion;
+  const weakRoom = roomConf ? _weakestRoom(roomConf) : null;
+  if (weakRoom) {
+    const wCard = el("div", { class: "card", style: "border-color:#f59e0b" });
+    wCard.appendChild(el("div", { style: "font-weight:700;font-size:13px;color:#f59e0b;margin-bottom:4px" },
+      `Priority: ${weakRoom.name}`));
+    wCard.appendChild(el("div", { style: "font-size:12px;margin-bottom:4px" },
+      `Only ${Math.round(weakRoom.accuracy * 100)}% of held-out points in ${weakRoom.name} are recognized correctly` +
+      (weakRoom.confusedWith ? ` — most often mistaken for ${weakRoom.confusedWith}.` : ".")));
+    wCard.appendChild(el("div", { class: "muted", style: "font-size:12px" },
+      `Collect ${weakRoom.suggested} more point${weakRoom.suggested === 1 ? "" : "s"} in ${weakRoom.name} to sharpen the model.`));
+    wrap.appendChild(wCard);
+  }
+
   // Coverage heatmap map
   const ar = (mapData.image.height || 600) / (mapData.image.width || 800);
   const vbH = ar * 100;
@@ -1288,6 +1332,16 @@ function _modelTab(ctx, el, cs, calData) {
   summCard.appendChild(statGrid);
   wrap.appendChild(summCard);
 
+  // Per-room accuracy scoreboard + confusion pairs (gap #12, best-in-class
+  // roadmap). Built from loo_accuracy's held-out room-vote pairs, grouped
+  // by TRUE room — an aggregate mean-error-in-metres number hides which
+  // specific room the model actually struggles with, or which two rooms
+  // it swaps for each other.
+  const roomConf = loo?.room_confusion;
+  if (roomConf && Object.keys(roomConf.rooms).length) {
+    wrap.appendChild(_roomAccuracyCard(ctx, el, roomConf));
+  }
+
   // Per-floor coverage — selector to choose which map to display
   const floorName = (fid) => {
     const f = floors.find(fl => fl.id === fid);
@@ -1323,6 +1377,7 @@ function _modelTab(ctx, el, cs, calData) {
       const grid = _computeCoverage(mapPts, GRID_N);
       const covered = grid.filter(v => v >= 0.5).length;
       const pct = Math.round(covered / (GRID_N * GRID_N) * 100);
+      const mapLoo = model.coverage_by_map?.[mid]?.loo_accuracy;
 
       // Stats row
       mapVizContainer.appendChild(el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" }, [
@@ -1349,16 +1404,20 @@ function _modelTab(ctx, el, cs, calData) {
         const dotsSvg = mapPts.map(p =>
           `<circle cx="${(p.x_frac * 100).toFixed(1)}" cy="${(p.y_frac * vbH).toFixed(1)}" r="2" fill="#52b788" stroke="white" stroke-width="0.6" opacity="0.9"/>`
         ).join("");
+        const confSvg = _confusionLinksSvg(mapLoo?.room_confusion, mapData, vbH);
 
         const miniDiv = el("div", { style: "border-radius:6px;overflow:hidden;border:1px solid #1b3526;margin-bottom:6px" });
         miniDiv.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 ${vbH}" preserveAspectRatio="none" style="width:100%;display:block">
           <image href="${imgUrl}" x="0" y="0" width="100" height="${vbH}" preserveAspectRatio="none"/>
-          ${gSvg}${dotsSvg}
+          ${gSvg}${confSvg}${dotsSvg}
         </svg>`;
         mapVizContainer.appendChild(miniDiv);
+        if (confSvg) {
+          mapVizContainer.appendChild(el("div", { style: "font-size:10px;color:#78909c;margin-bottom:6px" },
+            [el("span", { style: "color:#dc2626" }, "┄ "), "Room confusion (thicker = more often mixed up)"]));
+        }
       }
 
-      const mapLoo = model.coverage_by_map?.[mid]?.loo_accuracy;
       if (mapLoo) {
         mapVizContainer.appendChild(el("div", { style: "font-size:12px;color:#94a3b8;margin-bottom:4px" },
           `Cross-validation accuracy: ~${mapLoo.mean_error_m}m mean · ${mapLoo.max_error_m}m max`));
@@ -1532,6 +1591,204 @@ function _modelTab(ctx, el, cs, calData) {
   clearWrap.appendChild(makeClearBtn());
   actCard.appendChild(clearWrap);
   wrap.appendChild(actCard);
+
+  return wrap;
+}
+
+// ── Per-room accuracy scoreboard (gap #12, best-in-class roadmap) ─────────────
+// room_confusion groups the SAME held-out predictions loo_accuracy already
+// makes by their TRUE room, so "the model is ~1.8m off on average" becomes
+// "the model is right 60% of the time in the Office, and confuses it with
+// the Hallway 3 times" — actionable instead of a single blended number.
+function _roomAccuracyCard(ctx, el, roomConf) {
+  const card = el("div", { class: "card" });
+  card.appendChild(el("div", { style: "font-weight:700;font-size:14px;margin-bottom:4px" }, "Per-Room Accuracy"));
+  card.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:10px" },
+    "Leave-one-out room prediction, grouped by the room each point was actually collected in."));
+
+  const rooms = Object.entries(roomConf.rooms).sort((a, b) => a[1].accuracy - b[1].accuracy);
+  const rows = el("div", { style: "display:flex;flex-direction:column;gap:6px;margin-bottom:12px" });
+  for (const [name, r] of rooms) {
+    const pct = Math.round(r.accuracy * 100);
+    const color = pct >= 80 ? "#52b788" : pct >= 50 ? "#f59e0b" : "#dc2626";
+    rows.appendChild(el("div", { style: "display:flex;align-items:center;gap:8px" }, [
+      el("div", { style: "font-size:12px;width:110px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, name),
+      el("div", { style: "flex:1;height:8px;background:#1b3526;border-radius:4px;overflow:hidden" }, [
+        el("div", { style: `width:${pct}%;height:100%;background:${color}` }),
+      ]),
+      el("div", { style: `font-family:monospace;font-size:11px;color:${color};width:36px;text-align:right;flex-shrink:0` }, `${pct}%`),
+      el("div", { class: "muted", style: "font-size:10px;width:52px;text-align:right;flex-shrink:0" }, `${r.correct}/${r.point_count}`),
+    ]));
+  }
+  card.appendChild(rows);
+
+  if (roomConf.confusion_pairs.length) {
+    card.appendChild(el("div", { style: "font-weight:600;font-size:12px;color:#94a3b8;margin-bottom:6px" }, "Confused With"));
+    const confList = el("div", { style: "display:flex;flex-direction:column;gap:4px" });
+    for (const p of roomConf.confusion_pairs.slice(0, 8)) {
+      confList.appendChild(el("div", { style: "font-size:11px;color:#cbd5e1;display:flex;align-items:center;gap:6px" }, [
+        el("span", {}, p.true_room),
+        el("span", { style: "color:#f59e0b" }, "→"),
+        el("span", {}, p.pred_room),
+        el("span", { class: "badge warn", style: "margin-left:auto;font-size:10px" }, `×${p.count}`),
+      ]));
+    }
+    card.appendChild(confList);
+  }
+
+  return card;
+}
+
+// Tinted room-to-room confusion links, drawn on a floor-plan SVG already
+// using viewBox="0 0 100 vbH" — one <line> per confusion pair whose rooms
+// both have a traced polygon/circle on THIS map, weighted (opacity + width)
+// by how often that pair was confused so the worst pairs read as the
+// boldest lines. Silently draws nothing for a pair with no centroid on
+// this particular map (multi-floor homes name rooms per floor).
+function _confusionLinksSvg(roomConf, mapData, vbH) {
+  if (!roomConf || !roomConf.confusion_pairs.length) return "";
+  const maxCount = Math.max(...roomConf.confusion_pairs.map(p => p.count));
+  let svg = "";
+  for (const p of roomConf.confusion_pairs) {
+    const c1 = _roomCentroid(p.true_room, mapData);
+    const c2 = _roomCentroid(p.pred_room, mapData);
+    if (!c1 || !c2) continue;
+    const w = 1 + 3 * (p.count / maxCount);
+    const op = (0.35 + 0.5 * (p.count / maxCount)).toFixed(2);
+    svg += `<line x1="${(c1[0] * 100).toFixed(1)}" y1="${(c1[1] * vbH).toFixed(1)}" x2="${(c2[0] * 100).toFixed(1)}" y2="${(c2[1] * vbH).toFixed(1)}" stroke="#dc2626" stroke-width="${w.toFixed(1)}" opacity="${op}" stroke-dasharray="2 1.5"/>`;
+  }
+  return svg;
+}
+
+// ── Calibration Error Matrix (gap #3, best-in-class roadmap) ──────────────────
+// Point × scanner grid: geometric (fabric) distance vs. what that scanner's
+// own path-loss fit derives from the point's measured RSSI. See
+// calibration_matrix.js's header for why this — not scanner-to-scanner — is
+// the real "TX×RX" data this codebase has.
+function _matrixTab(ctx, el, cs, calData) {
+  const wrap = el("div", { style: "display:flex;flex-direction:column;gap:14px" });
+  const model = calData.model || {};
+  const pts = calData.points || [];
+
+  // Anchored beacons (gap #6, best-in-class roadmap) slot into this SAME
+  // matrix as extra, continuously-refreshed rows — the ground truth is the
+  // beacon's DECLARED pin position (anchor_true_x_m/y_m), never its own
+  // live solved x_m/y_m, which would make the row compare the solve
+  // against itself. "anchor:" + key is a marker buildCalibrationMatrix
+  // passes through unmodified as pointId, so the render loop below can
+  // tell an anchor row from a one-off calibration walk point without the
+  // pure matrix module needing to know "anchor" is a concept at all.
+  const liveObjs = ctx.state.live?.snapshot?.objects?.list || [];
+  const anchors = liveObjs.filter(o => o._pinned && o.anchor_true_x_m != null);
+  const anchorPoints = anchors.map(o => ({
+    id: "anchor:" + (o.key || o.address || o.entity_id || ""),
+    x_m: o.anchor_true_x_m, y_m: o.anchor_true_y_m, floor_id: o.anchor_true_floor_id,
+    room: o.room, label: (o.user_label || o.name || o.key || "anchor"),
+    scanner_readings: Object.entries(o._source_rssi || {}).map(([source, mean_rssi]) => ({ source, mean_rssi })),
+  }));
+
+  const infoCard = el("div", { class: "card" });
+  infoCard.appendChild(el("div", { style: "font-weight:700;font-size:14px;margin-bottom:6px" }, "Calibration Error Matrix"));
+  infoCard.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:10px" },
+    "Each cell compares a point's known fabric distance to a scanner against the distance that scanner's path-loss fit derives from the point's own measured RSSI. Blue = the fit reports the point farther than it really is · green = accurate · red = closer than it really is. Grey = that scanner never heard this point. 📍 rows are anchored beacons — pinned to a known position, refreshed live every poll instead of a one-off walk."));
+
+  if (anchors.length) {
+    const driftColor = { ok: "#52b788", warn: "#f59e0b", bad: "#f87171", unknown: "#4a6052" };
+    const driftCard = el("div", { class: "card" });
+    driftCard.appendChild(el("div", { style: "font-weight:700;font-size:14px;margin-bottom:8px" }, "📍 Anchored Beacon Drift"));
+    const tbody = el("tbody");
+    for (const o of anchors) {
+      const sev = o.anchor_drift_severity || "unknown";
+      tbody.appendChild(el("tr", {}, [
+        el("td", { style: "font-size:11px" }, o.user_label || o.name || o.key),
+        el("td", { class: "muted", style: "font-size:11px" }, o.room || "—"),
+        el("td", { style: "font-family:monospace;font-size:11px" }, o.anchor_drift_m != null ? `${o.anchor_drift_m}m` : "—"),
+        el("td", { style: `font-size:11px;font-weight:700;color:${driftColor[sev]}` }, sev.toUpperCase()),
+      ]));
+    }
+    driftCard.appendChild(el("table", { class: "table" }, [
+      el("thead", {}, el("tr", {}, [el("th", {}, "Beacon"), el("th", {}, "Room"), el("th", {}, "Drift"), el("th", {}, "Status")])),
+      tbody,
+    ]));
+    wrap.appendChild(driftCard);
+  }
+  const recomputeWrap = el("div");
+  const makeRecomputeBtn = () => {
+    const b = el("button", { class: "btn" }, "Relearn (recompute model)");
+    b.addEventListener("click", async () => {
+      recomputeWrap.innerHTML = "";
+      recomputeWrap.appendChild(el("span", { class: "muted", style: "font-size:12px" }, "Recomputing…"));
+      try {
+        await ctx.actions.calibrationComputeModel();
+        ctx.state.calibration = await ctx.actions.calibrationGet();
+        ctx.toast("Model recomputed.");
+        ctx.actions.renderRooms();
+      } catch (e) {
+        ctx.toast("Recompute failed: " + String(e), true);
+        recomputeWrap.innerHTML = "";
+        recomputeWrap.appendChild(makeRecomputeBtn());
+      }
+    });
+    return b;
+  };
+  recomputeWrap.appendChild(makeRecomputeBtn());
+  infoCard.appendChild(recomputeWrap);
+  wrap.appendChild(infoCard);
+
+  const pathLoss = model.path_loss || {};
+  if (!Object.keys(pathLoss).length) {
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "muted" }, "No path-loss fits yet — collect calibration points and Compute Model on the Model tab first."),
+    ]));
+    return wrap;
+  }
+
+  const matrix = buildCalibrationMatrix({
+    points: pts.concat(anchorPoints),
+    pathLoss,
+    scannerPositions: ctx.state.model?.scanner_positions_m || {},
+    floorElevations: ctx.state.model?.floor_elevations || {},
+    settings: ctx.state.settings || {},
+  });
+
+  if (!matrix.rows.length || !matrix.scanners.length) {
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "muted" }, "No metre-space calibration points (or anchored beacons) against a positioned, metre-fitted scanner yet."),
+    ]));
+    return wrap;
+  }
+
+  const gridCard = el("div", { class: "card" });
+  gridCard.appendChild(el("div", { style: "font-weight:700;font-size:14px;margin-bottom:10px" }, "Point × Scanner error (metres)"));
+  const tableWrap = el("div", { style: "overflow-x:auto" });
+  const thead = el("thead", {}, el("tr", {}, [
+    el("th", {}, "Point"),
+    ...matrix.scanners.map(src => el("th",
+      { style: "font-size:10px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
+      pathLoss[src].scanner_name || src)),
+  ]));
+  const tbody = el("tbody");
+  for (const row of matrix.rows) {
+    const cellEls = matrix.scanners.map(src => {
+      const c = row.cells[src];
+      if (!c) return el("td", { style: "background:#0a150e;text-align:center;color:#4a6052;font-size:10px" }, "—");
+      const color = errorColor(c.error_m);
+      const sign = c.error_m > 0 ? "+" : "";
+      return el("td", {
+        style: `background:${color};text-align:center;font-size:10px;font-weight:600;color:#071008;cursor:default`,
+        title: `Expected ${c.expected_m}m · Measured ${c.measured_m}m · Error ${sign}${c.error_m}m · RSSI ${c.rssi}dBm`,
+      }, `${sign}${c.error_m}`);
+    });
+    const isAnchor = row.pointId.startsWith("anchor:");
+    tbody.appendChild(el("tr", {}, [
+      el("td", { style: "font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
+        (isAnchor ? "📍 " : "") + (row.label || row.room || "Unlabeled")),
+      ...cellEls,
+    ]));
+  }
+  tableWrap.appendChild(el("table", { class: "table" }, [thead, tbody]));
+  gridCard.appendChild(tableWrap);
+  wrap.appendChild(gridCard);
 
   return wrap;
 }
@@ -1754,6 +2011,22 @@ function _nextTarget(grid, gridN) {
   return { x_frac: bx, y_frac: by };
 }
 
+// Picks the room LOO trusts least, from room_confusion (gap #12). Rooms
+// with only 1 held-out point are skipped — one wrong guess out of one is
+// noise, not a pattern worth sending someone to go collect more of.
+// `suggested` scales with how far off accuracy is: a room that's only
+// right half the time needs more extra points than one at 75%.
+function _weakestRoom(roomConf) {
+  const candidates = Object.entries(roomConf.rooms || {})
+    .filter(([, r]) => r.point_count >= 2 && r.accuracy < 0.8);
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => a[1].accuracy - b[1].accuracy);
+  const [name, r] = candidates[0];
+  const topConfusion = (roomConf.confusion_pairs || []).find(p => p.true_room === name);
+  const suggested = Math.max(2, Math.min(6, Math.round((1 - r.accuracy) * 5) + 1));
+  return { name, accuracy: r.accuracy, confusedWith: topConfusion?.pred_room || null, suggested };
+}
+
 // ── Tune tab — 3D iso map with draggable receiver markers ──────────────────
 function _tuneTab(ctx, el, cs, calData) {
   const wrap = el("div", { style: "display:flex;flex-direction:column;gap:10px" });
@@ -1802,26 +2075,16 @@ function _tuneTab(ctx, el, cs, calData) {
   };
   const ts = ctx.state._calibTune;
 
-  // Build a stamp from maps data to detect external updates
-  const mapsStamp = maps_list.map(m => `${m.id}:${m.updated||""}:${(m.receivers||[]).length}`).join("|");
-  const hasDirty = Object.values(ts.dirtyMaps).some(Boolean);
-
-  // Re-sync draft receivers when maps data changes externally (and no unsaved edits)
-  // Keep ALL stored receivers — do not filter by live status (radios may not have reconnected yet)
-  if (!Object.keys(ts.draftReceivers).length || (mapsStamp !== ts._mapsStamp && !hasDirty)) {
-    for (const m of maps_list) {
-      ts.draftReceivers[m.id] = (m.receivers || [])
-        .map(r => ({
-          id: r.id || r.source || ("rx_" + Math.random().toString(16).slice(2, 10)), label: r.label || "", x: Number(r.x || 0), y: Number(r.y || 0), room: r.room || "", source: r.source || ""
-        }));
-    }
-    // Remove drafts for maps that no longer exist
-    for (const id of Object.keys(ts.draftReceivers)) {
-      if (!maps_list.find(m => m.id === id)) delete ts.draftReceivers[id];
-    }
-    ts._mapsStamp = mapsStamp;
-  }
-
+  // Single authoritative draft-sync, shared by initial render and
+  // Reset (see tuneSyncTuneDrafts): seeds empty drafts, reseeds CLEAN
+  // maps on metadata change, and reconciles clean drafts from the fabric
+  // whenever maps OR model data changed — a model arriving after the
+  // initial map-seeded render is the normal first-paint order. Dirty
+  // drafts (unsaved edits, failed writes) are never touched here.
+  tuneSyncTuneDrafts(ts, maps_list,
+    (ctx.state.model || {}).scanner_positions_m || {},
+    (ctx.state.model || {}).map_transforms || {});
+  const hasDirty = Object.values(ts.dirtyMaps || {}).some(Boolean);
   let _fg = ts.fg, _hg = ts.hg;
 
   // ── Transforms ────────────────────────────────────────────────────────────
@@ -2098,6 +2361,7 @@ function _tuneTab(ctx, el, cs, calData) {
       rxObj.x = nx;
       rxObj.y = ny;
       ts.dirtyMaps[mapId] = true;
+      ts._tuneRev = (ts._tuneRev || 0) + 1;
       const [newWx, newWy] = xf.mapPt(nx, ny);
       const [newPx, newPy] = iso(newWx, newWy, z);
       g.setAttribute("transform", `translate(${newPx - origPx},${newPy - origPy})`);
@@ -2149,6 +2413,7 @@ function _tuneTab(ctx, el, cs, calData) {
     if (!ts.draftReceivers[m.id]) ts.draftReceivers[m.id] = [];
     ts.draftReceivers[m.id].push(newRx);
     ts.dirtyMaps[m.id] = true;
+    ts._tuneRev = (ts._tuneRev || 0) + 1;
     ts.selectedRx = { mapId: m.id, rxId: newRx.id };
     ts.pendingPlace = null;
     ts._confirming = false;
@@ -2362,25 +2627,183 @@ function _tuneTab(ctx, el, cs, calData) {
   saveBtn.textContent = hasDirty ? "\ud83d\udcbe Save" : "Save";
   saveBtn.title = "Save updated receiver positions to all modified maps";
   saveBtn.addEventListener("click", async () => {
-    const dirtyIds = Object.keys(ts.dirtyMaps).filter(id => ts.dirtyMaps[id]);
-    if (!dirtyIds.length) { statusLbl.textContent = "No changes"; setTimeout(() => { statusLbl.textContent = ""; }, 2000); return; }
+    // Mutual exclusion across same-session fabric writers (this save,
+    // Height saves, removals): acquire BEFORE the first request, release
+    // unconditionally. A busy session toasts and changes nothing — there
+    // is deliberately no queue.
+    if (!tuneTryAcquire(ts)) {
+      ctx.toast("A save is in progress — try again in a moment", true);
+      return;
+    }
     saveBtn.disabled = true;
     statusLbl.textContent = "Saving...";
+    // Draft edits landing while this save is in flight bump ts._tuneRev;
+    // the save below never clears what it did not itself write.
+    const _revAtStart = ts._tuneRev || 0;
     try {
-      // Save to fabric (metre-space authority), then sync fracs back to maps
+      // Edit intent is difference-from-baseline per source. Convertible
+      // pins missing from the fabric join even from clean maps — a
+      // placed-but-never-saved pin must not read "No changes". Untouched
+      // rows never post, however stale.
+      const _model = ctx.state.model || {};
+      const _fabBase = JSON.parse(JSON.stringify(
+        _model.scanner_positions_m || {}));
+      const _tfs = _model.map_transforms || {};
+      for (const { mapId } of tuneMissingFabricPins(maps_list,
+          ts.draftReceivers, _fabBase, _tfs)) {
+        ts.dirtyMaps[mapId] = true;
+      }
+      const dirtyIds = Object.keys(ts.dirtyMaps).filter(id => ts.dirtyMaps[id]);
+      if (!dirtyIds.length) {
+        statusLbl.textContent = "No changes";
+        setTimeout(() => { statusLbl.textContent = ""; }, 2000);
+        return;
+      }
+      let _ok = 0;
+      const _failedMaps = {};
+      const _failedSources = {};
+      // Transaction candidates: map/source/exact snapshot fractions,
+      // with metadata (label/room) kept OUT of the WS payload.
+      const _cands = [];
       for (const mapId of dirtyIds) {
         const origMap = maps_list.find(m => m.id === mapId);
-        if (!origMap) continue;
+        if (!origMap) { _failedMaps[mapId] = true; continue; }
+        const _base = ((ts.editBaseline || {})[mapId]) || {};
+        const _plan = tuneDiffMapDraft(
+          origMap, ts.draftReceivers[mapId] || [], _fabBase, _tfs,
+          _base, true);
+        if (!_plan || _plan.refused) { _failedMaps[mapId] = true; continue; }
+        for (const _badSrc of (_plan.invalid || [])) {
+          _failedMaps[mapId] = true;
+          (_failedSources[mapId] = _failedSources[mapId] || {})[_badSrc] = true;
+        }
+        const _rows = ts.draftReceivers[mapId] || [];
+        for (const w of _plan.writes) {
+          const _row = _rows.find(r => (r && r.source) === w.source);
+          _cands.push({ mapId, source: w.source,
+            x: _row ? _row.x : null, y: _row ? _row.y : null,
+            label: _row ? (_row.label || "") : "",
+            room: _row ? (_row.room || "") : "",
+            payload: { type: "padspan_bright/fabric_scanner_position_set",
+              source: w.source, x_m: w.x_m, y_m: w.y_m,
+              floor_id: w.floor_id,
+              ...(w.z_m !== undefined ? { z_m: w.z_m } : {}) } });
+        }
       }
-      // Clear dirty state BEFORE refresh so re-rendered view shows clean state
-      ts.dirtyMaps = {};
-      ts.selectedRx = null;
-      ctx.toast("Receiver positions saved");
-      // mapsRefresh refreshes data + triggers re-render (which updates dirty label & stamp)
+      // Conflicts across ALL candidates (missing pins included) refuse
+      // every owner; then group the survivors by source — one payload per
+      // source no matter how many maps carry it. A failed request keeps
+      // ALL of its owners pending; _ok counts unique requests.
+      const _payloads = _cands.map(c => c.payload);
+      for (const _bad of tuneConflictingSources(_payloads)) {
+        for (const c of _cands) {
+          if (c.source === _bad) {
+            _failedMaps[c.mapId] = true;
+            (_failedSources[c.mapId] = _failedSources[c.mapId] || {})[_bad] = true;
+          }
+        }
+      }
+      const _txns = [];
+      for (const c of _cands) {
+        // Planning-failed maps (refused/invalid/missing) and conflicted
+        // sources never reach the wire; every one of their owners stays
+        // pending via the dirty flags below.
+        if (_failedMaps[c.mapId]) continue;
+        if ((_failedSources[c.mapId] || {})[c.source]) continue;
+        const _hit = _txns.find(t => t.source === c.source);
+        if (_hit) { _hit.owners.push({ mapId: c.mapId, x: c.x, y: c.y }); continue; }
+        _txns.push({ source: c.source, payload: c.payload,
+          owners: [{ mapId: c.mapId, x: c.x, y: c.y }] });
+      }
+      for (const t of _txns) {
+        if (_revAtStart !== (ts._tuneRev || 0)) break;
+        try {
+          const _res = await ctx.actions.callWS(t.payload);
+          // A transport-level resolve carrying ok:false is still a
+          // failure — never clear dirty on it.
+          if (_res && _res.ok === false) {
+            for (const o of t.owners) {
+              _failedMaps[o.mapId] = true;
+              (_failedSources[o.mapId] = _failedSources[o.mapId] || {})[t.source] = true;
+            }
+            continue;
+          }
+          _ok++;
+          // The baseline advances ONLY to the SUBMITTED snapshot — never
+          // to the mutable current draft, which may already hold newer
+          // edits. The ack is published locally so a swallowed refresh
+          // failure cannot revert it; rejected/conflicting/unsubmitted
+          // rows never advance.
+          ts.editBaseline = ts.editBaseline || {};
+          try {
+            const _lm = ctx.state.model || (ctx.state.model = {});
+            const _lspm = _lm.scanner_positions_m ||
+              (_lm.scanner_positions_m = {});
+            _lspm[t.source] = { x_m: t.payload.x_m, y_m: t.payload.y_m,
+              z_m: (t.payload.z_m !== undefined ? t.payload.z_m :
+                (((_lspm[t.source] || {}).z_m !== undefined) ?
+                  _lspm[t.source].z_m : 2.4)),
+              floor_id: t.payload.floor_id };
+          } catch (_e) { /* publication is best-effort */ }
+          for (const o of t.owners) {
+            ts.editBaseline[o.mapId] = ts.editBaseline[o.mapId] || {};
+            ts.editBaseline[o.mapId][t.source] = { x: o.x, y: o.y };
+          }
+        } catch (e) {
+          for (const o of t.owners) {
+            _failedMaps[o.mapId] = true;
+            (_failedSources[o.mapId] = _failedSources[o.mapId] || {})[t.source] = true;
+          }
+        }
+      }
+      const _failCount = Object.keys(_failedMaps).filter(id => _failedMaps[id]).length;
+      if (_revAtStart !== (ts._tuneRev || 0)) {
+        // Concurrent edit landed mid-save: report, keep every dirty flag
+        // the save did not itself clear, and let the newer state win —
+        // a retry sends the newer edit (its baseline still differs).
+        statusLbl.textContent = `Saved ${_ok} — map changed during save, review`;
+        ctx.toast(`Saved ${_ok}; edits changed during save — review before re-saving`, true);
+        saveBtn.disabled = false;
+      } else if (_failCount) {
+        ts.dirtyMaps = _failedMaps;
+        statusLbl.textContent = `Saved ${_ok}, failed ${_failCount} map(s)`;
+        ctx.toast(`Saved ${_ok} receiver(s), ${_failCount} map(s) failed — kept unsaved`, true);
+        saveBtn.disabled = false;
+      } else {
+        ts.dirtyMaps = {};
+        ts.selectedRx = null;
+        ctx.toast("Receiver positions saved");
+      }
+      // mapsRefresh alone does not refresh the model the height input reads
+      // (scanner_positions_m) — refresh both so new entries expose Save Z.
       await ctx.actions.mapsRefresh();
+      if (ctx.actions.modelRefresh) await ctx.actions.modelRefresh();
+      // Reconcile CLEAN drafts from authoritative fabric (inverse
+      // transform): saved moves stop reverting on Reset/fresh session and
+      // Tune-added pins stop vanishing. Failed/dirty maps are untouched,
+      // and reconciled rows advance their baselines so the reconcile
+      // itself never reads as a new edit.
+      try {
+        const _fabNow = (ctx.state.model && ctx.state.model.scanner_positions_m) || {};
+        const _tfsNow = (ctx.state.model && ctx.state.model.map_transforms) || {};
+        if (_revAtStart === (ts._tuneRev || 0)) {
+          for (const m of maps_list) {
+            if ((ts.dirtyMaps || {})[m.id]) continue;
+            const _next = tuneReconcileDraft(
+              m, ts.draftReceivers[m.id] || [], _fabNow, _tfsNow, false);
+            if (_next) {
+              ts.draftReceivers[m.id] = _next;
+              ts.editBaseline[m.id] = tuneSnapBaseline(_next);
+            }
+          }
+        }
+      } catch (e) { /* reconcile is best-effort; the save already landed */ }
     } catch (e) {
       ctx.toast("Save failed: " + String(e), true);
       statusLbl.textContent = "Error saving";
+      saveBtn.disabled = false;
+    } finally {
+      tuneRelease(ts);
       saveBtn.disabled = false;
     }
   });
@@ -2392,16 +2815,30 @@ function _tuneTab(ctx, el, cs, calData) {
   resetBtn.textContent = "Reset";
   resetBtn.title = "Discard unsaved changes and reload receiver positions";
   resetBtn.addEventListener("click", () => {
-    ts.draftReceivers = {};
-    for (const m of maps_list) {
-      ts.draftReceivers[m.id] = (m.receivers || [])
-        .map(r => ({
-          id: r.id || r.source || ("rx_" + Math.random().toString(16).slice(2, 10)), label: r.label || "", x: Number(r.x || 0), y: Number(r.y || 0), room: r.room || "", source: r.source || ""
-        }));
+    // Guard first: a Reset landing mid-save must not tear down the
+    // drafts the in-flight save is reading. Busy returns unchanged.
+    if (!tuneTryAcquire(ts)) {
+      ctx.toast("A save is in progress — try again in a moment", true);
+      return;
     }
-    ts.dirtyMaps = {};
-    ts.selectedRx = null;
-    ts.pendingPlace = null;
+    try {
+      ts._tuneRev = (ts._tuneRev || 0) + 1;
+      // Clear dirty flags, drafts AND baselines BEFORE re-syncing, so the
+      // shared routine takes its fresh path against the current
+      // acknowledged model (which carries every ack the save published,
+      // even when a refresh was swallowed). No new stamp mechanism: empty
+      // drafts already select the fresh path.
+      ts.dirtyMaps = {};
+      ts.draftReceivers = {};
+      ts.editBaseline = {};
+      tuneSyncTuneDrafts(ts, maps_list,
+        (ctx.state.model || {}).scanner_positions_m || {},
+        (ctx.state.model || {}).map_transforms || {});
+      ts.selectedRx = null;
+      ts.pendingPlace = null;
+    } finally {
+      tuneRelease(ts);
+    }
     ts.fg = ctx.state.settings?.overview_iso_floor_gap ?? 150;
     ts.hg = ctx.state.settings?.overview_iso_horiz_gap ?? 0;
     ts.focusIdx = 0;
@@ -2482,12 +2919,48 @@ function _tuneTab(ctx, el, cs, calData) {
       zBtn.title = "Mounting height above this scanner's own floor. Used for 3D distance; survives map syncs.";
       zBtn.addEventListener("click", async () => {
         const v = parseFloat(zInp.value);
-        if (!isFinite(v) || v < 0 || v > 100) { ctx.toast("Height must be 0–100 m", true); return; }
+        if (!Number.isFinite(v) || v < 0 || v > 100) {
+          ctx.toast("Height must be 0–100 m", true);
+          return;
+        }
+        // The lock is owned by this ENTIRE callback: acquired before the
+        // request, held through the acknowledged local update AND the
+        // awaited refresh, released unconditionally. A concurrent
+        // position save or removal is refused while held, and vice versa.
+        if (!tuneTryAcquire(ts)) {
+          ctx.toast("A save is in progress — try again in a moment", true);
+          return;
+        }
         try {
-          await ctx.actions.callWS({ type: "padspan_bright/fabric_scanner_z_set", source: rx.source, z_m: v });
+          const _hres = await ctx.actions.callWS({
+            type: "padspan_bright/fabric_scanner_z_set",
+            source: rx.source, z_m: v,
+          });
+          if (_hres && _hres.ok === false) {
+            ctx.toast("Save failed: height not stored", true);
+            return;
+          }
+          // Publish the ACKNOWLEDGED height locally before refreshing:
+          // modelRefresh swallows fetch errors, so a failed refresh must
+          // not lose the ack. Backend rounds to 2dp within 0–100.
+          try {
+            const _mdl = ctx.state.model || (ctx.state.model = {});
+            const _spm = _mdl.scanner_positions_m ||
+              (_mdl.scanner_positions_m = {});
+            const _hprev = _spm[rx.source];
+            _spm[rx.source] = {
+              ...(_hprev && typeof _hprev === "object" ? _hprev : {}),
+              z_m: Math.round(Math.max(0, Math.min(100, v)) * 100) / 100,
+            };
+          } catch (_e) { /* publication is best-effort */ }
           ctx.toast(`${rx.label || rx.source}: height set to ${v} m`);
-          ctx.actions.modelRefresh && ctx.actions.modelRefresh();
-        } catch (e) { ctx.toast("Save failed: " + String(e), true); }
+          ts._tuneRev = (ts._tuneRev || 0) + 1;
+          if (ctx.actions.modelRefresh) await ctx.actions.modelRefresh();
+        } catch (e) {
+          ctx.toast("Save failed: height not stored", true);
+        } finally {
+          tuneRelease(ts);
+        }
       });
       zRow.appendChild(zLbl); zRow.appendChild(zInp); zRow.appendChild(zBtn);
       infoCard.appendChild(zRow);
@@ -2501,30 +2974,63 @@ function _tuneTab(ctx, el, cs, calData) {
     removeBtn.textContent = "Remove from floor";
     removeBtn.title = "Remove this receiver from " + _floorName;
     removeBtn.addEventListener("click", async () => {
-      const d = ts.draftReceivers[_selMapId] || [];
-      const _removed = d.find(r => r.id === _selRxId);
-      ts.draftReceivers[_selMapId] = d.filter(r => r.id !== _selRxId);
-      ts.dirtyMaps[_selMapId] = true;
-      ts.selectedRx = null;
-      // Save immediately
-      const origMap = maps_list.find(m => m.id === _selMapId);
-      if (origMap) {
-        try {
-          // Drop it from the fabric FIRST. A batch save only writes the
-          // entries it carries — it never deletes — and the re-derive that
-          // follows re-injects any fabric scanner claiming this map, so
-          // saving the shortened draft alone would put it straight back.
-          const _rmSrc = (_removed && (_removed.source || _removed.id)) || "";
-          if (_rmSrc) {
-            await ctx.actions.callWS({ type: "padspan_bright/fabric_scanner_remove", source: _rmSrc });
-          }
-          ts.dirtyMaps = {};
-          ts._mapsStamp = null;
-          ctx.toast("Receiver removed");
-          await ctx.actions.mapsRefresh();
-        } catch (e) {
-          ctx.toast("Remove failed: " + String(e), true);
+      // The lock is acquired BEFORE any mutation: a busy session returns
+      // with everything unchanged. The request is pessimistic — the draft
+      // row is removed only after the backend acknowledges.
+      if (!tuneTryAcquire(ts)) {
+        ctx.toast("A save is in progress — try again in a moment", true);
+        return;
+      }
+      try {
+        const d = ts.draftReceivers[_selMapId] || [];
+        const _removed = d.find(r => r.id === _selRxId);
+        const _rmSrc = (_removed && (_removed.source || _removed.id)) || "";
+        if (!_rmSrc) return;
+        const origMap = maps_list.find(m => m.id === _selMapId);
+        if (!origMap) {
+          ctx.toast("Remove failed: map not found", true);
+          return;
         }
+        // Drop it from the backend FIRST. NOTE (pre-existing backend
+        // limitation, out of scope here): fabric_scanner_remove deletes
+        // the model's scanner metadata only — the fabric spatial entry
+        // persists server-side. This callback therefore claims no more
+        // than the metadata removal plus the local draft cleanup below.
+        let _rres = null;
+        try {
+          _rres = await ctx.actions.callWS({
+            type: "padspan_bright/fabric_scanner_remove", source: _rmSrc });
+        } catch (e) {
+          _rres = { ok: false };
+        }
+        if (_rres && _rres.ok === false) {
+          ctx.toast("Remove failed: receiver not removed", true);
+          return;
+        }
+        // After ack: targeted cleanup ONLY. Unrelated edits — including
+        // other rows on this SAME map — keep their coords, baselines and
+        // dirty flags exactly as they were.
+        ts.draftReceivers[_selMapId] = d.filter(r => r.id !== _selRxId);
+        if (ts.editBaseline && ts.editBaseline[_selMapId]) {
+          delete ts.editBaseline[_selMapId][_rmSrc];
+        }
+        ts._tuneRev = (ts._tuneRev || 0) + 1;
+        ts.selectedRx = null;
+        // Publish the removal locally, then refresh: a swallowed refresh
+        // failure must not resurrect the row in the local model.
+        try {
+          const _mdl = ctx.state.model || (ctx.state.model = {});
+          if (_mdl.scanners && typeof _mdl.scanners === "object") {
+            delete _mdl.scanners[_rmSrc];
+          }
+        } catch (_e) { /* publication is best-effort */ }
+        ctx.toast("Receiver removed");
+        await ctx.actions.mapsRefresh();
+        if (ctx.actions.modelRefresh) await ctx.actions.modelRefresh();
+      } catch (e) {
+        ctx.toast("Remove failed: " + String(e), true);
+      } finally {
+        tuneRelease(ts);
       }
     });
     infoCard.appendChild(removeBtn);
@@ -2717,6 +3223,7 @@ function _tuneTab(ctx, el, cs, calData) {
               ts.pendingPlace = null;
               // 4. Call radioResetQuiet — WS only, no re-render
               const res = await ctx.actions.radioResetQuiet(src);
+              ts._tuneRev = (ts._tuneRev || 0) + 1;
               const sm = res?.summary || {};
               const parts = [];
               if (removedMaps.length) parts.push(`${removedMaps.length} map(s)`);

@@ -7,8 +7,13 @@
 // the ?b= cache-buster propagates (see docs/06_UI_CACHE_BUSTING.md).
 const { BUY_URL: _LIC_BUY_URL, PRO_PRICE: _LIC_PRICE, LICENCE_PATH: _LIC_PATH } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
+// Shared pan/zoom viewport (gap #11, best-in-class roadmap) — extracted
+// from this file's own former _attachPanZoom, see pan_zoom.js's header.
+const { attachPanZoom } =
+  await import(`./pan_zoom.js${new URL(import.meta.url).search}`);
 const { makeStackXform, mapXform, imageAr, fabricWorldRooms, mapFracToMetres,
-        metresToMapFrac, placementFromColumns, placementStageAffine, worldGauge } =
+        metresToMapFrac, placementFromColumns, placementStageAffine, worldGauge,
+        nearestPointOnPolyline, splitPolylineAtTwoPositions } =
   await import(`./stack_transform.js${new URL(import.meta.url).search}`);
 // THE fabric frame — the Lights tab inverts drags through the exact function
 // the renderer draws with, so the two cannot disagree.
@@ -30,6 +35,10 @@ const { LIGHT_SHAPES, deriveLightShape } =
 const { hasScale: _wizHasScale, hasRooms: _wizHasRooms, hasReceivers: _wizHasReceivers,
         undrawnAreaNames: _wizUndrawnAreas } =
   await import(`./setup_status.js${new URL(import.meta.url).search}`);
+// What-if scanner placement (gap #9, best-in-class roadmap) — pure scoring,
+// see its own header for why this isn't a duplicate of anything else here.
+const { whatIfDelta } =
+  await import(`./whatif_placement.js${new URL(import.meta.url).search}`);
 
 // ── Maps View ────────────────────────────────────────────────────────────────
 //
@@ -1490,7 +1499,8 @@ function _edit(ctx, map, allMaps){
       const pts = (b.points_m || []).map(p => metresToMapFrac(tf, Number(p[0]), Number(p[1]))).filter(Boolean);
       if (pts.length < 2) continue;
       out.push({ id: b.id, name: b.name || "", material: b.material || "custom",
-                 attenuation_dbm: b.attenuation_dbm ?? 6, points: pts });
+                 attenuation_dbm: b.attenuation_dbm ?? 6, points: pts,
+                 linked_entity_id: b.linked_entity_id || null });
     }
     return out;
   };
@@ -1511,6 +1521,71 @@ function _edit(ctx, map, allMaps){
       await ctx.actions.callWS({ type: "padspan_bright/fabric_rf_barrier_remove", barrier_id: id });
       await ctx.actions.modelRefresh();
     } catch (e) { ctx.toast("Could not remove wall: " + (e.message || e), true); }
+  };
+
+  // ── Door/window barrier project, step 3: mark a door/window on a wall ──────
+  // Authoring a door means carving a short section out of an EXISTING wall's
+  // own polyline (docs/IDEA_DOOR_WINDOW_BARRIERS.md) — the two clicks this
+  // collects (see the stage click handler below) snap onto that wall via
+  // nearestPointOnPolyline and get cut with splitPolylineAtTwoPositions
+  // (stack_transform.js); this function turns the resulting pieces into real
+  // barrier entries. Whichever real remaining piece exists first (before,
+  // then after) keeps the ORIGINAL barrier's own id — anything already
+  // pointing at this wall (a room boundary edge, say) should keep resolving
+  // to something real rather than have its id vanish out from under it. The
+  // door itself only inherits that id when nothing survives (the section
+  // spans the whole original wall) — otherwise it is a genuinely new barrier.
+  const _commitDoorMark = async (barId, entityId, material) => {
+    const pts2 = ctx.state.maps._doorMarkPts;
+    if (!pts2 || pts2.length !== 2) return;
+    const bar = _fabricWallsHere().find(b => b.id === barId);
+    if (!bar) { ctx.toast("That wall no longer exists.", true); return; }
+    const split = splitPolylineAtTwoPositions(bar.points, pts2[0], pts2[1]);
+    if (!split.middle) { ctx.toast("Pick two different points on the wall.", true); return; }
+    const tf = _wallTx();
+    if (!tf) return;
+    const toMetres = (fracPts) => fracPts.map(p => mapFracToMetres(tf, clamp01(p[0]), clamp01(p[1])))
+      .map(q => [Math.round(q[0] * 1000) / 1000, Math.round(q[1] * 1000) / 1000]);
+    const fid = _wallFloor();
+    const atten = _MAT_ATTEN[material] ?? bar.attenuation_dbm ?? 6;
+    const setBarrier = (barrier) => ctx.actions.callWS({ type: "padspan_bright/fabric_rf_barrier_set", barrier });
+    try {
+      let doorId = null;
+      if (split.before) {
+        await setBarrier({ id: barId, name: bar.name, material: bar.material,
+          attenuation_dbm: bar.attenuation_dbm, floor_id: fid, points_m: toMetres(split.before) });
+        const r = await setBarrier({ name: `Door — ${bar.name || "Wall"}`, material, attenuation_dbm: atten,
+          floor_id: fid, points_m: toMetres(split.middle), linked_entity_id: entityId });
+        doorId = r && r.barrier ? r.barrier.id : null;
+        if (split.after) {
+          await setBarrier({ name: `${bar.name || "Wall"} (2)`, material: bar.material,
+            attenuation_dbm: bar.attenuation_dbm, floor_id: fid, points_m: toMetres(split.after) });
+        }
+      } else if (split.after) {
+        await setBarrier({ id: barId, name: bar.name, material: bar.material,
+          attenuation_dbm: bar.attenuation_dbm, floor_id: fid, points_m: toMetres(split.after) });
+        const r = await setBarrier({ name: `Door — ${bar.name || "Wall"}`, material, attenuation_dbm: atten,
+          floor_id: fid, points_m: toMetres(split.middle), linked_entity_id: entityId });
+        doorId = r && r.barrier ? r.barrier.id : null;
+      } else {
+        await setBarrier({ id: barId, name: `Door — ${bar.name || "Wall"}`, material, attenuation_dbm: atten,
+          floor_id: fid, points_m: toMetres(split.middle), linked_entity_id: entityId });
+        doorId = barId;
+      }
+      await ctx.actions.modelRefresh();
+      ctx.state.maps._doorMarkBarrierId = null;
+      ctx.state.maps._doorMarkPts = null;
+      if (doorId) ctx.state.maps._selectedBarrierId = doorId;
+      ctx.toast(`Door/window marked on "${bar.name || "wall"}".`);
+    } catch (e) {
+      ctx.toast("Could not mark the door: " + (e.message || e), true);
+    }
+    renderAll(); renderTools();
+  };
+  const _cancelDoorMark = () => {
+    ctx.state.maps._doorMarkBarrierId = null;
+    ctx.state.maps._doorMarkPts = null;
+    renderAll(); renderTools();
   };
 
   // --- Right panel (tools) ---
@@ -1660,15 +1735,34 @@ function _edit(ctx, map, allMaps){
       svg.appendChild(bLine);
       // Label at midpoint
       if(bar.points.length >= 2){
-        const midI = Math.floor(bar.points.length / 2);
+        const loI = Math.floor((bar.points.length - 1) / 2);
+        const hiI = Math.ceil((bar.points.length - 1) / 2);
+        const midX = (bar.points[loI][0] + bar.points[hiI][0]) / 2;
+        const midY = (bar.points[loI][1] + bar.points[hiI][1]) / 2;
         const blab = document.createElementNS("http://www.w3.org/2000/svg","text");
-        blab.setAttribute("x", clamp01(bar.points[midI][0]));
-        blab.setAttribute("y", clamp01(bar.points[midI][1] - 0.02));
+        blab.setAttribute("x", clamp01(midX));
+        blab.setAttribute("y", clamp01(midY - 0.02));
         blab.setAttribute("font-size","0.025");
         blab.setAttribute("text-anchor","middle");
         blab.setAttribute("fill", bc);
         blab.textContent = bar.material === "open" ? "Open (Loft)" : (bar.material||"metal") + " (" + (bar.attenuation_dbm||12) + "dB)";
         svg.appendChild(blab);
+      }
+    }
+
+    // Door/window marking: the two points picked so far, snapped onto the
+    // wall being marked. Purple, same colour the Lights map's own barrier
+    // endpoint dots will use once a door is live (docs/
+    // IDEA_DOOR_WINDOW_BARRIERS.md's step 5) — one visual language for
+    // "here is where a door is" end to end.
+    if(ctx.state.maps._doorMarkBarrierId && ctx.state.maps._doorMarkPts){
+      for(const p of ctx.state.maps._doorMarkPts){
+        const dot = document.createElementNS("http://www.w3.org/2000/svg","circle");
+        dot.setAttribute("cx", clamp01(p.x)); dot.setAttribute("cy", clamp01(p.y));
+        dot.setAttribute("r", "0.008"); dot.setAttribute("fill", "#a855f7");
+        dot.setAttribute("stroke", "white"); dot.setAttribute("stroke-width", "0.0015");
+        dot.style.pointerEvents = "none";
+        svg.appendChild(dot);
       }
     }
 
@@ -1981,6 +2075,92 @@ function _edit(ctx, map, allMaps){
             ? "Click on the map to start drawing a wall. It is stored in metres in the fabric the moment you finish."
             : "Measure this map first (Measure tool): walls are stored in metres, and this map has no scale yet.")));
 
+      // Door/window marking (docs/IDEA_DOOR_WINDOW_BARRIERS.md, step 3):
+      // active only while ctx.state.maps._doorMarkBarrierId is set (a
+      // per-barrier "Add door/window" button below arms it). Two clicks on
+      // the wall pick the section; once both are down, this becomes the
+      // confirmation panel — pick the linked sensor and the door's own
+      // material, then commit the split.
+      if(ctx.state.maps._doorMarkBarrierId){
+        const dmBar = _fabricWallsHere().find(b => b.id === ctx.state.maps._doorMarkBarrierId);
+        const dmPts = ctx.state.maps._doorMarkPts || [];
+        const panel = el("div",{style:"margin-top:12px;padding:10px;border:1px solid #7c3aed;border-radius:8px;background:#1a1030"});
+        panel.appendChild(el("div",{style:"font-size:12px;font-weight:600;color:#c4b5fd"},
+          `Marking a door/window on "${(dmBar && dmBar.name) || "wall"}"`));
+        if(!dmBar){
+          panel.appendChild(el("div",{class:"muted",style:"font-size:11px;margin-top:6px"}, "That wall no longer exists."));
+          panel.appendChild(el("button",{class:"btn inline",style:"margin-top:8px",onclick:_cancelDoorMark},"Close"));
+        } else if(dmPts.length < 2){
+          panel.appendChild(el("div",{class:"muted",style:"font-size:11px;margin-top:6px"},
+            `Click ${dmPts.length===0?"two points":"one more point"} on this wall — the opening's own start and end. ${dmPts.length}/2 picked.`));
+          panel.appendChild(el("button",{class:"btn inline",style:"margin-top:8px",onclick:_cancelDoorMark},"Cancel"));
+        } else {
+          // Entity picker: every binary_sensor.* whose device_class is door
+          // or window — the exact admission gate step 1 gave these entities
+          // in Mapping → Lights, reused here so the two surfaces can never
+          // disagree about which entities qualify.
+          const states = (ctx.hass && ctx.hass.states) || {};
+          const candidates = Object.keys(states)
+            .filter(eid => eid.startsWith("binary_sensor.")
+              && ["door","window"].includes(states[eid].attributes?.device_class))
+            .sort((a,b) => (states[a].attributes?.friendly_name||a).localeCompare(states[b].attributes?.friendly_name||b));
+          const entSel = document.createElement("select");
+          entSel.className = "select";
+          if(!candidates.length){
+            const o = document.createElement("option"); o.value=""; o.textContent="No door/window sensors found";
+            entSel.appendChild(o); entSel.disabled = true;
+          } else {
+            const placeholder = document.createElement("option");
+            placeholder.value=""; placeholder.textContent="Choose a door/window sensor…";
+            entSel.appendChild(placeholder);
+            for(const eid of candidates){
+              const o = document.createElement("option");
+              o.value = eid; o.textContent = states[eid].attributes?.friendly_name || eid;
+              entSel.appendChild(o);
+            }
+          }
+          entSel.value = ctx.state.maps._doorMarkEntity || "";
+          entSel.addEventListener("change", ()=>{ ctx.state.maps._doorMarkEntity = entSel.value; renderTools(); });
+          panel.appendChild(el("div",{style:"margin-top:8px"},[
+            el("div",{class:"muted",style:"font-size:12px;margin-bottom:4px"}, "Linked sensor"),
+            entSel,
+          ]));
+
+          const dmMatSel = document.createElement("select");
+          dmMatSel.className = "select";
+          for(const [mat, atten] of [["metal",12],["concrete",8],["brick",4],["custom",6],["open",0]]){
+            const o = document.createElement("option");
+            o.value = mat; o.textContent = `${mat.charAt(0).toUpperCase()+mat.slice(1)} (${atten} dB)`;
+            dmMatSel.appendChild(o);
+          }
+          // Defaults to the PARENT wall's own material — a door cut into a
+          // metal wall is presumably steel too, matching the physical
+          // reality Garry described ("a steel door... registers... as a
+          // radio blocking wall"); still freely overridable per door.
+          dmMatSel.value = ctx.state.maps._doorMarkMaterial || (dmBar && dmBar.material) || "metal";
+          dmMatSel.addEventListener("change", ()=>{ ctx.state.maps._doorMarkMaterial = dmMatSel.value; });
+          panel.appendChild(el("div",{style:"margin-top:8px"},[
+            el("div",{class:"muted",style:"font-size:12px;margin-bottom:4px"}, "Door/window material"),
+            dmMatSel,
+          ]));
+
+          const createBtn = el("button",{class:"btn inline primary", style:"margin-top:10px",
+            onclick: async ()=>{
+              const entityId = ctx.state.maps._doorMarkEntity;
+              if(!entityId){ ctx.toast("Choose a door/window sensor first.", true); return; }
+              await _commitDoorMark(dmBar.id, entityId, dmMatSel.value);
+              ctx.state.maps._doorMarkEntity = null;
+              ctx.state.maps._doorMarkMaterial = null;
+            }}, "Create door/window");
+          const redoBtn = el("button",{class:"btn inline", style:"margin-top:10px;margin-left:8px",
+            onclick: ()=>{ ctx.state.maps._doorMarkPts = []; renderAll(); renderTools(); }}, "Pick again");
+          const cancelBtn = el("button",{class:"btn inline", style:"margin-top:10px;margin-left:8px",
+            onclick:_cancelDoorMark}, "Cancel");
+          panel.appendChild(el("div",{},[createBtn, redoBtn, cancelBtn]));
+        }
+        right.appendChild(panel);
+      }
+
       // The fabric's walls on this floor
       const bList = _fabricWallsHere();
       if(bList.length){
@@ -2002,10 +2182,32 @@ function _edit(ctx, map, allMaps){
           const row = el("div",{style:`display:flex;align-items:center;gap:6px;padding:5px 8px;border:1px solid ${isSel?"#52b788":"#1b3526"};border-radius:6px;background:${isSel?"#0f1f16":"#0a150e"};margin-bottom:4px;cursor:pointer`});
           row.addEventListener("click", ()=>{ ctx.state.maps._selectedBarrierId = bar.id; renderAll(); renderTools(); });
           row.appendChild(el("span",{style:`width:10px;height:3px;background:${bc};flex-shrink:0;border-radius:1px`}));
+          // A door/window's own linked sensor, shown by its friendly name
+          // when HA has it, else the raw entity_id rather than nothing —
+          // "Verify before asserting": never silently swallow a linked
+          // entity that just hasn't loaded yet.
+          const linkedName = bar.linked_entity_id
+            ? ((ctx.hass && ctx.hass.states[bar.linked_entity_id]?.attributes?.friendly_name) || bar.linked_entity_id)
+            : null;
           row.appendChild(el("div",{style:"flex:1"},[
             el("div",{style:"font-size:12px;font-weight:600"}, bar.name || `Barrier ${bi+1}`),
             el("div",{class:"muted",style:"font-size:10px"}, bar.material === "open" ? `Open (Loft) · ${(bar.points||[]).length} pts` : `${bar.material} · ${bar.attenuation_dbm}dB · ${(bar.points||[]).length} pts`),
+            linkedName ? el("div",{style:"font-size:10px;color:#c4b5fd;margin-top:2px"}, `🚪 ${linkedName}`) : null,
           ]));
+          if(!bar.linked_entity_id){
+            const doorBtn = el("button",{class:"btn tiny"},"Door");
+            doorBtn.title = "Mark a door/window on this wall";
+            doorBtn.addEventListener("click", (ev)=>{
+              ev.stopPropagation();
+              ctx.state.maps._selectedBarrierId = bar.id;
+              ctx.state.maps._doorMarkBarrierId = bar.id;
+              ctx.state.maps._doorMarkPts = [];
+              ctx.state.maps._doorMarkEntity = null;
+              ctx.state.maps._doorMarkMaterial = null;
+              renderAll(); renderTools();
+            });
+            row.appendChild(doorBtn);
+          }
           row.appendChild(delBtn);
           layersDiv.appendChild(row);
         }
@@ -2426,6 +2628,22 @@ function _edit(ctx, map, allMaps){
   });
 
   stage.addEventListener("click", (ev)=>{
+    // Door/window marking: two clicks, each snapped onto the wall being
+    // marked (never onto raw cursor position — a door's endpoints must lie
+    // exactly on the line it is carved from).
+    if(ctx.state.maps._doorMarkBarrierId){
+      const bar = _fabricWallsHere().find(b => b.id === ctx.state.maps._doorMarkBarrierId);
+      if(!bar){ ctx.state.maps._doorMarkBarrierId = null; ctx.state.maps._doorMarkPts = null; return; }
+      const rect = overlay.getBoundingClientRect();
+      const x = clamp01((ev.clientX - rect.left) / rect.width);
+      const y = clamp01((ev.clientY - rect.top) / rect.height);
+      const snapped = nearestPointOnPolyline(bar.points, x, y);
+      if(!snapped) return;
+      if(!ctx.state.maps._doorMarkPts) ctx.state.maps._doorMarkPts = [];
+      if(ctx.state.maps._doorMarkPts.length < 2) ctx.state.maps._doorMarkPts.push(snapped);
+      renderAll(); renderTools();
+      return;
+    }
     // Measure mode: collect 2 points (minimal DOM update, no full re-render)
     if(ctx.state.maps._mode==="measure"){
       const rect = overlay.getBoundingClientRect();
@@ -2805,7 +3023,7 @@ function _libraryThumb(m, ctx, reco){
   const ih = m.image?.height || 600;
   const ar = ih / iw;
   const TW = 96;
-  const TH = Math.max(48, Math.round(TW * ar));
+  const TH = Math.max(48, Math.min(150, Math.round(TW * ar)));
 
   const wrap = document.createElement("div");
   wrap.style.cssText = `position:relative;width:${TW}px;height:${TH}px;flex-shrink:0;`
@@ -3712,7 +3930,7 @@ const BRIGHT_PRO_MANUAL = [
       },
       {
         "heading": "What the marker colours mean",
-        "body": "Marker outlines use the same colours on the map and in the light list. Purple is a WLED or other effect-capable strip. Blue is an ESPHome partition — one physical strip split into several zones, each with its own colour. Green is a fan; tap its code, or press and hold, to open its controls. Depending on the fan, those controls can include speed, presets, oscillation and direction.\n\nMotion sensors are also outlined in blue and pulse while triggered. After a sensor goes quiet, a slower ring shows roughly how long ago it last tripped: blue for the first five minutes, violet at five minutes, magenta at 20, red at 40, orange at 65, yellow at 90, and green from two hours until the ring disappears at six hours.\n\nTemperature sensors are outlined in orange. A placed sensor shows its reading as large digits while that reading is less than an hour old. If the reading is older, or the sensor has not been placed, the marker shows its code instead.",
+        "body": "Marker outlines use the same colours on the map and in the light list. Purple is a WLED or other effect-capable strip. Blue is an ESPHome partition — one physical strip split into several zones, each with its own colour. Green is a fan; tap its code, or press and hold, to open its controls. Depending on the fan, those controls can include speed, presets, oscillation and direction.\n\nMotion sensors are also outlined in blue, with a pulsing ring underneath that shows how long it has been since the sensor last changed state — whether it is currently tripped or has gone quiet: blue for the first five minutes, violet at five minutes, magenta at 20, red at 40, orange at 65, yellow at 90, and green from two hours until the ring disappears at six hours. A sensor that stays tripped for a long time sweeps through the same stages a quiet one does — it is one clock either way, so two sensors with different hardware hold-times still read the same way at the same elapsed time. Past six hours the ring disappears even if the sensor is still reporting tripped.\n\nTemperature sensors are outlined in orange. A placed sensor shows its reading as large digits while that reading is less than an hour old. If the reading is older, or the sensor has not been placed, the marker shows its code instead.",
         "steps": [],
         "notes": [
           "Motion and temperature sensors are read-only on the map — there's nothing to tap to switch them."
@@ -6334,6 +6552,8 @@ function _stackIsoSVG(maps, ctx, levelOptions, focusLevel=null, floorGap=200, ho
     s += `</svg>`; return s;
   }
 
+  // slabWZ is chosen so slabWZ*FLOOR_GAP cancels to a constant ~10px on-screen
+  // slab thickness, independent of the user's Floor Gap/Spacing slider value (60-340).
   const slabWZ = 10/FLOOR_GAP;
 
   for(const [z, group] of [...byLevel.entries()].sort((a,b)=>a[0]-b[0])){
@@ -6632,90 +6852,13 @@ function _roomGeomBBoxM(roomGeoms) {
 // clustered around its room's centre otherwise. Pro adds: an "Add to Room"
 // picker for unplaced lights, drag-to-move (against the currently active
 // map), a shape/color/rotation inspector on the selected pin, and Save.
-// Vanilla-JS port of purelive.js's MapViewport (same math, same UX): wheel
-// zoom, drag pan, pinch zoom, double-click/tap reset. Pure Live's version is
-// a Preact hook-based component; this reimplements the same event-handling
-// logic imperatively for maps.js's plain-DOM rendering style. `inner` must
-// be an absolutely-positioned div filling `viewport` (transform-origin 0 0);
-// `viewport` should have position:relative + overflow:hidden.
-function _attachPanZoom(viewport, inner) {
-  const MIN_SCALE = 0.3, MAX_SCALE = 5;
-  const s = { scale: 1, tx: 0, ty: 0, dragging: false, startX: 0, startY: 0, startTx: 0, startTy: 0, pinchDist: 0, pinchScale: 1 };
-  const apply = () => { inner.style.transform = `translate(${s.tx}px, ${s.ty}px) scale(${s.scale})`; };
-  const zoomAt = (cx, cy, factor) => {
-    const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, s.scale * factor));
-    const ratio = newScale / s.scale;
-    // The zoom-at-cursor fixed-point math assumes cursor coordinates
-    // relative to the inner element's own (untransformed) layout origin —
-    // inner is flex-centred inside the viewport, so subtract its layout
-    // offset. Without this, every zoom step drifts the content toward a
-    // corner and it quickly flies off screen.
-    const ox = inner.offsetLeft, oy = inner.offsetTop;
-    const px = cx - ox, py = cy - oy;
-    s.tx = px - ratio * (px - s.tx);
-    s.ty = py - ratio * (py - s.ty);
-    s.scale = newScale;
-    apply();
-  };
-  const reset = () => { s.scale = 1; s.tx = 0; s.ty = 0; apply(); };
-  // A light pin handles its own drag (_makeDraggable); the viewport's pan
-  // must not also fire for that same mousedown, or the pin and the whole
-  // canvas would both move at once.
-  const isExcluded = (t) => t.closest && t.closest("button,input,select,a,[data-light-pin],[data-room-handle]");
-
-  viewport.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const r = viewport.getBoundingClientRect();
-    zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.12 : 0.89);
-  }, { passive: false });
-
-  viewport.addEventListener("mousedown", (e) => {
-    if (e.button !== 0 || isExcluded(e.target)) return;
-    s.dragging = true; s.startX = e.clientX; s.startY = e.clientY; s.startTx = s.tx; s.startTy = s.ty;
-    viewport.style.cursor = "grabbing";
-  });
-  window.addEventListener("mousemove", (e) => {
-    if (!s.dragging) return;
-    s.tx = s.startTx + (e.clientX - s.startX);
-    s.ty = s.startTy + (e.clientY - s.startY);
-    apply();
-  });
-  window.addEventListener("mouseup", () => { s.dragging = false; viewport.style.cursor = "grab"; });
-
-  viewport.addEventListener("touchstart", (e) => {
-    if (e.touches.length === 1) {
-      if (isExcluded(e.target)) return;
-      s.dragging = true; s.startX = e.touches[0].clientX; s.startY = e.touches[0].clientY; s.startTx = s.tx; s.startTy = s.ty;
-    } else if (e.touches.length === 2) {
-      s.dragging = false;
-      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
-      s.pinchDist = Math.sqrt(dx * dx + dy * dy); s.pinchScale = s.scale;
-    }
-  }, { passive: false });
-  viewport.addEventListener("touchmove", (e) => {
-    e.preventDefault();
-    if (e.touches.length === 1 && s.dragging) {
-      s.tx = s.startTx + (e.touches[0].clientX - s.startX);
-      s.ty = s.startTy + (e.touches[0].clientY - s.startY);
-      apply();
-    } else if (e.touches.length === 2 && s.pinchDist > 0) {
-      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, s.pinchScale * (dist / s.pinchDist)));
-      const r = viewport.getBoundingClientRect();
-      const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
-      const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
-      const ratio = newScale / s.scale;
-      s.tx = cx - ratio * (cx - s.tx); s.ty = cy - ratio * (cy - s.ty); s.scale = newScale;
-      apply();
-    }
-  }, { passive: false });
-  viewport.addEventListener("touchend", () => { s.dragging = false; s.pinchDist = 0; });
-
-  viewport.addEventListener("dblclick", (e) => { if (!isExcluded(e.target)) reset(); });
-
-  return { reset };
-}
+// Pan/zoom (wheel, drag, pinch, dblclick-reset, arrow/+/-/0 keys) is
+// attachPanZoom, shared from pan_zoom.js (gap #11, best-in-class roadmap)
+// — this file's own former _attachPanZoom, extracted so Overview's iso map
+// and Calibration's Pin & Listen can use the identical implementation
+// instead of two more hand-copies. `inner` must be an absolutely-
+// positioned div filling `viewport` (transform-origin 0 0); `viewport`
+// should have position:relative + overflow:hidden.
 
 
 // ─── Lights tab — the builder for the Lights sidebar's map ────────────────
@@ -7203,13 +7346,24 @@ function _wireLightsPicker(ctx, isoDiv, svg, o, toVB) {
 
 function _wireTransformHandles(ctx, svg, g, eid, frame, o, toVB) {
   const NS = "http://www.w3.org/2000/svg";
-  // The code label is drawn at the fixture's exact centre and is never scaled
-  // or rotated, so it is the reliable anchor. The group's bounding box is not:
-  // it grows with the scaled outline and with the label's own box, so handles
-  // drifted off-centre exactly when the fixture was largest.
-  let cx, cy;
-  const lblEl = g.querySelector("text");
-  if (lblEl) { cx = Number(lblEl.getAttribute("x")); cy = Number(lblEl.getAttribute("y")); }
+  // data-cx/data-cy — the fixture's exact drawn centre, set on the marker
+  // group itself and never scaled, rotated, or removed by any display
+  // option — is the reliable anchor, the SAME attribute the plain-drag
+  // path (above, in the caller) already anchors on. The code label used to
+  // be tried first here, on the theory that it's centred and unscaled too
+  // — true, but it stops existing at all once "Hide device codes" is on
+  // (Garry, 2026-09-08), which silently broke every Transform handle's
+  // position the moment that toggle shipped. Kept as a fallback, in case a
+  // future marker kind is ever missing data-cx/cy; the group's bounding
+  // box is the last resort — it grows with the scaled outline and the
+  // label's own box, so handles drifted off-centre exactly when the
+  // fixture was largest.
+  let cx = Number(g.getAttribute("data-cx"));
+  let cy = Number(g.getAttribute("data-cy"));
+  if (!Number.isFinite(cx) || !Number.isFinite(cy)) {
+    const lblEl = g.querySelector("text");
+    if (lblEl) { cx = Number(lblEl.getAttribute("x")); cy = Number(lblEl.getAttribute("y")); }
+  }
   if (!Number.isFinite(cx) || !Number.isFinite(cy)) {
     try { const bb = g.getBBox(); cx = bb.x + bb.width / 2; cy = bb.y + bb.height / 2; }
     catch (_) { return; }
@@ -7531,7 +7685,7 @@ function _lightsTab(ctx, maps, active) {
   const proTier = String(tier || "").toLowerCase() === "pro";
   const typeOverrides = (ctx.state.settings?.light_type_overrides && typeof ctx.state.settings.light_type_overrides === "object")
     ? ctx.state.settings.light_type_overrides : {};
-  const lights = gatherLights(ctx.hass?.states || {}, reg.areaMap, shapeOverrides, tier, reg.platformMap, typeOverrides, reg.pairMap);
+  const lights = gatherLights(ctx.hass?.states || {}, reg.areaMap, shapeOverrides, tier, reg.platformMap, typeOverrides, reg.pairMap, reg.manufacturerMap);
 
   // Preview-as-panel: the exact sidebar interaction model, in place, on the
   // same camera — so "what will the household see" is one toggle away
@@ -7614,13 +7768,19 @@ function _lightsTab(ctx, maps, active) {
     ? !!ctx.state.settings?.lights_hide_untouched
     : !!mapState._lightsHideUntouched;
   const untouchedCount = lights.filter(l => !lightIsTouched(l, shapeOverrides, placements)).length;
+  // "Hide device codes" (Garry, 2026-09-08) — same draft-then-persist shape
+  // as hideUntouched above.
+  const hideDeviceCodes = mapState._lightsHideDeviceCodes === undefined
+    ? !!ctx.state.settings?.lights_hide_device_codes
+    : !!mapState._lightsHideDeviceCodes;
 
   const toggle = async (eid) => {
     if (!ctx.hass) return;
-    // Service domain is the entity's own (light / fan); a motion sensor is
-    // read-only — same rules as the sidebar. So is a temperature sensor.*.
+    // Service domain is the entity's own (light / fan); a binary_sensor —
+    // motion or door/window — is read-only, same rules as the sidebar. So
+    // is a temperature sensor.*.
     const domain = String(eid).split(".")[0];
-    if (domain === "binary_sensor") { ctx.toast("Motion sensors are read-only"); return; }
+    if (domain === "binary_sensor") { ctx.toast("Sensors are read-only"); return; }
     if (domain === "sensor") { ctx.toast("Temperature sensors are read-only"); return; }
     const on = ctx.hass.states[eid]?.state === "on";
     // Optimistic, like the sidebar: the marker flips now, HA reconciles.
@@ -7648,7 +7808,8 @@ function _lightsTab(ctx, maps, active) {
   const previewApi = {
     hass: ctx.hass, lightsByEid, lights, controlsFor,
     toggle, toast: (m, e) => ctx.toast(m, e), rerender: () => ctx.actions.renderRooms(),
-    openControls: (eid) => openControlCard(ctx.hass, eid, { toast: (m, e) => ctx.toast(m, e), rerender: () => ctx.actions.renderRooms() }),
+    openControls: (eid) => openControlCard(ctx.hass, eid, { toast: (m, e) => ctx.toast(m, e), rerender: () => ctx.actions.renderRooms(),
+      ip: ctx.state._lightsRegStore?.reg?.ipMap?.[eid] || null }),
     openActivity: (eid) => openActivityCalendar(ctx.hass, eid),
     setMany: (eids, on) => setManyStates(ctx.hass, eids, on, { toast: (m, e) => ctx.toast(m, e), rerender: () => ctx.actions.renderRooms() }),
   };
@@ -7675,11 +7836,19 @@ function _lightsTab(ctx, maps, active) {
       ctx.actions.renderRooms();
     },
   }, mapState._lightsTransform ? "⬒ Transform: ON" : "⬒ Transform");
+  // A door/window is never dragged to a point (docs/IDEA_DOOR_WINDOW_BARRIERS.md
+  // — it's a section of wall, linked in Rooms), so it takes no part in any of
+  // the point-placement bookkeeping below: not the placed/unplaced checklist,
+  // not the bulk queue, not Spread or Accept-room-centres. Counting them here
+  // was exactly what made "75 placed · 80 unplaced" mean nothing (Garry,
+  // 2026-09-08) — 80 included every door/window sensor in the house, each one
+  // permanently "unplaced" because point-placement was never its own concept.
+  const placeableLights = lights.filter(l => !l.isDoor);
   // The builder's checklist: how much of the house is actually placed.
-  const nPlaced = lights.filter(l => placements[l.entity_id]).length;
-  const nApprox = lights.filter(l => placements[l.entity_id] && placements[l.entity_id].source === "auto").length;
+  const nPlaced = placeableLights.filter(l => placements[l.entity_id]).length;
+  const nApprox = placeableLights.filter(l => placements[l.entity_id] && placements[l.entity_id].source === "auto").length;
   const nNoRoom = lights.filter(l => !l.area_name).length;
-  const nUnplaced = lights.length - nPlaced;
+  const nUnplaced = placeableLights.length - nPlaced;
   const selSet = mapState._selSet || (mapState._selSet = new Set());
   const queue = mapState._placeQueue || (mapState._placeQueue = []);
   const undoSt = _undoStack(mapState);
@@ -7725,11 +7894,11 @@ function _lightsTab(ctx, maps, active) {
   // index rows (or all of them), then tap the map once per light. Or spread
   // a room's unplaced lights evenly inside its polygon in one go.
   if (paid && !preview && nUnplaced) {
-    const roomsWithUnplaced = [...new Set(lights.filter(l => l.area_name && !placements[l.entity_id]).map(l => l.area_name))].sort();
+    const roomsWithUnplaced = [...new Set(placeableLights.filter(l => l.area_name && !placements[l.entity_id]).map(l => l.area_name))].sort();
     const roomSel = document.createElement("select");
     roomSel.className = "lv-select";
     for (const r of roomsWithUnplaced) {
-      const n = lights.filter(l => l.area_name === r && !placements[l.entity_id]).length;
+      const n = placeableLights.filter(l => l.area_name === r && !placements[l.entity_id]).length;
       roomSel.appendChild(el("option", { value: r }, `${r} · ${n}`));
     }
     if (mapState._spreadRoom && roomsWithUnplaced.includes(mapState._spreadRoom)) roomSel.value = mapState._spreadRoom;
@@ -7739,7 +7908,7 @@ function _lightsTab(ctx, maps, active) {
     const spread = (room) => {
       const geo = (ctx.state.model?.room_geometry_m || {})[room];
       if (!geo || geo.type !== "poly" || !Array.isArray(geo.points_m)) { ctx.toast("That room has no polygon to spread in", true); return; }
-      const eids = lights.filter(l => l.area_name === room && !placements[l.entity_id]).map(l => l.entity_id);
+      const eids = placeableLights.filter(l => l.area_name === room && !placements[l.entity_id]).map(l => l.entity_id);
       if (!eids.length) return;
       const pts = spreadInRoom(geo.points_m, eids.length, 0.5);
       const fid = String(geo.floor_id || _floorIdForZ(ctx, frame0.levels[0] || 0, frame0));
@@ -7757,7 +7926,7 @@ function _lightsTab(ctx, maps, active) {
         title: queue.length ? "Tap the map once per queued light, in index order. Esc clears." : "Queue every unplaced light, then tap the map once per light",
         onclick: () => {
           if (queue.length) { mapState._placeQueue = []; }
-          else mapState._placeQueue = lights.filter(l => !placements[l.entity_id]).map(l => l.entity_id);
+          else mapState._placeQueue = placeableLights.filter(l => !placements[l.entity_id]).map(l => l.entity_id);
           ctx.actions.renderRooms();
         },
       }, queue.length ? `◎ ${queue.length} queued — tap the map · clear` : "◎ Queue all unplaced"),
@@ -7770,7 +7939,7 @@ function _lightsTab(ctx, maps, active) {
       el("span", { class: "lv-sep" }, ""),
       el("button", { class: "lv-act", title: "Give every unplaced light with a room its room's centre as an APPROXIMATE position (drawn with a dashed halo until moved)",
         onclick: () => {
-          const eids = lights.filter(l => l.area_name && !placements[l.entity_id]).map(l => l.entity_id);
+          const eids = placeableLights.filter(l => l.area_name && !placements[l.entity_id]).map(l => l.entity_id);
           if (!eids.length) return;
           _pushUndo(mapState, eids);
           let n = 0;
@@ -7871,6 +8040,19 @@ function _lightsTab(ctx, maps, active) {
     ctx.actions.renderRooms();
   } : null;
 
+  // Shared by onRowClick (paid, non-motion) and onSelectForPlacement (the
+  // code column, all device types): arm this light on the map.
+  const selectLightForPlacement = (l) => {
+    mapState._selLight = { eid: l.entity_id, mapId: null };
+    // Choosing FROM THE LIST is exactly when you don't yet know where a
+    // light is on the map — the locate ring is a one-shot: it fires on
+    // this render and is cleared right after (see buildLightsTable's
+    // call site below), so it does not replay on every later edit while
+    // the same light stays selected.
+    mapState._locateEid = l.entity_id;
+    ctx.actions.renderRooms();
+  };
+
   const host = {
     el,
     floors,
@@ -7909,6 +8091,20 @@ function _lightsTab(ctx, maps, active) {
       const i = queue.indexOf(eid);
       if (i >= 0) queue.splice(i, 1); else queue.push(eid);
       ctx.actions.renderRooms();
+    } : null,
+    // A door/window's "placed" is a link, not a point — the table's own Map
+    // column reads this instead of onPlaceRow/placements for l.isDoor rows.
+    doorLinkedIds: new Set((ctx.state.model?.rf_barriers_m || [])
+      .filter(b => b.linked_entity_id).map(b => b.linked_entity_id)),
+    // Jump to the one place a door/window actually gets configured (Rooms →
+    // RF Barriers) — builder only, same gate as onPlaceRow, matching the
+    // "editing stays Rooms-tab-only" decision in
+    // docs/IDEA_DOOR_WINDOW_BARRIERS.md.
+    onConfigureDoor: paid && !preview ? () => {
+      mapState._mode = "barriers";
+      mapState._selectedRxId = null;
+      mapState._drawing = null;
+      ctx.actions.setMapsTab("rooms");
     } : null,
     // Map → index: the row of the light just selected on the map scrolls
     // into view, once.
@@ -7952,6 +8148,13 @@ function _lightsTab(ctx, maps, active) {
       catch (e) { ctx.toast("Could not save the filter: " + String(e), true); }
       ctx.actions.renderRooms();
     },
+    hideDeviceCodes,
+    onHideDeviceCodes: async (v) => {
+      mapState._lightsHideDeviceCodes = v;
+      try { await ctx.actions.settingsSet({ lights_hide_device_codes: v }); }
+      catch (e) { ctx.toast("Could not save the setting: " + String(e), true); }
+      ctx.actions.renderRooms();
+    },
     // Showcase is a rendering mode, not an edit mode: it is remembered like the
     // view sliders so the map comes back the way it was left.
     showcase: mapState._lightsShowcase === undefined
@@ -7981,6 +8184,58 @@ function _lightsTab(ctx, maps, active) {
       mapState._lightsIsolux = v;
       try { await ctx.actions.settingsSet({ lights_isolux: v }); }
       catch (e) { ctx.toast("Could not save Isolux: " + String(e), true); }
+      ctx.actions.renderRooms();
+    },
+    // Automorph (Garry, 2026-09-07): same remembered-rendering-mode pattern
+    // as Showcase/Isolux above, not an edit mode — a rendering-only overlay.
+    automorph: mapState._lightsAutomorph === undefined
+      ? !!ctx.state.settings?.lights_automorph_enabled
+      : !!mapState._lightsAutomorph,
+    onAutomorph: async (v) => {
+      mapState._lightsAutomorph = v;
+      try { await ctx.actions.settingsSet({ lights_automorph_enabled: v }); }
+      catch (e) { ctx.toast("Could not save Automorph: " + String(e), true); }
+      ctx.actions.renderRooms();
+    },
+    automorphRoomPct: mapState._lightsAutomorphPct === undefined
+      ? Number(ctx.state.settings?.lights_automorph_room_pct) || 0
+      : mapState._lightsAutomorphPct,
+    onAutomorphRoomPct: async (v) => {
+      mapState._lightsAutomorphPct = v;
+      try { await ctx.actions.settingsSet({ lights_automorph_room_pct: v }); }
+      catch (e) { ctx.toast("Could not save the Automorph amount: " + String(e), true); }
+      ctx.actions.renderRooms();
+    },
+    // Slider 2 — centered at 0, same rest-position contract as room_pct's
+    // own 0: today's straight-edged aura, unchanged either direction.
+    automorphHardness: mapState._lightsAutomorphHardness === undefined
+      ? Number(ctx.state.settings?.lights_automorph_hardness) || 0
+      : mapState._lightsAutomorphHardness,
+    onAutomorphHardness: async (v) => {
+      mapState._lightsAutomorphHardness = v;
+      try { await ctx.actions.settingsSet({ lights_automorph_hardness: v }); }
+      catch (e) { ctx.toast("Could not save the Automorph hardness: " + String(e), true); }
+      ctx.actions.renderRooms();
+    },
+    // Which of several distinct visual treatments paints the same morphed
+    // ring — see automorphAuraSvg in iso_lights.js.
+    automorphStyle: mapState._lightsAutomorphStyle === undefined
+      ? (ctx.state.settings?.lights_automorph_style || "glow")
+      : mapState._lightsAutomorphStyle,
+    onAutomorphStyle: async (v) => {
+      mapState._lightsAutomorphStyle = v;
+      try { await ctx.actions.settingsSet({ lights_automorph_style: v }); }
+      catch (e) { ctx.toast("Could not save the Automorph style: " + String(e), true); }
+      ctx.actions.renderRooms();
+    },
+    // 0 = today's opacity/line-weight, 100 = thinned + faded near-invisible.
+    automorphSubtlety: mapState._lightsAutomorphSubtlety === undefined
+      ? Number(ctx.state.settings?.lights_automorph_subtlety) || 0
+      : mapState._lightsAutomorphSubtlety,
+    onAutomorphSubtlety: async (v) => {
+      mapState._lightsAutomorphSubtlety = v;
+      try { await ctx.actions.settingsSet({ lights_automorph_subtlety: v }); }
+      catch (e) { ctx.toast("Could not save the Automorph subtlety: " + String(e), true); }
       ctx.actions.renderRooms();
     },
     // Scene preview state is a view mode, deliberately NOT a setting: a
@@ -8030,15 +8285,23 @@ function _lightsTab(ctx, maps, active) {
     // A light has no owning map to look up any more — it has a position in
     // metres, or it has none and clusters in its room.
     onRowClick: (l) => {
+      // Same rule the map's own marker click already applies (wirePress in
+      // lights_map.js): motion has nothing to toggle, so a tap opens its
+      // activity history instead of the read-only refusal — a free-tier row
+      // click went straight to toggle() and never got that treatment.
+      if (l.isMotion) { openActivityCalendar(ctx.hass, l.entity_id); return; }
       if (!paid) { toggle(l.entity_id); return; }
-      mapState._selLight = { eid: l.entity_id, mapId: null };
-      // Choosing FROM THE LIST is exactly when you don't yet know where a
-      // light is on the map — the locate ring is a one-shot: it fires on
-      // this render and is cleared right after (see buildLightsTable's
-      // call site below), so it does not replay on every later edit while
-      // the same light stays selected.
-      mapState._locateEid = l.entity_id;
-      ctx.actions.renderRooms();
+      selectLightForPlacement(l);
+    },
+    // The code column's own click (buildLightsTable's onSelectForPlacement):
+    // unlike onRowClick above, this ever bypasses the motion→activity-history
+    // redirect. An already-placed motion sensor has no "Place" queue button
+    // (that only appears with no position yet) and its row click always goes
+    // to the activity calendar, so before this existed there was no way at
+    // all to re-select one for map placement (Garry, 2026-09-07).
+    onSelectForPlacement: (l) => {
+      if (!paid) { toggle(l.entity_id); return; }
+      selectLightForPlacement(l);
     },
     onToggleHidden: async (eid) => {
       // Await the round-trip: settingsSet updates ctx.state.settings from the
@@ -8060,6 +8323,32 @@ function _lightsTab(ctx, maps, active) {
       catch (e) { ctx.toast("Could not save the type override: " + String(e), true); }
       ctx.actions.renderRooms();
     } : null,
+    // "Revert to untouched" (Garry, 2026-09-06) — clears exactly what
+    // lightIsTouched checks for size/rotation/colour, staged into the SAME
+    // draft-then-Save flow every other placement edit already goes
+    // through, so it is reviewable and undoable via the existing unsaved-
+    // changes bar rather than a silent, separate write. Position is kept —
+    // "touched" was never about where a fixture is, only how it looks.
+    onRevertUntouched: async (eid) => {
+      const draft = mapState._lightsDraftM || (mapState._lightsDraftM = {});
+      const cur = draft[eid] || ((ctx.state.model || {}).light_positions_m || {})[eid];
+      if (cur && Number.isFinite(Number(cur.x_m)) && Number.isFinite(Number(cur.y_m))) {
+        draft[eid] = {
+          x_m: cur.x_m, y_m: cur.y_m, floor_id: cur.floor_id,
+          color: "#fbbf24", rotation: 0, width_cm: 0, height_cm: 0,
+          margin_cm: cur.margin_cm,
+          label: cur.label || (lightsByEid[eid] ? lightsByEid[eid].friendly_name : eid),
+          source: "manual",
+        };
+      }
+      if (proTier && typeOverrides[eid]) {
+        const next = { ...typeOverrides };
+        delete next[eid];
+        try { await ctx.actions.settingsSet({ light_type_overrides: next }); }
+        catch (e) { ctx.toast("Could not clear the type override: " + String(e), true); }
+      }
+      ctx.actions.renderRooms();
+    },
     typeOverrides,
     afterAssign: () => {
       const st = ctx.state._lightsRegStore;
@@ -8072,6 +8361,8 @@ function _lightsTab(ctx, maps, active) {
     onTableClassFilter: (cls) => { mapState._tableClassFilter = cls; ctx.actions.renderRooms(); },
     tableSort: mapState._tableSort || null,
     onTableSort: (next) => { mapState._tableSort = next; ctx.actions.renderRooms(); },
+    tableHealthFilter: !!mapState._tableHealthFilter,
+    onTableHealthFilter: (on) => { mapState._tableHealthFilter = on; ctx.actions.renderRooms(); },
   };
   const mapCardEl = buildLightsMapCard(host);
   // The drafting grid on the stage says "editing" without a word.
@@ -8303,6 +8594,28 @@ function _geomCentroid(g) {
   return [g.cx_m || 0, g.cy_m || 0];
 }
 
+// BLE-vs-motion/occupancy fusion badge for one occupancy_estimate room entry
+// (gap #14, best-in-class roadmap). `r.agreement` is computed server-side
+// (ws_occupancy.py) from evidence already gathered for the Occupancy tab;
+// this only decides how to draw it. "sensor_only" never appears without
+// SOME sensor being on/recently-motion, so it is real disagreement worth a
+// distinct colour, not a null state.
+function _occupancyBadge(r) {
+  const count = (r.people || []).length + (r.phones || 0);
+  const sensors = [r.occupancy ? "occupancy sensor" : null, r.motion ? "motion" : null].filter(Boolean).join(" + ") || "none";
+  const who = (r.people || []).join(", ") || (r.phones ? `${r.phones} unclaimed phone${r.phones === 1 ? "" : "s"}` : "nobody");
+  if (r.agreement === "agree") {
+    return { icon: "✓", color: "#52b788", count,
+      title: `BLE and sensors agree — ${who}; sensors: ${sensors}` };
+  }
+  if (r.agreement === "sensor_only") {
+    return { icon: "📡", color: "#60a5fa", count: 0,
+      title: `Sensor says occupied (${sensors}) but BLE placed nobody here` };
+  }
+  return { icon: "📶", color: "#f59e0b", count,
+    title: `BLE places ${who} here, but no occupancy/motion sensor confirms it` };
+}
+
 // Vertex-wise blend of the layouts the user trusts. Rooms present in several
 // sets are averaged point-by-point (valid because every candidate descends
 // from the SAME photo tracings, so vertex order corresponds); a room whose
@@ -8476,6 +8789,138 @@ function _roomsTab(ctx, maps) {
     card.appendChild(addRow);
   }
 
+  // ── Import a floorplan file (gap #7, best-in-class roadmap; tier 1 of 3:
+  // Sweet Home 3D today, RoomPlan JSON and image room-detection are future
+  // tiers) ─────────────────────────────────────────────────────────────
+  // Parses to a CANDIDATE layout for THIS floor — nothing is written until
+  // the user reviews and commits it via the same mechanism "Map
+  // placements"/"Blended" already use below (the truth selector further
+  // down). Not added to the blend sources: a design file is a different
+  // kind of source than an empirical measurement, not another opinion to
+  // average against the fabric.
+  {
+    const importRow = el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px" });
+    const fileInput = document.createElement("input");
+    fileInput.type = "file"; fileInput.accept = ".sh3d"; fileInput.style.display = "none";
+    const importStatus = el("span", { class: "muted", style: "font-size:11px" }, "");
+    const importBtn = el("button", { class: "btn inline" }, "📐 Import floorplan (.sh3d)");
+    importBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files && fileInput.files[0];
+      fileInput.value = "";
+      if (!file) return;
+      importStatus.textContent = "Reading…";
+      try {
+        const b64 = await new Promise((res, rej) => {
+          const fr = new FileReader();
+          fr.onload = () => res(String(fr.result).split(",")[1] || "");
+          fr.onerror = rej; fr.readAsDataURL(file);
+        });
+        importStatus.textContent = "Parsing…";
+        const parsed = await ctx.actions.wsCall("padspan_bright/floorplan_import_sh3d", { sh3d_base64: b64 });
+        if (!parsed.rooms.length) {
+          ctx.toast("No usable rooms found in that file" + (parsed.warnings.length ? ": " + parsed.warnings[0] : ""), true);
+          importStatus.textContent = "";
+          return;
+        }
+        mapState._roomsImportedRaw = parsed;
+        mapState._roomsImportedLevelId = parsed.levels.length ? parsed.levels[0].id : null;
+        mapState._roomsTruth = "imported";
+        importStatus.textContent = "";
+        ctx.toast(`Imported ${parsed.rooms.length} room(s)` + (parsed.warnings.length ? ` — ${parsed.warnings.length} note(s) below` : ""));
+        ctx.actions.renderRooms();
+      } catch (err) {
+        importStatus.textContent = "";
+        ctx.toast("Import failed: " + (err.message || err), true);
+      }
+    });
+    importRow.appendChild(importBtn);
+    importRow.appendChild(fileInput);
+    importRow.appendChild(importStatus);
+    importRow.appendChild(el("span", { class: "muted", style: "font-size:11px" },
+      "Rooms come in as a candidate for this floor — review and edit below before committing."));
+    card.appendChild(importRow);
+
+    const importedRaw = mapState._roomsImportedRaw;
+    if (importedRaw && importedRaw.levels.length > 1) {
+      const lvlRow = el("div", { style: "display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px" });
+      lvlRow.appendChild(el("span", { class: "muted", style: "font-size:11px" }, "File level for this floor:"));
+      for (const lvl of importedRaw.levels) {
+        lvlRow.appendChild(el("button", {
+          class: "btn inline" + (mapState._roomsImportedLevelId === lvl.id ? " primary" : ""),
+          style: "font-size:11px",
+          onclick: () => { mapState._roomsImportedLevelId = lvl.id; ctx.actions.renderRooms(); },
+        }, lvl.name));
+      }
+      card.appendChild(lvlRow);
+    }
+    if (importedRaw && importedRaw.warnings.length) {
+      card.appendChild(el("div", { class: "muted", style: "font-size:11px;margin-bottom:4px" },
+        "Import notes: " + importedRaw.warnings.join(" · ")));
+    }
+  }
+
+  // ── What-if scanner placement (gap #9, best-in-class roadmap) — toggle
+  // and score readout live here (top controls); the draggable ghost pin
+  // itself is added further down, alongside the real scanner pins, where
+  // bbox/pinLayer/runDrag/scanDraft/allBarriers are already in scope. A
+  // plain object (not appended yet) lets that later code populate this
+  // fixed DOM position without needing bbox etc. available this early.
+  const whatIfScore = el("div", { style: "margin:4px 0 10px" });
+  {
+    const whatIfBtn = el("button", {
+      class: "btn inline" + (mapState._whatIfGhost ? " primary" : ""),
+    }, mapState._whatIfGhost ? "🔮 What-if scanner: ON" : "🔮 What-if scanner");
+    whatIfBtn.addEventListener("click", () => {
+      if (mapState._whatIfGhost) {
+        mapState._whatIfGhost = null;
+      } else {
+        // No bbox yet at this point in render — a room centroid (or the
+        // origin, with none) is a reasonable starting drop point; the
+        // user drags it from there.
+        const anyRoom = Object.values(fabricDraft)[0];
+        const c = anyRoom && _geomCentroid(anyRoom);
+        mapState._whatIfGhost = { x_m: c ? c[0] : 0, y_m: c ? c[1] : 0 };
+      }
+      ctx.actions.renderRooms();
+    });
+    card.appendChild(el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px" }, [
+      whatIfBtn,
+      el("span", { class: "muted", style: "font-size:11px" },
+        "Drag a hypothetical scanner to see how much it would help tell adjacent rooms apart — nothing is placed until you Add it for real."),
+    ]));
+    card.appendChild(whatIfScore);
+  }
+
+  // ── BLE + motion fusion badges (gap #14, best-in-class roadmap) — a toggle
+  // rather than always-on: occupancy_estimate does real work (HA state scans,
+  // phone clustering) that costs nothing to the room-editing flow above when
+  // nobody has asked to see it. Lazy-fetched once per toggle-on, same pattern
+  // objects.js uses for lost_and_found_get — not re-fetched on every drag-
+  // triggered re-render of this tab.
+  {
+    const occBtn = el("button", {
+      class: "btn inline" + (mapState._roomsShowOccupancy ? " primary" : ""),
+    }, mapState._roomsShowOccupancy ? "👤 Occupancy: ON" : "👤 Show occupancy");
+    occBtn.addEventListener("click", () => {
+      mapState._roomsShowOccupancy = !mapState._roomsShowOccupancy;
+      if (mapState._roomsShowOccupancy) ctx.state._occupancyEstimate = undefined;
+      ctx.actions.renderRooms();
+    });
+    card.appendChild(el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px" }, [
+      occBtn,
+      el("span", { class: "muted", style: "font-size:11px" },
+        "Per-room person/phone count and whether BLE and Home Assistant's own occupancy/motion sensors agree there is someone there."),
+    ]));
+    if (mapState._roomsShowOccupancy && ctx.state._occupancyEstimate === undefined && !ctx.state._occupancyEstimateLoading) {
+      ctx.state._occupancyEstimateLoading = true;
+      ctx.actions.wsCall("padspan_bright/occupancy_estimate", {})
+        .then(res => { ctx.state._occupancyEstimate = res || null; })
+        .catch(() => { ctx.state._occupancyEstimate = null; })
+        .finally(() => { ctx.state._occupancyEstimateLoading = false; ctx.actions.renderRooms(); });
+    }
+  }
+
   // ── Draft: a scratch copy of this floor's geometry, reset on floor switch ─
   if (mapState._roomsDraftFloorId !== floorId) {
     const draft = {};
@@ -8493,6 +8938,15 @@ function _roomsTab(ctx, maps) {
     mapState._roomsScannerDraft = null;
     mapState._roomsBeaconDraft = null;
     mapState._roomsBarrierDraft = null;
+    // An imported floorplan was brought in for the floor it was imported
+    // on — a different floor's rooms are not this file's rooms just
+    // because the level-picker still points at some id from it.
+    mapState._roomsImportedRaw = null;
+    mapState._roomsImportedLevelId = null;
+    // A what-if scanner's x_m/y_m were dragged into place on THIS floor's
+    // coordinate space — meaningless (and likely outside every room) on
+    // whatever floor comes next.
+    mapState._whatIfGhost = null;
   }
 
   // ── Scanners: the other half of the fabric, edited in metres right here ──
@@ -8545,17 +8999,47 @@ function _roomsTab(ctx, maps) {
   if (floorMapsAll.length) _fetchRoomsTruth(ctx, floorId);
   const truthCache = (mapState._roomsTruthCache && mapState._roomsTruthCache.floorId === floorId)
     ? mapState._roomsTruthCache.data : null;
-  // TWO CANDIDATES, NOT THREE. The third was "Stack alignment" — the rooms
-  // as the hand-tuned stack composition drew them — and it was a real second
-  // opinion while the alignment was stored separately from the metre record.
-  // It is derived from that record now, so the two agreed to exactly 0.0 m
-  // over every map measured. Offering an owner a choice between two numbers
-  // that cannot differ is not a comparison.
+  // TWO CANDIDATES DERIVED FROM THIS HOUSE'S OWN MEASUREMENTS, NOT THREE.
+  // The third was "Stack alignment" — the rooms as the hand-tuned stack
+  // composition drew them — and it was a real second opinion while the
+  // alignment was stored separately from the metre record. It is derived
+  // from that record now, so the two agreed to exactly 0.0 m over every
+  // map measured. Offering an owner a choice between two numbers that
+  // cannot differ is not a comparison.
+  //
+  // "imported" (gap #7, best-in-class roadmap) is not a third opinion
+  // about the SAME measurements — it is an independent, externally-authored
+  // design file (Sweet Home 3D today) the owner explicitly chose to bring
+  // in, so it does not fall under that argument; see the import section
+  // above for why it also stays out of the blend sources below.
   const candidates = {
     transforms: truthCache
       ? { label: "Map placements", rooms: truthCache.transforms.rooms, stats: truthCache.transforms.stats }
       : null,
   };
+  {
+    const raw = mapState._roomsImportedRaw;
+    if (raw) {
+      const wantLevel = mapState._roomsImportedLevelId;
+      const roomsForLevel = raw.rooms.filter(r =>
+        !wantLevel || r.level_id === wantLevel || (r.level_id == null && raw.levels.length <= 1));
+      if (roomsForLevel.length) {
+        const importedRooms = {};
+        const usedNames = new Set();
+        roomsForLevel.forEach((r, i) => {
+          const base = (r.name || `Room ${i + 1}`).trim() || `Room ${i + 1}`;
+          let name = base, n = 2;
+          while (usedNames.has(name)) name = `${base} (${n++})`;
+          usedNames.add(name);
+          importedRooms[name] = { type: "poly", points_m: r.points_m };
+        });
+        candidates.imported = {
+          label: "Imported (SH3D)", rooms: importedRooms,
+          stats: { rooms: Object.keys(importedRooms).length, clusters: _roomClusterCount(Object.entries(importedRooms)) },
+        };
+      }
+    }
+  }
   // Blended layout: vertex-average of whichever sources the user trusts.
   if (!mapState._roomsBlendSources && truthCache) {
     mapState._roomsBlendSources = { fabric: true, transforms: false };
@@ -8621,7 +9105,10 @@ function _roomsTab(ctx, maps) {
   const changedRooms = Object.keys(draft).filter(_changed);
 
   // ── Truth selector — compare layouts before committing anything ────────
-  if (floorMapsAll.length) {
+  // Shows whenever there is a fabric-derived candidate (needs a map on this
+  // floor) OR an imported one (needs no map at all — a design file stands
+  // on its own).
+  if (floorMapsAll.length || candidates.imported) {
     const selRow = el("div", { style: "display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px" });
     selRow.appendChild(el("span", { class: "muted", style: "font-size:12px" }, "Layout:"));
     const statLbl = (stats) => stats
@@ -8631,6 +9118,7 @@ function _roomsTab(ctx, maps) {
     const options = [["fabric", "Fabric (saved)", fabricStats]];
     if (candidates.transforms) options.push(["transforms", "Map placements", candidates.transforms.stats]);
     if (candidates.blended) options.push(["blended", "Blended", candidates.blended.stats]);
+    if (candidates.imported) options.push(["imported", "Imported (SH3D)", candidates.imported.stats]);
     for (const [key, label, stats] of options) {
       selRow.appendChild(el("button", {
         class: "btn inline" + (truth === key ? " primary" : ""),
@@ -8816,7 +9304,7 @@ function _roomsTab(ctx, maps) {
       onclick: () => panZoom.reset(),
     }, "Reset View");
     stage.appendChild(resetBtn);
-    const panZoom = _attachPanZoom(stage, inner);
+    const panZoom = attachPanZoom(stage, inner);
 
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("class", "mapvector");
@@ -8987,6 +9475,10 @@ function _roomsTab(ctx, maps) {
     }
 
     // Room labels
+    const occByRoom = {};
+    if (mapState._roomsShowOccupancy) {
+      for (const r of (ctx.state._occupancyEstimate?.rooms || [])) occByRoom[r.room] = r;
+    }
     for (const [room, g] of geoms) {
       const [cx, cy] = _geomCentroid(g);
       pinLayer.appendChild(el("div", {
@@ -8994,6 +9486,20 @@ function _roomsTab(ctx, maps) {
           `transform:translate(-50%,-50%);color:${roomColor(room)};font-size:11px;opacity:0.75;` +
           `pointer-events:none;white-space:nowrap;font-family:system-ui,sans-serif;z-index:1`,
       }, room));
+      // BLE + motion fusion badge (gap #14, best-in-class roadmap): a room
+      // with no evidence at all (occByRoom has no entry for it) draws
+      // nothing — a blank room is not "disagreement", it is simply unwatched.
+      const occ = occByRoom[room];
+      if (occ) {
+        const badge = _occupancyBadge(occ);
+        pinLayer.appendChild(el("div", {
+          title: badge.title,
+          style: `position:absolute;left:${((cx - bbox.minX) / bbox.width * 100).toFixed(2)}%;top:${((cy - bbox.minY) / bbox.height * 100).toFixed(2)}%;` +
+            `transform:translate(-50%,10px);background:${badge.color}22;border:1px solid ${badge.color};color:${badge.color};` +
+            `font-size:10px;font-weight:700;padding:1px 6px;border-radius:9px;pointer-events:none;white-space:nowrap;` +
+            `font-family:system-ui,sans-serif;z-index:2`,
+        }, `${badge.icon} ${badge.count}`));
+      }
     }
 
     // ── Scanner pins — draggable, in metres, no photo involved ───────────
@@ -9034,6 +9540,68 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to place`,
       pin.addEventListener("touchstart", onDown, { passive: false });
       pinLayer.appendChild(pin);
       pinLayer.appendChild(cap);
+    }
+
+    // ── What-if scanner: the draggable ghost + its live score ────────────
+    // Scored against the SAME modelled-coverage physics radio_map.js's
+    // heatmap already uses (whatif_placement.js reuses its exports rather
+    // than re-deriving path-loss + wall-crossing a second time). Same-floor
+    // only — dz treated as 0 for every scanner including the ghost; a
+    // systematic height offset applied equally to every candidate would
+    // not meaningfully change a RELATIVE room-separation comparison.
+    if (mapState._whatIfGhost) {
+      const ghost = mapState._whatIfGhost;
+      const realScanners = Object.entries(scanDraft).map(([source, p]) =>
+        ({ x_m: p.x_m, y_m: p.y_m, dz: 0, source, floorDist: 0 }));
+      const wiBarriers = allBarriers.map(b => ({
+        points: (b.points_m || []).map(p => [Number(p[0]), Number(p[1])]),
+        attenuation_dbm: b.attenuation_dbm ?? 6,
+      }));
+      const wiRooms = {};
+      for (const [name, g] of Object.entries(fabricDraft)) {
+        if (g.type === "poly" && Array.isArray(g.points_m)) wiRooms[name] = { pts: g.points_m };
+      }
+      const adjacency = ctx.state.model?.room_adjacency || {};
+
+      const paintScore = () => {
+        const ghostScanner = { x_m: ghost.x_m, y_m: ghost.y_m, dz: 0, source: "__whatif_ghost__", floorDist: 0 };
+        const res = whatIfDelta(wiRooms, adjacency, realScanners, ghostScanner, wiBarriers);
+        const sign = res.delta > 0 ? "+" : "";
+        const color = res.delta > 0.05 ? "#52b788" : (res.delta < -0.05 ? "#f87171" : "#94a3b8");
+        whatIfScore.innerHTML = "";
+        whatIfScore.appendChild(el("div", {
+          style: "font-size:12px;padding:8px;background:#0a150e;border:1px solid #2d5a3d;border-radius:8px",
+        }, [
+          el("span", { style: "color:#94a3b8" }, "Room-discrimination score: "),
+          el("span", {}, `${res.baseline} dB → ${res.withGhost} dB `),
+          el("span", { style: `color:${color};font-weight:700` }, `(${sign}${res.delta} dB)`),
+          !res.pairs.length ? el("div", { class: "muted", style: "font-size:11px;margin-top:2px" },
+            "No adjacent-room pairs on this floor to score.") : null,
+        ].filter(Boolean)));
+      };
+      paintScore();
+
+      const gx = ((ghost.x_m - bbox.minX) / bbox.width * 100).toFixed(3);
+      const gy = ((ghost.y_m - bbox.minY) / bbox.height * 100).toFixed(3);
+      const ghostPin = el("div", {
+        title: `What-if scanner\n${ghost.x_m.toFixed(2)}, ${ghost.y_m.toFixed(2)} m — drag to test a position`,
+        style: `position:absolute;left:${gx}%;top:${gy}%;transform:translate(-50%,-50%);` +
+          `width:18px;height:18px;border-radius:50%;background:transparent;` +
+          `border:2px dashed #c084fc;box-shadow:0 0 8px #c084fc99;` +
+          `pointer-events:auto;cursor:grab;z-index:5;touch-action:none`,
+      });
+      const startGX = ghost.x_m, startGY = ghost.y_m;
+      const onGhostDown = (ev) => runDrag(ev, (dxm, dym) => {
+        ghost.x_m = Math.round((startGX + dxm) * 1000) / 1000;
+        ghost.y_m = Math.round((startGY + dym) * 1000) / 1000;
+        const lx = ((ghost.x_m - bbox.minX) / bbox.width * 100).toFixed(3);
+        const ly = ((ghost.y_m - bbox.minY) / bbox.height * 100).toFixed(3);
+        ghostPin.style.left = `${lx}%`; ghostPin.style.top = `${ly}%`;
+        paintScore();
+      });
+      ghostPin.addEventListener("mousedown", onGhostDown);
+      ghostPin.addEventListener("touchstart", onGhostDown, { passive: false });
+      pinLayer.appendChild(ghostPin);
     }
 
     // ── Barriers — draggable walls, in metres ────────────────────────────

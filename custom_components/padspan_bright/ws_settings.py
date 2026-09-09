@@ -60,6 +60,9 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("kalman_q"): vol.Coerce(float),
         vol.Optional("kalman_r"): vol.Coerce(float),
         vol.Optional("assumed_device_height_m"): vol.Coerce(float),
+        vol.Optional("fabric_origin_lat"): vol.Any(vol.Coerce(float), None),
+        vol.Optional("fabric_origin_lon"): vol.Any(vol.Coerce(float), None),
+        vol.Optional("fabric_bearing_deg"): vol.Coerce(float),
         vol.Optional("hidden_map_ids"): list,
         vol.Optional("followed_addrs"): list,
         vol.Optional("health_reminder_enabled"): bool,
@@ -73,8 +76,14 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("lights_hidden"): list,
         vol.Optional("lights_showcase"): bool,
         vol.Optional("lights_hide_untouched"): bool,
+        vol.Optional("lights_hide_device_codes"): bool,
         vol.Optional("lights_fit_rooms"): bool,
         vol.Optional("lights_isolux"): bool,
+        vol.Optional("lights_automorph_enabled"): bool,
+        vol.Optional("lights_automorph_room_pct"): vol.Coerce(int),
+        vol.Optional("lights_automorph_hardness"): vol.Coerce(int),
+        vol.Optional("lights_automorph_style"): str,
+        vol.Optional("lights_automorph_subtlety"): vol.Coerce(int),
         vol.Optional("adaptive_learning_enabled"): bool,
         vol.Optional("adaptive_floor_detection"): bool,
         vol.Optional("signal_loss_linger_s"): vol.Coerce(int),
@@ -106,6 +115,7 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("overview_persistent_pins"): bool,
         vol.Optional("overview_show_walls"): bool,
         vol.Optional("overview_show_outdoor"): bool,
+        vol.Optional("overview_show_trails"): bool,
         vol.Optional("object_history_days"): vol.Coerce(int),
         vol.Optional("scanner_offsets"): dict,
         vol.Optional("excluded_scanners"): list,
@@ -207,6 +217,14 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             payload["kalman_r"] = max(0.5, min(50.0, float(msg["kalman_r"])))
         if "assumed_device_height_m" in msg:
             payload["assumed_device_height_m"] = max(0.0, min(3.0, float(msg["assumed_device_height_m"])))
+        if "fabric_origin_lat" in msg:
+            _lat = msg["fabric_origin_lat"]
+            payload["fabric_origin_lat"] = None if _lat is None else max(-90.0, min(90.0, float(_lat)))
+        if "fabric_origin_lon" in msg:
+            _lon = msg["fabric_origin_lon"]
+            payload["fabric_origin_lon"] = None if _lon is None else max(-180.0, min(180.0, float(_lon)))
+        if "fabric_bearing_deg" in msg:
+            payload["fabric_bearing_deg"] = float(msg["fabric_bearing_deg"]) % 360.0
         if "hidden_map_ids" in msg:
             ids = msg["hidden_map_ids"]
             payload["hidden_map_ids"] = [str(x) for x in ids if isinstance(x, str)] if isinstance(ids, list) else []
@@ -344,10 +362,23 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                 _bump(hass, "showcase_on")
         if "lights_hide_untouched" in msg:
             payload["lights_hide_untouched"] = bool(msg["lights_hide_untouched"])
+        if "lights_hide_device_codes" in msg:
+            payload["lights_hide_device_codes"] = bool(msg["lights_hide_device_codes"])
         if "lights_fit_rooms" in msg:
             payload["lights_fit_rooms"] = bool(msg["lights_fit_rooms"])
         if "lights_isolux" in msg:
             payload["lights_isolux"] = bool(msg["lights_isolux"])
+        if "lights_automorph_enabled" in msg:
+            payload["lights_automorph_enabled"] = bool(msg["lights_automorph_enabled"])
+        if "lights_automorph_room_pct" in msg:
+            payload["lights_automorph_room_pct"] = max(0, min(100, int(msg["lights_automorph_room_pct"])))
+        if "lights_automorph_hardness" in msg:
+            payload["lights_automorph_hardness"] = max(-100, min(100, int(msg["lights_automorph_hardness"])))
+        if "lights_automorph_style" in msg:
+            _style = str(msg["lights_automorph_style"] or "").strip().lower()
+            payload["lights_automorph_style"] = _style if _style in ("glow", "blueprint", "nebula") else "glow"
+        if "lights_automorph_subtlety" in msg:
+            payload["lights_automorph_subtlety"] = max(0, min(100, int(msg["lights_automorph_subtlety"])))
         if "light_shapes" in msg:
             # entity_id -> shape kind. Only known kinds are stored; an unknown
             # value would just fall back to the default marker in the frontend,
@@ -399,7 +430,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     "tags_room_events_enabled", "tags_nfc_identify_enabled",
                     "tags_phone_autolink_enabled", "quiet_mode", "light_theme",
                     "beacon_auto_calibrate", "overview_persistent_pins", "overview_show_walls",
-                    "overview_show_outdoor",
+                    "overview_show_outdoor", "overview_show_trails",
                     "overview_2d_mode", "beacon_profiling_enabled",
                     "walk_to_identify_enabled",
                     "radio_map_enabled", "distortion_map_enabled",

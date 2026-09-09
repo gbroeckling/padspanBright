@@ -56,7 +56,9 @@ PHONE_AD_MAX_AGE_S = 120   # a rotating address is "here" this long after its la
                            # for at most two minutes
 MOTION_RECENT_S = 120      # motion that cleared this recently still says "someone"
 MOTION_STUCK_S = 3600      # motion held 'on' this long is a stuck input, not a person
-DEFAULT_CLUSTER_THRESH = 8.0  # dBm RMS — devices carried together differ by < 5 dBm
+DEFAULT_CLUSTER_THRESH = 8.0  # dBm RMS — the clustering threshold itself; devices
+                               # carried together typically differ by < 5 dBm, and
+                               # this sits above that figure for measurement-noise headroom
 
 # Apple continuity subtypes only a phone / watch / tablet in someone's hand
 # or pocket sends. AirPlay, HomeKit, AirPods, iBeacon and Find My are fixed
@@ -305,6 +307,41 @@ def _sensor_rooms(hass: HomeAssistant, room_names: dict[str, str], room_floor: d
     return {"occupancy_rooms": occupancy, "motion_rooms": motion, "stuck_sensors": stuck}
 
 
+# ── Accuracy, from confirmed headcounts ─────────────────────────────────────
+
+def _accuracy_stats(observations: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Summarize estimate-vs-actual error over a set of training observations."""
+    errors = [
+        o["estimated"] - o["actual"]
+        for o in observations
+        if o.get("estimated") is not None and o.get("actual") is not None
+    ]
+    n = len(errors)
+    if not n:
+        return None
+    exact = sum(1 for e in errors if e == 0)
+    within_one = sum(1 for e in errors if abs(e) <= 1)
+    return {
+        "observations": n,
+        "exact_match_pct": round(100 * exact / n, 1),
+        "within_one_pct": round(100 * within_one / n, 1),
+        "mean_abs_error": round(sum(abs(e) for e in errors) / n, 2),
+        # Signed mean error: positive = estimator tends to over-count,
+        # negative = tends to under-count.
+        "bias": round(sum(errors) / n, 2),
+    }
+
+
+def _training_accuracy(training: list[dict[str, Any]]) -> dict[str, Any]:
+    """All-time accuracy plus a recent-20 window, so a trend is visible
+    (whether tuning is actually improving the estimate over time) rather than
+    only ever showing one flat lifetime number."""
+    return {
+        "overall": _accuracy_stats(training),
+        "recent": _accuracy_stats(training[-20:]) if len(training) > 20 else None,
+    }
+
+
 # ── The estimate ────────────────────────────────────────────────────────────
 
 async def compute_occupancy_estimate(hass: HomeAssistant) -> dict[str, Any]:
@@ -443,6 +480,19 @@ async def compute_occupancy_estimate(hass: HomeAssistant) -> dict[str, Any]:
     for r in sensed["motion_rooms"]:
         _room(r)["motion"] = True
 
+    # BLE-vs-sensor agreement (gap #14, best-in-class roadmap): every room
+    # in `rooms` already has SOME evidence (a room with none is never added
+    # by _room() above), so "none" never appears here — only whether the
+    # two evidence FAMILIES (BLE placement vs. HA occupancy/motion sensors)
+    # independently agree there is someone, or only one of them says so.
+    # A visualisation reads this directly; nothing here changes what the
+    # positioning pipeline itself does with a room.
+    for r in rooms.values():
+        has_ble = bool(r["people"]) or r["phones"] > 0
+        has_sensor = r["occupancy"] or r["motion"]
+        r["agreement"] = "agree" if has_ble and has_sensor \
+            else "ble_only" if has_ble else "sensor_only"
+
     # Things seen and not counted — one line per physical thing.
     things: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -479,6 +529,7 @@ async def compute_occupancy_estimate(hass: HomeAssistant) -> dict[str, Any]:
         "hybrid_enabled": hybrid,
         "cluster_threshold": thresh,
         "training_count": len(training),
+        "accuracy": _training_accuracy(training),
     }
 
 

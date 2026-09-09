@@ -189,6 +189,15 @@ export function render(ctx) {
       ["Scanner Z uniform", geo.z_uniform],
       ["Calibration points with no floor", geo.cal_no_floor],
     ]));
+    const ad = s.adoption || {};
+    const tok = s.type_override_kinds || {};
+    g3.appendChild(kv(el, "Advanced feature adoption (installs)", [
+      ["Placed a motion sensor", ad.motion_sensors],
+      ["Placed a temperature sensor", ad.temp_sensors],
+      ["Placed a fan", ad.fans],
+      ["Used a light type override (pro)", ad.type_overrides],
+      ...Object.keys(tok).sort().map(k => [`  ↳ ${k}`, tok[k]]),
+    ]));
     body.appendChild(g3);
 
     // ── usage, tabs, errors ───────────────────────────────────────────────
@@ -312,19 +321,32 @@ function chartCard(el, title, data, yOf, labelOf) {
     g.appendChild(svg("text", { x: PL - 4, y: y + 3, "text-anchor": "end", "font-size": 9, fill: INK2 }, String(Math.round(max * f))));
   }
   const tip = el("div", { style: `position:absolute;display:none;pointer-events:none;background:#0c1a0e;border:1px solid ${GRID};border-radius:6px;padding:4px 8px;font-size:11px;color:${INK};white-space:nowrap` });
+  // The last entry is always today (stats.php builds per_day oldest-first,
+  // today last) and is still accumulating for the rest of the Pacific day —
+  // plotted as an equal bar next to finished days, a normal mid-day dip here
+  // reads as a cliff. Dimmed + labelled so it isn't compared 1:1 with a
+  // completed day at a glance.
+  const todayIdx = data.length - 1;
   data.forEach((d, i) => {
+    const isToday = i === todayIdx;
     const v = vals[i];
     const x = PL + i * (plotW / Math.max(data.length, 1)) + 1;
     const h = Math.round((v / max) * plotH);
     const y = PT + plotH - h;
-    const bar = svg("rect", { x, y, width: bw, height: Math.max(h, v > 0 ? 2 : 0), rx: 2, fill: ACCENT });
+    const bar = svg("rect", { x, y, width: bw, height: Math.max(h, v > 0 ? 2 : 0), rx: 2, fill: ACCENT, opacity: isToday ? 0.45 : 1 });
     // hit target bigger than the mark
     const hit = svg("rect", { x: x - 1, y: PT, width: bw + 2, height: plotH, fill: "transparent" });
     hit.addEventListener("mouseenter", () => {
-      tip.textContent = `${labelOf(d)} · ${v}`;
+      tip.textContent = isToday ? `${labelOf(d)} · ${v} so far (today, still counting)` : `${labelOf(d)} · ${v}`;
       tip.style.display = "block";
-      const pct = (x + bw / 2) / W;
-      tip.style.left = `calc(${(pct * 100).toFixed(1)}% - 30px)`;
+      // Compute against the chart's actual rendered width (not the viewBox's
+      // 520) and clamp to a few px so a narrow single-column layout can't push
+      // the tooltip past the card's left edge with a flat 30px offset.
+      const rect = g.getBoundingClientRect();
+      const cardRect = card.getBoundingClientRect();
+      const scale = rect.width / W;
+      const leftPx = Math.max(4, (rect.left - cardRect.left) + (x + bw / 2) * scale - 30);
+      tip.style.left = `${leftPx.toFixed(1)}px`;
       tip.style.top = "30px";
       bar.setAttribute("fill", INK);
     });

@@ -13,6 +13,10 @@ const { fabricFrame } =
 // The plan viewer — the one view whose subject IS the photograph.
 const { render2DMap } =
   await import(`./plan_viewer.js${new URL(import.meta.url).search}`);
+// Keyed morph + breadcrumb trails for the object layer — see its own header
+// for why this exists: without it, every tracked dot teleports each poll.
+const { mergeObjectLayer, trailPush, trailSvg } =
+  await import(`./iso_motion.js${new URL(import.meta.url).search}`);
 
 /**
  * Overview — "control tower" dashboard
@@ -682,6 +686,19 @@ export function render(ctx){
     const LAYER_PAL = ["#52b788","#f59e0b","#60a5fa","#e879f9","#fb923c","#34d399","#f87171","#a78bfa"];
     const roomColorFn = ctx.helpers.roomColor;
     const _esc = s=>String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    // Locate flash (gap #10, best-in-class roadmap) — ported from
+    // iso_lights.js's locateSvg (the Lights map's own "flash to find it"
+    // ring): that helper is scoped inside buildIsoSVG, a different
+    // renderer entirely, so the same expanding/fading one-shot ring is
+    // reproduced here rather than imported.
+    const _locateKey = ctx.state._overviewLocateKey || null;
+    const _isLocated = (k) => _locateKey && k === _locateKey;
+    const _locateRingSvg = (cx, cy) =>
+      `<circle class="llocate" pointer-events="none" cx="${Math.round(cx)}" cy="${Math.round(cy)}" `+
+      `r="18" fill="none" stroke="#e879f9" stroke-width="2.2" opacity="0">`+
+      `<animate attributeName="r" values="18;70" dur="1.9s" repeatCount="2" fill="freeze"/>`+
+      `<animate attributeName="opacity" values="0;0.75;0" dur="1.9s" repeatCount="2" fill="freeze"/>`+
+      `</circle>`;
     if(ctx.state._overviewFloorGap===undefined) ctx.state._overviewFloorGap = ctx.state.settings?.overview_iso_floor_gap ?? 150;
     if(ctx.state._overviewHorizGap===undefined) ctx.state._overviewHorizGap = ctx.state.settings?.overview_iso_horiz_gap ?? 0;
     let _ovFG=ctx.state._overviewFloorGap, _ovHG=ctx.state._overviewHorizGap;
@@ -914,6 +931,9 @@ export function render(ctx){
 
     if(ctx.state._overviewPersistentPins === undefined) ctx.state._overviewPersistentPins = !!(ctx.state.settings && ctx.state.settings.overview_persistent_pins);
     if(ctx.state._overviewShowWalls === undefined) ctx.state._overviewShowWalls = !!(ctx.state.settings && ctx.state.settings.overview_show_walls);
+    // Off by default (Garry, 2026-09-06): the amber trail line reads as
+    // clutter until asked for.
+    if(ctx.state._overviewShowTrails === undefined) ctx.state._overviewShowTrails = !!(ctx.state.settings && ctx.state.settings.overview_show_trails);
     // Outdoor areas are OFF by default. They are drawn fitted into the
     // building's footprint rather than at their true metres — a shed 50 m down
     // the garden cannot share a frame with the house and leave either readable
@@ -925,6 +945,9 @@ export function render(ctx){
     const buildIsoSVG = (focusZ)=>{
       // Re-read objects from current snapshot (not stale closure)
       _refreshIsoObjects();
+      // Deliberately cancels _ovFG's own multiplier in the iso projection, so
+      // the room-slab extrusion keeps a fixed ~18px on-screen depth no matter
+      // where the Floor Gap slider is set.
       const slabWZ = 18/_ovFG;
       // Dynamic viewBox: expand to fit all floors.
       // Vertical: expand upward for tall floor stacks.
@@ -1051,6 +1074,8 @@ export function render(ctx){
           const sz = _fabZOf(p.floor_id);
           if (sz === undefined) continue;                 // floor with no rooms: not drawable
           const floorDist = Math.abs(_fabF.rankOf(sz) - rank);
+          // Deliberate render-time filter, not an oversight: scanners more
+          // than 2 storeys from the one being drawn are dropped, not shown.
           if (floorDist > 2) continue;
           const absZ = (Number(_bases[String(p.floor_id)]) || 0) + Number(p.z_m != null ? p.z_m : 2.4);
           scanners.push({ source, x_m: p.x_m, y_m: p.y_m, dz_m: absZ - deviceZ, dz: absZ - deviceZ, floorDist });
@@ -1058,9 +1083,20 @@ export function render(ctx){
         const barriers = [];
         for (const b of (_model.rf_barriers_m || [])) {
           const bz = _fabZOf(b.floor_id);
+          // Same deliberate render-time filter as scanners above: barriers
+          // more than 2 storeys away are dropped, not shown.
           if (bz === undefined || Math.abs(_fabF.rankOf(bz) - rank) > 2) continue;
           const points = (b.points_m || []).map(p => [Number(p[0]), Number(p[1])]);
-          if (points.length >= 2) barriers.push({ points, attenuation_dbm: b.attenuation_dbm ?? 6 });
+          if (points.length < 2) continue;
+          // A linked door/window's live open/closed reads straight off the
+          // entity — the SAME field iso_lights.js's own barrier pass reads,
+          // so the two views can never disagree about whether a given door
+          // reads open (docs/IDEA_DOOR_WINDOW_BARRIERS.md, step 5).
+          barriers.push({
+            points, attenuation_dbm: b.attenuation_dbm ?? 6,
+            linked_entity_id: b.linked_entity_id || null,
+            linkedOpen: b.linked_entity_id ? (ctx.hass?.states?.[b.linked_entity_id]?.state === "on") : false,
+          });
         }
         const calPts = [];
         for (const p of calPoints) {
@@ -1184,7 +1220,7 @@ export function render(ctx){
           const color = roomColorFn(room);
           const _objsHere = allObjects.filter(o=>_presentInRoom(ctx,o,room));
           const _roomTip = `${room}\n${_objsHere.length} object${_objsHere.length!==1?"s":""} detected`;
-          s += `<g data-tip="${_esc(_roomTip)}"><polygon points="${pp}" fill="${color}" fill-opacity="0.2" stroke="${color}" stroke-width="2" opacity="0.9"/></g>`;
+          s += `<g data-tip="${_esc(_roomTip)}" data-room="${_esc(room)}" style="cursor:pointer"><polygon points="${pp}" fill="${color}" fill-opacity="0.2" stroke="${color}" stroke-width="2" opacity="0.9"/></g>`;
           s += `<text x="${Math.round(lix)}" y="${Math.round(liy)+lidx*2}" text-anchor="middle" dominant-baseline="middle" fill="${color}" font-size="9" font-weight="600" `
              + `${_annT(Math.round(lix), Math.round(liy)+lidx*2)}>${_esc(room)}</text>`;
         };
@@ -1206,9 +1242,16 @@ export function render(ctx){
           }
           if(!isFinite(ox0)) return;
           const sx = (ox1-ox0) || 1, sy = (oy1-oy0) || 1;
+          const indoorW = _indoorBB.maxX-_indoorBB.minX, indoorH = _indoorBB.maxY-_indoorBB.minY;
+          // One uniform scale (not separate sx/sy) so the outdoor shape's
+          // real aspect ratio survives the fit instead of being stretched to
+          // match the indoor bounding box; center it on whichever axis has
+          // slack left over.
+          const scale = Math.min(indoorW/sx, indoorH/sy);
+          const padX = (indoorW - sx*scale)/2, padY = (indoorH - sy*scale)/2;
           const fit = (px,py) => [
-            _indoorBB.minX + ((px-ox0)/sx) * (_indoorBB.maxX-_indoorBB.minX),
-            _indoorBB.minY + ((py-oy0)/sy) * (_indoorBB.maxY-_indoorBB.minY),
+            _indoorBB.minX + padX + (px-ox0)*scale,
+            _indoorBB.minY + padY + (py-oy0)*scale,
           ];
           for(const r of _outdoorFab){
             const pp = r.pts.map(p=>{const q=fit(p[0],p[1]);return pt(iso(q[0],q[1],z));}).join(" ");
@@ -1235,7 +1278,24 @@ export function render(ctx){
         if(ctx.state._overviewShowWalls){
           for(const bar of storey.barriers){
             const bp = bar.points.map(p=>pt(iso(p[0], p[1], z))).join(" ");
-            s += `<polyline points="${bp}" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="3" stroke-dasharray="5 8" stroke-linecap="round"/>`;
+            if(!bar.linked_entity_id){
+              s += `<polyline points="${bp}" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="3" stroke-dasharray="5 8" stroke-linecap="round"/>`;
+              continue;
+            }
+            // Linked: closed reads as the ordinary wall above; open fades to
+            // a thin rose dash (iso_lights.js's DOOR_BORDER, #fb7185, inlined
+            // — this file has no light_codes.js import of its own) rather
+            // than vanishing outright, so a viewer can still see WHERE the
+            // opening is while it's open.
+            s += bar.linkedOpen
+              ? `<polyline points="${bp}" fill="none" stroke="#fb7185" stroke-opacity="0.5" stroke-width="2" stroke-dasharray="3 6" stroke-linecap="round"/>`
+              : `<polyline points="${bp}" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="3" stroke-dasharray="5 8" stroke-linecap="round"/>`;
+            // The two points where this opening meets the rest of the wall —
+            // in BOTH states, same purple as iso_lights.js's own pass.
+            for(const p of [bar.points[0], bar.points[bar.points.length-1]]){
+              const [dx,dy] = iso(p[0], p[1], z);
+              s += `<circle cx="${dx.toFixed(1)}" cy="${dy.toFixed(1)}" r="2.6" fill="#9333ea" stroke="#1b0f24" stroke-width="0.8"/>`;
+            }
           }
         }
 
@@ -1335,6 +1395,29 @@ export function render(ctx){
       if(_isoBB && isFinite(_isoBB.minX)) _bldgBB = {..._isoBB};
       _isoBBFrozen = true;
 
+      // Breadcrumb trails — a small per-object memory of recent positions,
+      // kept on ctx.state so it survives the poll-to-poll rebuild (this
+      // whole function reruns from scratch every 5s; the trail buffer
+      // must not). Only real server-positioned points go in (never the
+      // room-centroid stagger a few lines below) — that stagger is a
+      // layout fan-out for objects with no known position, and its little
+      // per-render jitter is not movement worth remembering.
+      if(!ctx.state._overviewTrails) ctx.state._overviewTrails = new Map();
+      const _trails = ctx.state._overviewTrails;
+      const _trailNow = Date.now();
+      // Off by default (Garry, 2026-09-06): reads as clutter until asked
+      // for. Recording (trailPush, below) is ALSO gated on this same flag
+      // — this buffer is plain in-memory client state with no time-based
+      // cap of its own (trailSvg is what prunes aged-out points, and it
+      // does not run while hidden), so a kiosk tab left open for days with
+      // trails off must not accumulate points nobody will ever see.
+      if(ctx.state._overviewShowTrails) s += trailSvg(_trails, () => "#fbbf24", _trailNow);
+      // trailSvg prunes each array's aged-out POINTS in place; an object
+      // gone for good (no longer tracked at all) leaves an empty array
+      // behind rather than a departed Map entry — drop those so the
+      // buffer does not grow for the lifetime of the HA process.
+      for(const [k, arr] of _trails) if(!arr.length) _trails.delete(k);
+
       const BEACON_CLR = "#fbbf24";
       // ── Beacon size dial ──────────────────────────────────────────────
       // Every dimension of a beacon marker — rings, dot, confidence badge,
@@ -1374,6 +1457,12 @@ export function render(ctx){
           if(z !== undefined){
             [bx,by]=iso(o.x_m, o.y_m, z);
             posConf = o.knn_confidence || 0;
+            // A real solver-placed point, not a room-centroid fallback —
+            // this is the one condition under which a trail is memory of
+            // actual movement rather than layout noise. Gated on the same
+            // toggle as trailSvg above — off by default, so nothing is
+            // recorded until it is actually asked for.
+            if(ctx.state._overviewShowTrails) trailPush(_trails, o.key || o.address || o.entity_id || "", bx, by, _trailNow);
           }
         }
         if(bx == null && o.room && roomIsoPos[o.room]){
@@ -1450,13 +1539,17 @@ export function render(ctx){
         // removed exactly that after five attempts had failed to fit the
         // drawing any other way.
         const _plateMax = _bf(Math.max(48, Math.min(140, 0.16 * _isoFrame().vw)));
-        const _plateChars = Math.max(4, Math.floor((_plateMax - 10) / 7));
+        const _plateChars = Math.max(4, Math.floor((_plateMax - 10) / (7*BEACON_F)));
         const shownLbl = fullLbl.length > _plateChars
           ? fullLbl.slice(0, _plateChars - 1) + "…"
           : fullLbl;
-        const lblW = Math.min(shownLbl.length * 7 + 10, _plateMax);
+        const lblW = Math.min(shownLbl.length * (7*BEACON_F) + 10, _plateMax);
         s += `<rect x="${Math.round(bx)-lblW/2}" y="${Math.round(by)-_bf(32)}" width="${lblW}" height="${_bf(16)}" rx="3" fill="#071008" opacity="0.7"/>`;
         s += `<text x="${Math.round(bx)}" y="${Math.round(by)-_bf(20)}" text-anchor="middle" fill="${lblColor}" font-size="${_bf(12)}" font-weight="700">${_esc(shownLbl)}</text>`;
+        // Locate flash (gap #10) — inside the marker's own <g> so it
+        // inherits the same counter-scale transform as everything else
+        // drawn at this anchor.
+        if (_isLocated(o.key || o.address || o.entity_id || "")) s += _locateRingSvg(bx, by);
         s += `</g>`;
       }
 
@@ -1497,6 +1590,7 @@ export function render(ctx){
           if(_oz !== undefined){
             const [ix,iy] = iso(obj.x_m, obj.y_m, _oz);
             [px,py]=[Math.round(ix), Math.round(iy)];
+            if(ctx.state._overviewShowTrails) trailPush(_trails, oKey, px, py, _trailNow);
           } else if (obj.room && roomIsoPos[obj.room]) {
             const pos = roomIsoPos[obj.room];
             const idx = (_roomObjCount[obj.room] || 0);
@@ -1536,6 +1630,7 @@ export function render(ctx){
               s += `<line x1="${px}" y1="${py-27}" x2="${px}" y2="${py-14}" stroke="#ef4444" stroke-width="1.5"/>`;
               s += `<line x1="${px}" y1="${py+14}" x2="${px}" y2="${py+27}" stroke="#ef4444" stroke-width="1.5"/>`;
               if(objLabel) s += `<text x="${px}" y="${py+38}" text-anchor="middle" fill="#fca5a5" font-size="10" font-weight="600">${_esc(objLabel)}</text>`;
+              if(_isLocated(oKey)) s += _locateRingSvg(px, py);
               s += `</g>`;
             } else {
               // Teal dot for active objects (persistent mode)
@@ -1545,6 +1640,7 @@ export function render(ctx){
               s += `<circle cx="${px}" cy="${py}" r="9" fill="#5eead4" stroke="#071008" stroke-width="1.5" opacity="0.95"/>`;
               s += `<circle cx="${px}" cy="${py}" r="2.5" fill="#071008" opacity="0.7"/>`;
               if(objLabel) s += `<text x="${px}" y="${py+22}" text-anchor="middle" fill="#5eead4" font-size="10" font-weight="600">${_esc(objLabel)}</text>`;
+              if(_isLocated(oKey)) s += _locateRingSvg(px, py);
               s += `</g>`;
             }
           } else if(!obj.user_label){
@@ -1552,6 +1648,7 @@ export function render(ctx){
             s += `<g data-obj-key="${_ok}" data-tip="${_esc(_objTip(obj))}" style="cursor:pointer" opacity="0.6" ${_annT(Math.round(px), Math.round(py))}>`;
             s += _ring;
             s += `<circle cx="${px}" cy="${py}" r="6" fill="#f59e0b" stroke="#071008" stroke-width="1" opacity="0.7"/>`;
+            if(_isLocated(oKey)) s += _locateRingSvg(px, py);
             s += `</g>`;
           }
         }
@@ -1711,33 +1808,60 @@ export function render(ctx){
 
     /** Rebuild the 3D SVG with a progress indicator. */
     /** Full rebuild: replaces entire SVG (expensive — used for initial load + control changes) */
+    // Gap #18, best-in-class roadmap: a floor-focus change (or any other
+    // control toggle) used to swap the whole SVG instantly, which read as a
+    // flicker rather than a deliberate transition. A true "explode the
+    // stack apart" 3D animation would need the rebuild to preserve DOM
+    // continuity between the old and new content — a much larger change to
+    // the most heavily-shared rendering path in the codebase (the same
+    // risk gap #11 already declined to take here). A short opacity
+    // crossfade around the SAME instant innerHTML swap gets most of the
+    // visual benefit for none of that risk. Skipped on the very first
+    // build (nothing to fade FROM) via this one-shot flag.
+    let _isoRebuiltOnce = false;
     function _rebuildIso(focusZ) {
-      _isoProgressFill.style.transition = "none";
-      _isoProgressFill.style.width = "40%";
-      _isoProgressFill.style.background = "#a855f7";
-      requestAnimationFrame(() => {
+      const doBuild = () => {
+        _isoProgressFill.style.transition = "none";
+        _isoProgressFill.style.width = "40%";
+        _isoProgressFill.style.background = "#a855f7";
         requestAnimationFrame(() => {
-          isoDiv.innerHTML = buildIsoSVG(focusZ);
-          _watchAnnScale();
-          ctx.state._isoBuildPending = false;
-          // Inject a <g> wrapper for objects so we can swap it on polls
-          const svgEl = isoDiv.querySelector("svg");
-          if (svgEl) {
-            const marker = "<!-- ISO_OBJECTS_START -->";
-            const html = svgEl.innerHTML;
-            const idx = html.indexOf(marker);
-            if (idx >= 0) {
-              const staticPart = html.substring(0, idx);
-              const dynPart = html.substring(idx + marker.length);
-              svgEl.innerHTML = staticPart + `<g id="iso-objects">${dynPart}`;
+          requestAnimationFrame(() => {
+            isoDiv.innerHTML = buildIsoSVG(focusZ);
+            _watchAnnScale();
+            ctx.state._isoBuildPending = false;
+            // Inject a <g> wrapper for objects so we can swap it on polls
+            const svgEl = isoDiv.querySelector("svg");
+            if (svgEl) {
+              const marker = "<!-- ISO_OBJECTS_START -->";
+              const html = svgEl.innerHTML;
+              const idx = html.indexOf(marker);
+              if (idx >= 0) {
+                const staticPart = html.substring(0, idx);
+                const dynPart = html.substring(idx + marker.length);
+                svgEl.innerHTML = staticPart + `<g id="iso-objects">${dynPart}`;
+              }
             }
-          }
-          _isoProgressFill.style.transition = "width 0.2s";
-          _isoProgressFill.style.width = "100%";
-          _isoProgressFill.style.background = "#52b788";
-          setTimeout(() => { _isoProgressFill.style.width = "0"; }, 600);
+            _isoProgressFill.style.transition = "width 0.2s";
+            _isoProgressFill.style.width = "100%";
+            _isoProgressFill.style.background = "#52b788";
+            setTimeout(() => { _isoProgressFill.style.width = "0"; }, 600);
+            // Fade back in after the swap — the other half of the crossfade
+            // started below. Only runs once isoDiv was actually faded out.
+            if (isoDiv.style.opacity === "0") {
+              requestAnimationFrame(() => { isoDiv.style.opacity = "1"; });
+            }
+          });
         });
-      });
+      };
+
+      if (!_isoRebuiltOnce) {
+        _isoRebuiltOnce = true;
+        doBuild();
+        return;
+      }
+      isoDiv.style.transition = "opacity 150ms ease";
+      isoDiv.style.opacity = "0";
+      setTimeout(doBuild, 150);
     }
 
     /** Light update: only rebuilds object dots (cheap — used for 5s polls) */
@@ -1753,14 +1877,12 @@ export function render(ctx){
       const endSvg = fullSvg.lastIndexOf("</svg>");
       if (endSvg < 0) return;
       const dynHtml = fullSvg.substring(idx + marker.length, endSvg);
-      // Swap just the dynamic group contents
-      const tmp = document.createElement("div");
-      tmp.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg">${dynHtml}</svg>`;
-      const tmpSvg = tmp.querySelector("svg");
-      if (tmpSvg) {
-        while (objGroup.firstChild) objGroup.removeChild(objGroup.firstChild);
-        while (tmpSvg.firstChild) objGroup.appendChild(tmpSvg.firstChild);
-      }
+      // Keyed morph, not destroy-and-rebuild: an object keeps its own DOM
+      // node across polls and GLIDES from its old anchor to its new one
+      // (mergeObjectLayer, iso_motion.js) instead of teleporting. Trail
+      // lines and other unkeyed markup still get the plain swap they
+      // always had.
+      mergeObjectLayer(objGroup, dynHtml);
 
       // ── Scanner markers ────────────────────────────────────────────────
       // They are emitted BEFORE the marker above, so everything up to it was
@@ -1838,12 +1960,33 @@ export function render(ctx){
       }
       // Then check for object click
       const g = e.target.closest("[data-obj-key]");
-      if(!g) return;
-      const objKey = g.getAttribute("data-obj-key");
-      if(!objKey) return;
-      const obj = allObjects.find(o =>
-        (o.key||"") === objKey || (o.address||"") === objKey || (o.entity_id||"") === objKey);
-      if(obj) ctx.actions.showObjectDetail(obj);
+      if(g){
+        const objKey = g.getAttribute("data-obj-key");
+        if(!objKey) return;
+        const obj = allObjects.find(o =>
+          (o.key||"") === objKey || (o.address||"") === objKey || (o.entity_id||"") === objKey);
+        if(obj) ctx.actions.showObjectDetail(obj);
+        return;
+      }
+      // Click-to-focus (gap #18, best-in-class roadmap): a room polygon
+      // with no marker/scanner under the click point focuses its own
+      // floor — the direct way in, instead of the slider being the only
+      // path. A plain instant switch, matching the slider's own behaviour;
+      // the crossfade in _rebuildIso is what makes it read as deliberate.
+      const rg = e.target.closest("[data-room]");
+      if(!rg) return;
+      const room = rg.getAttribute("data-room");
+      const fid = room && _fabOK && _isoFabricW[room] && _isoFabricW[room].floor_id;
+      if(!fid) return;
+      const z = _fabF.levelOf(fid);
+      const lvlIdx = _fabF.levels.indexOf(z);
+      if(lvlIdx < 0) return;
+      const focusIdx = 2 * lvlIdx + 1;
+      if(ctx.state._overviewIsoFocusIdx === focusIdx) return;
+      ctx.state._overviewIsoFocusIdx = focusIdx;
+      focusSlider.value = String(focusIdx);
+      focusLbl.textContent = _getFocusLbl(focusIdx);
+      _rebuildIso(_getFocusZ(focusIdx));
     });
 
     const haFloors2 = ctx.state.model?.floors || [];
@@ -1971,9 +2114,38 @@ export function render(ctx){
     floorLbl.style.cssText = "color:#94a3b8";
     floorLbl.textContent = "Floor:";
     ctrlRow.appendChild(floorLbl);
+    // Step buttons (gap #18, best-in-class roadmap) — the practical benefit
+    // of "swipe floor switching" without the gesture-conflict risk: a
+    // single-finger swipe on the map is already how Pure Live's viewport
+    // pans, so a real swipe-to-change-floor detector would have to fight
+    // that existing, load-bearing gesture. A tap target sidesteps it.
+    // Always lands on a single floor, never an adjacent-pair position.
+    const _stepFloor = (dir) => {
+      const cur = ctx.state._overviewIsoFocusIdx ?? 0;
+      const next = Math.max(0, Math.min(_isoPos.length - 1, cur === 0 ? (dir > 0 ? 1 : 0) : cur + dir * 2));
+      if (next === cur) return;
+      ctx.state._overviewIsoFocusIdx = next;
+      focusSlider.value = String(next);
+      focusLbl.textContent = _getFocusLbl(next);
+      _rebuildIso(_getFocusZ(next));
+    };
+    const floorPrevBtn = document.createElement("button");
+    floorPrevBtn.className = "btn inline";
+    floorPrevBtn.style.cssText = "padding:1px 6px;font-size:10px;color:#94a3b8";
+    floorPrevBtn.textContent = "◀";
+    floorPrevBtn.title = "Previous floor";
+    floorPrevBtn.addEventListener("click", () => _stepFloor(-1));
+    ctrlRow.appendChild(floorPrevBtn);
     focusSlider.style.cssText = "width:90px;accent-color:#52b788;vertical-align:middle;cursor:pointer";
     focusLbl.style.cssText = "color:#94a3b8;min-width:60px;display:inline-block";
     ctrlRow.appendChild(focusSlider);
+    const floorNextBtn = document.createElement("button");
+    floorNextBtn.className = "btn inline";
+    floorNextBtn.style.cssText = "padding:1px 6px;font-size:10px;color:#94a3b8";
+    floorNextBtn.textContent = "▶";
+    floorNextBtn.title = "Next floor";
+    floorNextBtn.addEventListener("click", () => _stepFloor(1));
+    ctrlRow.appendChild(floorNextBtn);
     ctrlRow.appendChild(focusLbl);
     // Outdoor — sits with the floor control because that is what it is: the
     // areas that are not a storey of the building.
@@ -2098,6 +2270,22 @@ export function render(ctx){
       ctx.actions.settingsSet({ overview_show_walls: ctx.state._overviewShowWalls });
     });
     ctrlRow.appendChild(ovWallsBtn);
+
+    // Fading movement trail — off by default (Garry, 2026-09-06): "the
+    // tracking line" reads as clutter until asked for.
+    const ovTrailsBtn = document.createElement("button");
+    ovTrailsBtn.className = "btn inline";
+    const _trailStyle = (on) => `padding:1px 6px;font-size:10px;${on ? "background:#422006;border-color:#fbbf24;color:#fde68a;font-weight:700" : "color:#94a3b8"}`;
+    ovTrailsBtn.style.cssText = _trailStyle(ctx.state._overviewShowTrails);
+    ovTrailsBtn.textContent = ctx.state._overviewShowTrails ? "Trails ON" : "Trails";
+    ovTrailsBtn.addEventListener("click", ()=>{
+      ctx.state._overviewShowTrails = !ctx.state._overviewShowTrails;
+      ovTrailsBtn.style.cssText = _trailStyle(ctx.state._overviewShowTrails);
+      ovTrailsBtn.textContent = ctx.state._overviewShowTrails ? "Trails ON" : "Trails";
+      _rebuildIso(_getFocusZ(ctx.state._overviewIsoFocusIdx));
+      ctx.actions.settingsSet({ overview_show_trails: ctx.state._overviewShowTrails });
+    });
+    ctrlRow.appendChild(ovTrailsBtn);
 
     // ── Radio Map + Distortion toggles (mutually exclusive) ────────────────
     const _heatStyle = (on) => `padding:1px 6px;font-size:10px;${on ? "background:#2d1b4e;border-color:#a855f7;color:#d8b4fe;font-weight:700" : "color:#94a3b8"}`;
@@ -3376,8 +3564,8 @@ export function render(ctx){
     const _hasFabric = Object.keys(ctx.state.model?.scanner_positions_m || {}).length > 0 || Object.keys(ctx.state.model?.room_geometry_m || {}).length > 0;
     if (_hasMaps && !_hasFabric) {
       section.appendChild(el("div",{style:"padding:10px 14px;border:2px solid #f59e0b;background:rgba(245,158,11,.08);border-radius:8px;margin-bottom:10px"},[
-        el("div",{style:"font-weight:700;color:#fbbf24;font-size:13px"},"\u26a0 Fabric migration needed"),
-        el("div",{style:"font-size:11px;color:#e2e8f0;margin-top:4px"},"Go to Health tab \u2192 Positioning Fabric \u2192 Migrate to Fabric to enable real-world positioning."),
+        el("div",{style:"font-weight:700;color:#fbbf24;font-size:13px"},"\u26a0 Positioning fabric not built yet"),
+        el("div",{style:"font-size:11px;color:#e2e8f0;margin-top:4px"},"Go to Mapping \u2192 Rooms and place scanners and draw rooms there \u2014 the positioning fabric builds from that automatically, there is nothing separate to migrate."),
       ]));
     }
   }

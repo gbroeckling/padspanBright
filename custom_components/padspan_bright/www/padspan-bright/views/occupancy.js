@@ -30,6 +30,13 @@ export function render(ctx) {
 
 const _plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const _confColor = c => c === "high" ? "#52b788" : c === "medium" ? "#f59e0b" : "#f87171";
+// Plain-English bias summary. A |bias| under 0.3 reads as noise rather than
+// a real over/under-counting tendency — no threshold on 0.3 is claimed
+// beyond "small enough not to call out", since a single dropped/extra
+// person naturally swings a small sample this much.
+const _biasLine = a => a.bias > 0.3 ? `tends to over-count by ${a.bias.toFixed(1)}`
+  : a.bias < -0.3 ? `tends to under-count by ${Math.abs(a.bias).toFixed(1)}`
+  : "no consistent over/under bias";
 
 async function _loadOccupancy(ctx, el, container) {
   container.innerHTML = "";
@@ -87,17 +94,24 @@ async function _loadOccupancy(ctx, el, container) {
     if ((res.rooms || []).length) {
       const roomCard = el("div", { class: "card", style: "margin-bottom:12px" });
       roomCard.appendChild(H("Rooms with evidence"));
-      const grid = el("div", { style: "display:grid;grid-template-columns:1fr auto auto auto;gap:6px 14px;font-size:12px;align-items:center" });
-      for (const h of ["Room", "People", "Phones", "Sensors"]) {
+      const grid = el("div", { style: "display:grid;grid-template-columns:1fr auto auto auto auto;gap:6px 14px;font-size:12px;align-items:center" });
+      for (const h of ["Room", "People", "Phones", "Sensors", "Agreement"]) {
         grid.appendChild(el("div", { style: "font-weight:600;color:#64748b;font-size:10px;text-transform:uppercase" }, h));
       }
+      // BLE-vs-sensor agreement (gap #14, best-in-class roadmap) — computed
+      // server-side (ws_occupancy.py) from the same evidence already in
+      // this table; this only picks how to label it.
+      const AGREE_LABEL = { agree: ["✓ Agree", "#52b788"], ble_only: ["📶 BLE only", "#f59e0b"],
+        sensor_only: ["📡 Sensor only", "#60a5fa"] };
       for (const r of res.rooms) {
         const rc = ctx.helpers.roomColor ? ctx.helpers.roomColor(r.room) : "#5eead4";
         const sensors = [r.occupancy ? "occupancy" : null, r.motion ? "motion" : null].filter(Boolean).join(", ");
+        const [agreeText, agreeColor] = AGREE_LABEL[r.agreement] || ["—", "#64748b"];
         grid.appendChild(el("div", { style: `color:${rc};font-weight:600` }, r.room));
         grid.appendChild(el("div", { style: "color:#52b788" }, (r.people || []).join(", ") || "—"));
         grid.appendChild(el("div", { style: "text-align:right;color:#a78bfa;font-family:monospace" }, String(r.phones || 0)));
         grid.appendChild(el("div", { style: "color:#60a5fa" }, sensors || "—"));
+        grid.appendChild(el("div", { style: `color:${agreeColor};white-space:nowrap` }, agreeText));
       }
       roomCard.appendChild(grid);
       container.appendChild(roomCard);
@@ -188,6 +202,26 @@ async function _loadOccupancy(ctx, el, container) {
     threshRow.appendChild(threshSaveBtn);
     tuneCard.appendChild(threshRow);
     container.appendChild(tuneCard);
+
+    // ── Accuracy, from past confirmed headcounts ────────────────────────
+    const acc = res.accuracy || {};
+    if (acc.overall) {
+      const accCard = el("div", { class: "card", style: "margin-bottom:12px" });
+      accCard.appendChild(H("Accuracy"));
+      accCard.appendChild(el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px" }, [
+        _kpi(el, `${acc.overall.exact_match_pct}%`, "Exact match", "#52b788"),
+        _kpi(el, `${acc.overall.within_one_pct}%`, "Within ±1", "#5eead4"),
+        _kpi(el, String(acc.overall.mean_abs_error), "Avg error (people)", "#f59e0b"),
+        _kpi(el, String(acc.overall.observations), "Confirmations", "#a78bfa"),
+      ]));
+      accCard.appendChild(el("div", { style: "font-size:11px;color:#94a3b8;margin-top:8px" },
+        `All-time: ${_biasLine(acc.overall)}`));
+      if (acc.recent) {
+        accCard.appendChild(el("div", { style: "font-size:11px;color:#94a3b8;margin-top:4px" },
+          `Last 20: ${acc.recent.exact_match_pct}% exact, ${acc.recent.within_one_pct}% within ±1, avg error ${acc.recent.mean_abs_error} — ${_biasLine(acc.recent)}`));
+      }
+      container.appendChild(accCard);
+    }
 
     // ── Record the real count ────────────────────────────────────────────
     const trainCard = el("div", { class: "card", style: "margin-bottom:12px" });
