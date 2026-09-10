@@ -35,10 +35,11 @@ def _run_js(tmp_path: Path, script: str) -> dict:
     import.meta.url; copying to .mjs and rewriting that one specifier is all
     node needs to run the real file rather than a reimplementation of it.
     """
-    for name in ("iso_lights", "light_codes", "room_color"):
+    for name in ("iso_lights", "light_codes", "room_color", "wall_geom"):
         src = (_VIEWS / f"{name}.js").read_text(encoding="utf-8")
         src = src.replace("./light_codes.js${new URL(import.meta.url).search}", "./light_codes.mjs")
         src = src.replace('"./room_color.js"', '"./room_color.mjs"')
+        src = src.replace('"./wall_geom.js"', '"./wall_geom.mjs"')
         (tmp_path / f"{name}.mjs").write_text(src, encoding="utf-8")
     (tmp_path / "run.mjs").write_text(script, encoding="utf-8")
     # encoding is explicit: text=True decodes with the locale codepage, which
@@ -1854,7 +1855,10 @@ def test_temperature_readout_shows_digits_only_when_placed_and_fresh(tmp_path):
 def test_use_surface_ergonomics_opts(tmp_path):
     """The ergonomics opts buildIsoSVG grew for the sidebar/preview use
     surface: codeChip splits the tap target into its own data-role="code"
-    pill; hideCodes drops codes entirely (semantic zoom); classFilter dims
+    pill; hideCodes drops the code's TEXT (semantic zoom) but — when
+    codeChip is also on — keeps that pill's own tap target, invisibly
+    (Garry, 2026-09-09: hiding it was silently shrinking the sidebar's tap
+    target to the glyph alone); classFilter dims
     every OTHER class and stops it taking taps; hitHalo draws an invisible
     tap disc under every marker; collapseUnplaced turns a room's unplaced
     pile into ONE data-role="stack" chip. Room names and the floor badge are
@@ -1892,8 +1896,9 @@ def test_use_surface_ergonomics_opts(tmp_path):
         "const out={\n"
         "  plainHasRoleCode: /data-role=\"code\"/.test(plain),\n"
         "  chipHasRoleCode: codeCount(chip) >= 1,\n"
-        "  hiddenHasRoleCode: codeCount(hidden) === 0,\n"
+        "  hiddenChipCount: codeCount(hidden),\n"
         "  hiddenHasCodeText: hidden.includes('A01'),\n"
+        "  hiddenHasPointerEventsAll: /data-role=\"code\"[^>]*pointer-events=\"all\"/.test(hidden),\n"
         "  // filtered=fan: the fan glyph is full-opacity and clickable; the two\n"
         "  // plain lights are dimmed AND pointer-events:none.\n"
         "  fanFull: /data-class=\"fan\"[^>]*opacity=\"1\"/.test(filtered) || /opacity=\"1\"[^>]*data-class=\"fan\"/.test(filtered),\n"
@@ -1913,7 +1918,13 @@ def test_use_surface_ergonomics_opts(tmp_path):
     ))
     assert not out["plainHasRoleCode"], "the default render must not grow a code-chip target unasked"
     assert out["chipHasRoleCode"], "codeChip must add a data-role=\"code\" target"
-    assert out["hiddenHasRoleCode"] and not out["hiddenHasCodeText"], "hideCodes must drop the code entirely, not just its chip"
+    # Garry, 2026-09-09: hiding codes silently shrank the sidebar's tap
+    # target down to the glyph alone, because the chip's OWN hit region
+    # (pointer-events="all") went with the text. hideCodes must hide the
+    # TEXT, not the place you tap — the pill's invisible now, not gone.
+    assert out["hiddenChipCount"] >= 1, "hideCodes must keep the chip's tap target, invisibly"
+    assert not out["hiddenHasCodeText"], "the code text itself must not render when hidden"
+    assert out["hiddenHasPointerEventsAll"], "the invisible chip must still take the tap"
     assert out["fanFull"], "the matching class must stay full-opacity and clickable"
     # Three "light"-class devices are drawn: the placed marker plus the two
     # clustered in the room — classFilter:"fan" must dim every one of them.
@@ -2233,6 +2244,7 @@ def test_moving_a_light_does_not_count_as_touching_it(tmp_path):
     out = _run_js(tmp_path, (
         body + "\n"
         "const T=(over,pl)=>lightIsTouched({entity_id:'light.x'},over,pl);\n"
+        "const TD=(over,pl)=>lightIsTouched({entity_id:'light.x',isDoor:true},over,pl);\n"
         "console.log(JSON.stringify({\n"
         "  never:      T({}, {}),\n"
         "  movedOnly:  T({}, {'light.x':{x_m:1,y_m:2,floor_id:'main'}}),\n"
@@ -2243,6 +2255,14 @@ def test_moving_a_light_does_not_count_as_touching_it(tmp_path):
         "  rotated:    T({}, {'light.x':{x_m:1,y_m:2,rotation:30}}),\n"
         "  recoloured: T({}, {'light.x':{x_m:1,y_m:2,color:'#ff00aa'}}),\n"
         "  shaped:     T({'light.x':'bar'}, {}),\n"
+        # A door/window carrying a leftover light_positions_m entry from
+        # BEFORE the step 1 correction (when it still drew as a draggable,
+        # sizeable point) must read as untouched regardless -- that data is
+        # debris, not a real customization; see the guard's own comment.
+        "  doorSized:      TD({}, {'light.x':{x_m:1,y_m:2,width_cm:240}}),\n"
+        "  doorRotated:    TD({}, {'light.x':{x_m:1,y_m:2,rotation:30}}),\n"
+        "  doorRecoloured: TD({}, {'light.x':{x_m:1,y_m:2,color:'#ff00aa'}}),\n"
+        "  doorShaped:     TD({'light.x':'bar'}, {}),\n"
         "}));\n"
     ))
     # Not touched: never placed, dropped, or dropped with the default stamp.
@@ -2257,6 +2277,12 @@ def test_moving_a_light_does_not_count_as_touching_it(tmp_path):
     assert out["rotated"] is True, out
     assert out["recoloured"] is True, out
     assert out["shaped"] is True, out
+    # A door/window never reads as touched, even carrying pre-correction
+    # placement debris that WOULD count for an ordinary light.
+    assert out["doorSized"] is False, out
+    assert out["doorRotated"] is False, out
+    assert out["doorRecoloured"] is False, out
+    assert out["doorShaped"] is False, out
 
 
 def test_fit_to_room_caps_an_oversized_fixture_and_leaves_a_gap(tmp_path):
