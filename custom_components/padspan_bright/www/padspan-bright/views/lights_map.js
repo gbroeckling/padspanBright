@@ -525,13 +525,18 @@ export function openAggregateSheet(api, { title, sub, items, actions }){
   for (const l of items) {
     const on = l.state === "on";
     const row = mk("div", _S.row);
-    const col = l.isWled ? WLED_BORDER : (l.isPartition ? PARTITION_BORDER : (l.isFan ? FAN_BORDER : (l.isMotion ? MOTION_BORDER : (l.isTemp ? TEMP_BORDER : "#52b788"))));
+    const col = l.isWled ? WLED_BORDER : (l.isPartition ? PARTITION_BORDER : (l.isFan ? FAN_BORDER : (l.isMotion ? MOTION_BORDER : (l.isTemp ? TEMP_BORDER : (l.isDoor ? DOOR_BORDER : "#52b788")))));
     row.appendChild(mk("span", _S.code + `;color:${col}`, l.code));
     row.appendChild(mk("span", _S.name, l.friendly_name));
     if (l.isMotion) {
       row.appendChild(mk("span", _S.state(on), on ? "MOTION" : "clear"));
     } else if (l.isTemp) {
       row.appendChild(mk("span", _S.state(false), Number.isFinite(l.temperature) ? `${l.temperature}°` : "—"));
+    } else if (l.isDoor) {
+      // Read-only, same as motion/temp above — a door/window sensor is not
+      // a switch, and the generic On/Off button below would fire a toggle
+      // that does nothing but surface a read-only toast.
+      row.appendChild(mk("span", _S.state(on), on ? "OPEN" : "CLOSED"));
     } else {
       const b = mk("button", _S.onoff(on), on ? "On" : "Off");
       b.addEventListener("click", (e) => {
@@ -1350,7 +1355,7 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
 // Work means the fixture was described: given a size, an angle, a colour, or a
 // shape of its own. The default amber every drop stamps is not a colour choice.
 const _DROP_COLOR = "#fbbf24";
-export function lightIsTouched(l, shapeOverrides, placements) {
+export function lightIsTouched(l, shapeOverrides, placements, linkedDoorEids) {
   // A door/window has no size, rotation or colour of its own to have
   // touched — that whole concept belonged to point-placement, which a door
   // stopped using in the step 1 correction (docs/IDEA_DOOR_WINDOW_BARRIERS.md).
@@ -1359,7 +1364,14 @@ export function lightIsTouched(l, shapeOverrides, placements) {
   // drew as a draggable point) read as "touched": the Untouched count and
   // filter were both wrong, and its row offered a "Revert" that would have
   // re-written that same stale entry right back into the draft.
-  if (l.isDoor) return false;
+  //
+  // Garry, 2026-09-10, live report: linking a door to a wall (the ONLY real
+  // "work" a door has) still left it reading as untouched — "Hide untouched"
+  // hid it right back, including the wall segment itself, with no way to
+  // tell from the map that the link had actually worked. A door IS touched
+  // once it is actually linked to a wall (rf_barriers_m.linked_entity_id) —
+  // linkedDoorEids is that set, built by the caller from the fabric.
+  if (l.isDoor) return !!(linkedDoorEids && linkedDoorEids.has(l.entity_id));
   const eid = l.entity_id;
   if (shapeOverrides && shapeOverrides[eid]) return true;
   const p = placements && placements[eid];
@@ -2173,6 +2185,8 @@ export function buildLightsTable(host, lights){
         : l.isLock
         ? el("span", { class: `lv-state ${l.state === "jammed" ? "off" : (on ? "on" : "off")}` },
              l.state === "jammed" ? "JAMMED" : (on ? "LOCKED" : "UNLOCKED"))
+        : l.isDoor
+        ? el("span", { class: `lv-state ${on ? "on" : "off"}` }, on ? "OPEN" : "CLOSED")
         : el("span", { class: `lv-state ${on ? "on" : "off"}` }, on ? "ON" : "OFF")),
       // Its own column, next to State (Garry, 2026-09-07: "we still need
       // another option next to state... a reassign to another device type

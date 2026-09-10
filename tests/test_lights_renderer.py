@@ -2518,6 +2518,7 @@ def test_moving_a_light_does_not_count_as_touching_it(tmp_path):
         body + "\n"
         "const T=(over,pl)=>lightIsTouched({entity_id:'light.x'},over,pl);\n"
         "const TD=(over,pl)=>lightIsTouched({entity_id:'light.x',isDoor:true},over,pl);\n"
+        "const TDL=(over,pl,linked)=>lightIsTouched({entity_id:'light.x',isDoor:true},over,pl,linked);\n"
         "console.log(JSON.stringify({\n"
         "  never:      T({}, {}),\n"
         "  movedOnly:  T({}, {'light.x':{x_m:1,y_m:2,floor_id:'main'}}),\n"
@@ -2536,6 +2537,12 @@ def test_moving_a_light_does_not_count_as_touching_it(tmp_path):
         "  doorRotated:    TD({}, {'light.x':{x_m:1,y_m:2,rotation:30}}),\n"
         "  doorRecoloured: TD({}, {'light.x':{x_m:1,y_m:2,color:'#ff00aa'}}),\n"
         "  doorShaped:     TD({'light.x':'bar'}, {}),\n"
+        # 2026-09-10, live report: linking a door to a wall — the only real
+        # "work" a door has — still hid it and its wall segment behind
+        # "Hide untouched", with no way to tell the link had worked at all.
+        "  doorLinked:        TDL({}, {}, new Set(['light.x'])),\n"
+        "  doorUnlinkedOther: TDL({}, {}, new Set(['light.y'])),\n"
+        "  doorNoLinkedSet:   TDL({}, {}, undefined),\n"
         "}));\n"
     ))
     # Not touched: never placed, dropped, or dropped with the default stamp.
@@ -2550,12 +2557,17 @@ def test_moving_a_light_does_not_count_as_touching_it(tmp_path):
     assert out["rotated"] is True, out
     assert out["recoloured"] is True, out
     assert out["shaped"] is True, out
-    # A door/window never reads as touched, even carrying pre-correction
-    # placement debris that WOULD count for an ordinary light.
+    # A door/window never reads as touched from placement debris, even
+    # carrying stale fields that WOULD count for an ordinary light.
     assert out["doorSized"] is False, out
     assert out["doorRotated"] is False, out
     assert out["doorRecoloured"] is False, out
     assert out["doorShaped"] is False, out
+    # But it DOES read as touched once actually linked to a wall — the only
+    # real work a door has — so "Hide untouched" stops hiding a working link.
+    assert out["doorLinked"] is True, out
+    assert out["doorUnlinkedOther"] is False, out
+    assert out["doorNoLinkedSet"] is False, out
 
 
 def test_fit_to_room_caps_an_oversized_fixture_and_leaves_a_gap(tmp_path):
@@ -3079,7 +3091,7 @@ def test_engrave_never_registers_a_per_fixture_clip_def(tmp_path):
     engrave = _render_style(tmp_path, "engrave")
     assert glow.count("<clipPath") == engrave.count("<clipPath"), (
         "engrave must not register any <clipPath> def beyond the shared room clip glow already carries")
-    assert "clip-path=\"path(" in engrave, "engrave must clip its hatch via an inline clip-path"
+    assert "clip-path:path(" in engrave, "engrave must clip its hatch via an inline clip-path"
 
 
 def test_engrave_crosshatches_when_on_and_single_hatches_when_off(tmp_path):
@@ -3087,7 +3099,7 @@ def test_engrave_crosshatches_when_on_and_single_hatches_when_off(tmp_path):
     off = _render_style(tmp_path, "engrave", state="off")
     # Two perpendicular passes (45deg and 135deg lines) when on; only one
     # direction when off. Anchored on the hatch lines' own fixed
-    # stroke-opacity (LINEOP=0.07, constant regardless of on/t) so this
+    # stroke-opacity (LINEOP=0.70, constant regardless of on/t) so this
     # doesn't pick up unrelated <line> elements (the motion legend, etc.)
     # scattered elsewhere in the same scene.
     import math
@@ -3096,7 +3108,7 @@ def test_engrave_crosshatches_when_on_and_single_hatches_when_off(tmp_path):
         angles = set()
         for m in re.finditer(
             r'<line x1="([\d.-]+)" y1="([\d.-]+)" x2="([\d.-]+)" y2="([\d.-]+)" stroke="[^"]+" '
-            r'stroke-width="[^"]+" stroke-opacity="0\.07"', svg):
+            r'stroke-width="[^"]+" stroke-opacity="0\.70"', svg):
             x1, y1, x2, y2 = (float(v) for v in m.groups())
             dx, dy = x2 - x1, y2 - y1
             if abs(dx) > 0.5 or abs(dy) > 0.5:
