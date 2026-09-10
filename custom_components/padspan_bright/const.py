@@ -19,7 +19,7 @@ Organisation:
 
 DOMAIN = "padspan_bright"
 NAME = "PadSpan Bright"
-VERSION = "0.38.28"
+VERSION = "0.38.29"
 
 # ── Config-flow option keys ───────────────────────────────────────────────────
 CONF_ENABLE_CLOUD = "enable_cloud"
