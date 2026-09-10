@@ -298,12 +298,16 @@ def test_a_linked_closed_barrier_draws_a_solid_line_and_two_purple_dots(tmp_path
     assert 'stroke="#94a3b8"' in svg, "closed reads as the neutral wall line"
 
 
-def test_a_linked_open_barrier_fades_the_line_but_keeps_both_dots(tmp_path):
+def test_a_linked_open_barrier_draws_nothing_but_keeps_both_dots(tmp_path):
+    """Garry, 2026-09-10 (repeated, emphatically): "the doors when open
+    show a grey line where the door is, I want nothing there." A prior
+    pass drew a dashed accent-coloured line for the open state instead of
+    a true gap -- open must now draw nothing for the wall itself."""
     lbe = {**_BARRIER_LBE, "binary_sensor.frontdoor": {**_BARRIER_LBE["binary_sensor.frontdoor"], "state": "on"}}
     out = _run_js(tmp_path, _barrier_harness(_BARRIER_MODEL, lbe))
     svg = out["svg"]
     assert svg.count('fill="#9333ea"') == 2, "the endpoint dots mark WHERE the opening is in both states"
-    assert "#fb7185" in svg, "open must draw the distinct accent colour, not just fade to nothing"
+    assert "#fb7185" not in svg, "open must draw nothing for the wall itself — a true gap, not a coloured line"
     assert 'stroke="#94a3b8"' not in svg, "open must not also draw the closed neutral line"
 
 
@@ -3034,7 +3038,7 @@ def test_automorph_style_dropdown_switches_the_rendered_treatment(tmp_path):
 # geometry, on/off is a material split rather than a hex swap.
 
 _NEW_STYLES = ("circuit", "contour", "facet", "sumie", "stainedglass",
-               "engrave", "constellation", "woven")
+               "engrave", "constellation", "woven", "halo", "pulse", "chevron")
 
 
 def _render_style(tmp_path, style, *, state="on"):
@@ -3099,7 +3103,7 @@ def test_engrave_crosshatches_when_on_and_single_hatches_when_off(tmp_path):
     off = _render_style(tmp_path, "engrave", state="off")
     # Two perpendicular passes (45deg and 135deg lines) when on; only one
     # direction when off. Anchored on the hatch lines' own fixed
-    # stroke-opacity (LINEOP=0.70, constant regardless of on/t) so this
+    # stroke-opacity (LINEOP=0.85, constant regardless of on/t) so this
     # doesn't pick up unrelated <line> elements (the motion legend, etc.)
     # scattered elsewhere in the same scene.
     import math
@@ -3108,7 +3112,7 @@ def test_engrave_crosshatches_when_on_and_single_hatches_when_off(tmp_path):
         angles = set()
         for m in re.finditer(
             r'<line x1="([\d.-]+)" y1="([\d.-]+)" x2="([\d.-]+)" y2="([\d.-]+)" stroke="[^"]+" '
-            r'stroke-width="[^"]+" stroke-opacity="0\.70"', svg):
+            r'stroke-width="[^"]+" stroke-opacity="0\.85"', svg):
             x1, y1, x2, y2 = (float(v) for v in m.groups())
             dx, dy = x2 - x1, y2 - y1
             if abs(dx) > 0.5 or abs(dy) > 0.5:
@@ -4783,7 +4787,7 @@ def test_automorph_full_map_two_renders_are_byte_identical(tmp_path):
         f"const LBE={json.dumps(lbe)};\n"
         f"const FLOORS={json.dumps(floors)};\n"
         "const res={};\n"
-        "for(const style of ['glow','nebula','blueprint','circuit','contour','facet','sumie','stainedglass','engrave','constellation','woven']){\n"
+        "for(const style of ['glow','nebula','blueprint','circuit','contour','facet','sumie','stainedglass','engrave','constellation','woven','halo','pulse','chevron']){\n"
         f"  const opts={{nowMs:{NOW}, automorph:true, automorphRoomPct:100, automorphHardness:-60, automorphStyle:style}};\n"
         "  const s1=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,opts);\n"
         "  const s2=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,opts);\n"
@@ -4792,7 +4796,7 @@ def test_automorph_full_map_two_renders_are_byte_identical(tmp_path):
         "console.log(JSON.stringify(res));\n"
     ))
     for style in ("glow", "nebula", "blueprint", "circuit", "contour", "facet", "sumie",
-                  "stainedglass", "engrave", "constellation", "woven"):
+                  "stainedglass", "engrave", "constellation", "woven", "halo", "pulse", "chevron"):
         assert out[style]["len"] > 0, f"the {style} scene must actually render: {out}"
         assert out[style]["same"], (
             f"two identical {style} renders must be byte-identical — the fabric alone "
