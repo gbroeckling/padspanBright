@@ -95,8 +95,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "lights_automorph_enabled": False,  # Mapping -> Lights: room-alignment aura, off = today's rendering exactly
     "lights_automorph_room_pct": 0,     # 0-100: how far each fixture's aura has grown toward its room's own shape
     "lights_automorph_hardness": 0,     # -100..100, centered: negative sharpens/spikes the aura's edges, positive smooths them into a closed spline; 0 = today's straight edge
-    "lights_automorph_style": "glow",   # "glow" | "blueprint" | "nebula" | "circuit" | "contour" | "facet" | "sumie" | "stainedglass" | "engrave" | "constellation" | "woven" | "halo" | "pulse" | "chevron" — which visual treatment paints the same morphed shape
+    "lights_automorph_style": "glow",   # which visual treatment/shape the fixture's aura takes — see AUTOMORPH_STYLE_LABELS in iso_lights.js for the full, single-source-of-truth list
     "lights_automorph_subtlety": 0,     # 0-100: 0 = full opacity/line-weight (today's look), 100 = thinned lines + faded near-invisible
+    "lights_showcase_theme": "classic",  # which palette Showcase paints with — "classic" reproduces today's look byte-for-byte; see SHOWCASE_THEMES in iso_lights.js for the full list
+    "lights_showcase_presets": [],  # named snapshots of the whole Showcase "look" bundle (theme + automorph + fit/isolux/beacons/codes); see the Presets picker in Mapping -> Lights and its sanitizer in ws_settings.py
     "overview_show_walls": False,   # Overview: draw RF barrier walls over the map
     "overview_show_outdoor": False, # Overview: draw outdoor areas (sheds, driveways) as an overlay
     "overview_show_trails": False,  # Overview/Pure Live: fading movement trail behind each tracked object
@@ -196,6 +198,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 @dataclass
 class SettingsStore:
+    # The three field annotations below do NOT get their usual @dataclass
+    # treatment: this class defines its own __init__ immediately after them,
+    # and @dataclass never generates/overrides __init__ when the class
+    # already has one. They still document the instance's shape (and drive
+    # __repr__/__eq__, which the dataclass machinery does still generate),
+    # but SettingsStore(hass=..., store=..., data=...) — the signature these
+    # annotations imply — is not how this class is actually constructed;
+    # only SettingsStore(hass) is.
     hass: HomeAssistant
     store: Store
     data: dict[str, Any]

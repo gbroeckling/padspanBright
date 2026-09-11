@@ -12,7 +12,7 @@
 // what an interaction does (sidebar: control the light — tab: place it).
 
 const { buildIsoSVG, shapeSvg, fabricFrame, sampleSceneField, pointInPolygon, offsetPolygonInward,
-        lightClassOf } =
+        lightClassOf, SHOWCASE_THEMES, AUTOMORPH_STYLE_LABELS } =
   await import(`./iso_lights.js${new URL(import.meta.url).search}`);
 const { assignLightCodes, resolveLightShape, LIGHT_SHAPES, LIGHT_TYPE_OVERRIDES,
         WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, TEMP_BORDER, LOCK_BORDER, DOOR_BORDER, healthOf } =
@@ -142,12 +142,18 @@ export function effectiveState(eid, reported, now = Date.now()){
 // because a fan's place on the ceiling is context for the light beside it.
 export const LIGHT_CLASSES = [["all","All"],["light","Lights"],["strip","Strips"],["fan","Fans"],["motion","Motion"],["temp","Temps"],["lock","Locks"],["door","Doors/Windows"]];
 
-// Automorph's style dropdown vocabulary — the UI's copy of what
-// automorphAuraSvg (iso_lights.js) actually switches on.
-export const AUTOMORPH_STYLES = [["glow","Glow"],["blueprint","Blueprint"],["nebula","Nebula"],
-  ["circuit","Circuit"],["contour","Contour"],["facet","Facet"],["sumie","Ink Wash"],
-  ["stainedglass","Stained Glass"],["engrave","Engrave"],["constellation","Constellation"],["woven","Woven"],
-  ["halo","Halo"],["pulse","Pulse"],["chevron","Chevron"]];
+// Automorph's style dropdown vocabulary — derived from AUTOMORPH_STYLE_LABELS
+// itself (iso_lights.js) rather than a hand-copied list. A style added there
+// used to also need updating here AND in the validation array iso_lights.js
+// checked opts.automorphStyle against — miss either and the new style's
+// if-block became unreachable with no error, exactly what happened while
+// building the 9 shape styles below "glow"/"pulse". One registry now feeds
+// both.
+export const AUTOMORPH_STYLES = Object.entries(AUTOMORPH_STYLE_LABELS);
+// Showcase's theme dropdown vocabulary — derived from SHOWCASE_THEMES itself
+// (iso_lights.js) rather than a hand-copied list, so a theme added there
+// shows up here for free and can never drift out of sync on the name/label.
+export const SHOWCASE_THEME_OPTIONS = Object.entries(SHOWCASE_THEMES).map(([key, t]) => [key, t.label]);
 export { lightClassOf };
 export function classMatches(l, cls){ return !cls || cls === "all" || lightClassOf(l) === cls; }
 
@@ -1479,7 +1485,8 @@ export function buildLightsMapCard(hostIn){
     codesShown = host.codeChip ? codesVisibleAtZoom(view.zoom) : true;
     isoDiv.innerHTML = buildIsoSVG(host.model, host.byRoom, host.hiddenEidsMap || host.hiddenEids, getFocusZ(view.focusIdx),
       view.floorGap, view.horizGap, host.lightsByEid, host.lightsLoading, floors,
-      { showcase: !!host.showcase, fitRooms: !!host.showcase && !!host.fitRooms,
+      { showcase: !!host.showcase, showcaseTheme: host.showcaseTheme || "classic",
+        fitRooms: !!host.showcase && !!host.fitRooms,
         ambient: host.ambient, isolux: !!host.showcase && !!host.isolux,
         sceneField: host.showcase ? sceneFieldFor(host.sceneName, host.sceneAngle) : null,
         // The use-surface ergonomics — see buildIsoSVG for each. hideCodes
@@ -1556,6 +1563,27 @@ export function buildLightsMapCard(hostIn){
       title: "Presentation rendering — real fixture colour, light pools, contact shadows",
       onclick: () => host.onShowcase(!host.showcase),
     }, host.showcase ? "✦ Showcase ✓" : "✦ Showcase"));
+
+    // Theme — which of 21 distinct palettes Showcase paints with (Garry,
+    // 2026-09-10: "let's build all 20" — one design bake-off, judged live,
+    // turned into a real dropdown the same way Automorph's Style pulldown
+    // already works). "Classic" reproduces today's look exactly; every
+    // other entry is a full re-skin of the same fixtures, rooms and floor
+    // stack — nothing about WHAT draws changes, only the palette it draws
+    // with.
+    if (host.showcase && host.onShowcaseTheme) {
+      const themeSel = document.createElement("select");
+      themeSel.className = "lv-select";
+      themeSel.title = "Showcase's colour palette and material treatment";
+      for (const [kind, label] of SHOWCASE_THEME_OPTIONS) {
+        const o = el("option", { value: kind }, label);
+        if (kind === (host.showcaseTheme || "classic")) o.selected = true;
+        themeSel.appendChild(o);
+      }
+      themeSel.addEventListener("change", () => host.onShowcaseTheme(themeSel.value));
+      ctrlRow.appendChild(el("span", { class: "lv-lbl" }, "Theme"));
+      ctrlRow.appendChild(themeSel);
+    }
 
     // Fit to room — only offered while Showcase is on, because it is a
     // constraint on the presentation, not an edit. Stored measurements are
@@ -1890,6 +1918,74 @@ export function buildLightsMapCard(hostIn){
   if (host.helpBtn) ctrlRow.appendChild(host.helpBtn("lights_build_controls"));
 
   mapCard.appendChild(ctrlRow);
+
+  // Presets — a saved snapshot of the whole Showcase "look" bundle (Theme +
+  // Automorph + Fit room/Isolux/Beacons/Codes). Garry, 2026-09-10: "we now
+  // have thousands of combinations in the mapping, lights setup, we need to
+  // build a preset system... clearly separate from all other settings on
+  // that tab." Deliberately its OWN box below the toolbar (see .lv-presetbar
+  // in styles.css) rather than one more control folded into the row above —
+  // applying a preset changes several unrelated settings at once, a bigger
+  // action than any single toggle beside it, and it reads that way too.
+  if (host.showcase && host.onSavePreset) {
+    const presets = host.showcasePresets || [];
+    const presetBar = el("div", { class: "lv-presetbar" });
+    presetBar.appendChild(el("span", { class: "lv-lbl" }, "Presets"));
+
+    const presetSel = document.createElement("select");
+    presetSel.className = "lv-select";
+    presetSel.title = "A saved combination of Theme, Automorph and the other Showcase controls";
+    presetSel.appendChild(el("option", { value: "" }, presets.length ? "— Select a look —" : "No saved looks yet"));
+    for (const p of presets) presetSel.appendChild(el("option", { value: p.name }, p.name));
+    presetBar.appendChild(presetSel);
+
+    const presetStatus = el("span", { class: "lv-status" }, "");
+    const flashPreset = (msg) => { presetStatus.textContent = msg; setTimeout(() => { presetStatus.textContent = ""; }, 2000); };
+
+    presetBar.appendChild(el("button", {
+      class: "lv-act primary",
+      title: "Apply this preset's Theme, Automorph and other Showcase settings",
+      onclick: async () => {
+        const p = presets.find((x) => x.name === presetSel.value);
+        if (!p) { flashPreset("Pick a preset first"); return; }
+        await host.onApplyPreset(p.values);
+        flashPreset("Applied ✓");
+      },
+    }, "Apply"));
+
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.className = "lv-preset-name";
+    nameInput.placeholder = "Name this look…";
+    nameInput.maxLength = 60;
+    presetBar.appendChild(nameInput);
+
+    presetBar.appendChild(el("button", {
+      class: "lv-act",
+      title: "Save the current Theme, Automorph and other Showcase settings under this name — overwrites a saved look with the same name",
+      onclick: async () => {
+        const name = nameInput.value.trim();
+        if (!name) { flashPreset("Type a name first"); return; }
+        await host.onSavePreset(name);
+        nameInput.value = "";
+        flashPreset("Saved ✓");
+      },
+    }, "Save current"));
+
+    const delBtn = el("button", { class: "lv-act", title: "Delete the selected preset" }, "Delete");
+    delBtn.disabled = !presetSel.value;
+    delBtn.addEventListener("click", async () => {
+      if (!presetSel.value) return;
+      const name = presetSel.value;
+      await host.onDeletePreset(name);
+      flashPreset("Deleted");
+    });
+    presetSel.addEventListener("change", () => { delBtn.disabled = !presetSel.value; });
+    presetBar.appendChild(delBtn);
+    presetBar.appendChild(presetStatus);
+
+    mapCard.appendChild(presetBar);
+  }
 
   // ── Layers + navigation bar ─────────────────────────────────────────────
   // Separate from the view-shaping toolbar above: this row is about WHAT you

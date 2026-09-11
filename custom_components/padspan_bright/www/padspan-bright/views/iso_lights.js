@@ -40,6 +40,682 @@ export { roomColor };
 // photo_machinery).
 import { bestCircleWall, splitPolylineAtTwoPositions, roomEdgeForCircle, circlePolylineIntersections } from "./wall_geom.js";
 
+// ── Showcase themes (Garry, 2026-09-10: "let's build all 20") ───────────────
+// Showcase has always drawn the SAME fabric, fixtures and feature surface
+// (floor stacking, motion, door barriers, isolux, beacons, scenes) as the
+// working map — only the LIGHTING of the drawing differs. A theme narrows
+// that further still: it swaps only the palette/material constants a
+// handful of Showcase-gated call sites already read from one central place,
+// never the geometry, the layering order, or which features exist. "classic"
+// reproduces every one of today's literal values exactly, so an install that
+// never touches lights_showcase_theme is contractually byte-identical to
+// pre-theme output — the same off-by-default discipline every other
+// Showcase/Automorph control in this file already holds.
+//
+// Each theme is a flat object of named tokens; gradStops() below turns a
+// [offset%, color, opacity] triple array into <stop> markup so a theme is
+// pure data, never markup of its own. Adding a theme never touches the
+// render function — only this table grows.
+const gradStops=(stops)=>stops.map(([off,col,op])=>
+  `<stop offset="${off}%" stop-color="${col}" stop-opacity="${op}"/>`).join("");
+export const SHOWCASE_THEMES = {
+  classic: {
+    label: "Classic",
+    vignetteStops:  [[0,"#1a3a26",0.55],[60,"#0d2016",0.22],[100,"#040a07",0]],
+    slabStops:      [[0,"#7dd3a0",0.05],[100,"#0b1c13",0.12]],
+    slabSideTop:    {fill:"#0d2318", fillOpacity:0.3,  stroke:"#1c2e24"},
+    slabSideFront:  {fill:"#0a1a12", fillOpacity:0.26, stroke:"#1c2e24"},
+    glossStops:     [[0,"#fff",0.5],[45,"#fff",0.1],[100,"#000",0.18]],
+    washStops:      [[0,"#fff",0.075],[100,"#fff",0]],
+    shadeStops:     [[0,"#000",0.55],[55,"#000",0.22],[100,"#000",0]],
+    roomEdgeStroke: "#04100a", roomFillOpacity: 0.085, roomStrokeOpacity: 0.8, roomStrokeWidth: 1.3,
+    roomGlowStops:  [[0,0.16],[45,0.05],[100,0]],
+    roomLabelOpacity: 0.6, roomLabelLetterSpacing: "0.16em", roomLabelUppercase: true,
+    poolStops:      [[0,0.85],[28,0.34],[62,0.10],[100,0]],
+    fixtureOffFill: "#1b2733", fixtureOnStrokeFallback: "#f8fafc", fixtureOffStroke: "#3f5165",
+    fixtureBloomOpacity: 0.22, fixtureBodyOnOpacity: 0.75, fixtureBodyOffOpacity: 0.55,
+    inkOffColor: "#8fa6bb", labelColorOff: "#7f93a8",
+    codeChipBg: "#050d09", codeChipBgOpacity: 0.72,
+  },
+  cinematic_glass: {
+    label: "Cinematic Architectural Glass",
+    vignetteStops: [[0,"#3d5586",0.6], [45,"#1a2440",0.34], [100,"#05070a",0]],
+    slabStops: [[0,"#3a4f72",0.08], [100,"#070c14",0.22]],
+    slabSideTop: {fill:"#16223a", fillOpacity:0.38, stroke:"#2a3550"},
+    slabSideFront: {fill:"#0c1420", fillOpacity:0.3, stroke:"#1c2740"},
+    glossStops: [[0,"#fff",0.6], [40,"#fff",0.15], [100,"#000",0.22]],
+    washStops: [[0,"#dceeff",0.12], [100,"#dceeff",0]],
+    shadeStops: [[0,"#000",0.6], [55,"#000",0.25], [100,"#000",0]],
+    roomEdgeStroke: "#070b12",
+    roomFillOpacity: 0.14,
+    roomStrokeOpacity: 0.68,
+    roomStrokeWidth: 1.4,
+    roomGlowStops: [[0,0.3], [45,0.12], [100,0]],
+    roomLabelOpacity: 0.92,
+    roomLabelLetterSpacing: "0.01em",
+    roomLabelUppercase: false,
+    poolStops: [[0,0.55], [30,0.24], [60,0.08], [100,0]],
+    fixtureOffFill: "#141b26",
+    fixtureOnStrokeFallback: "#eef2f8",
+    fixtureOffStroke: "#7e8ea3",
+    fixtureBloomOpacity: 0.34,
+    fixtureBodyOnOpacity: 0.82,
+    fixtureBodyOffOpacity: 0.42,
+    inkOffColor: "#5b6b80",
+    labelColorOff: "#7c8aa3",
+    codeChipBg: "#0f1524",
+    codeChipBgOpacity: 0.68,
+  },
+  neo_hud: {
+    label: "Neo HUD",
+    vignetteStops: [[0,"#123542",0.52], [60,"#0a1620",0.24], [100,"#020304",0]],
+    slabStops: [[0,"#123542",0.08], [100,"#020304",0.18]],
+    slabSideTop: {fill:"#0d151b", fillOpacity:0.85, stroke:"#1c5866"},
+    slabSideFront: {fill:"#070b0e", fillOpacity:0.9, stroke:"#123240"},
+    glossStops: [[0,"#eaffff",0.4], [45,"#8febff",0.08], [100,"#000",0.25]],
+    washStops: [[0,"#4fe3ff",0.06], [100,"#4fe3ff",0]],
+    shadeStops: [[0,"#000",0.6], [55,"#000",0.25], [100,"#000",0]],
+    roomEdgeStroke: "#020304",
+    roomFillOpacity: 0.12,
+    roomStrokeOpacity: 0.85,
+    roomStrokeWidth: 1.4,
+    roomGlowStops: [[0,0.22], [40,0.08], [100,0]],
+    roomLabelOpacity: 0.9,
+    roomLabelLetterSpacing: "0.2em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.9], [25,0.5], [55,0.18], [100,0]],
+    fixtureOffFill: "#141f26",
+    fixtureOnStrokeFallback: "#ffb454",
+    fixtureOffStroke: "#46545f",
+    fixtureBloomOpacity: 0.38,
+    fixtureBodyOnOpacity: 0.9,
+    fixtureBodyOffOpacity: 0.55,
+    inkOffColor: "#5c6f7a",
+    labelColorOff: "#7d97a1",
+    codeChipBg: "#050a0d",
+    codeChipBgOpacity: 0.7,
+  },
+  editorial_minimalist: {
+    label: "Editorial Minimalist",
+    vignetteStops: [[0,"#faf6ee",0.95], [55,"#f2eadb",0.85], [100,"#e0d2b8",0.65]],
+    slabStops: [[0,"#fffaf0",0.06], [100,"#34302a",0.08]],
+    slabSideTop: {fill:"#e6dcc5", fillOpacity:0.5, stroke:"#c7b797"},
+    slabSideFront: {fill:"#dccdae", fillOpacity:0.45, stroke:"#bfae8c"},
+    glossStops: [[0,"#fff8ef",0.55], [45,"#fff8ef",0.12], [100,"#5c4a35",0.14]],
+    washStops: [[0,"#fff8ef",0.08], [100,"#fff8ef",0]],
+    shadeStops: [[0,"#2b241c",0.3], [55,"#2b241c",0.12], [100,"#2b241c",0]],
+    roomEdgeStroke: "#34302a",
+    roomFillOpacity: 0.06,
+    roomStrokeOpacity: 0.55,
+    roomStrokeWidth: 1.1,
+    roomGlowStops: [[0,0.1], [45,0.03], [100,0]],
+    roomLabelOpacity: 0.78,
+    roomLabelLetterSpacing: "0.15em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.42], [28,0.2], [62,0.07], [100,0]],
+    fixtureOffFill: "#d6cdb8",
+    fixtureOnStrokeFallback: "#fff8ef",
+    fixtureOffStroke: "#34302a",
+    fixtureBloomOpacity: 0.32,
+    fixtureBodyOnOpacity: 0.7,
+    fixtureBodyOffOpacity: 0.42,
+    inkOffColor: "#85817b",
+    labelColorOff: "#b8b4ad",
+    codeChipBg: "#efe8db",
+    codeChipBgOpacity: 0.85,
+  },
+  ambient_premium: {
+    label: "Ambient Premium",
+    vignetteStops: [[0,"#1c1622",0.6], [55,"#110d13",0.28], [100,"#07070a",0]],
+    slabStops: [[0,"#e8c99a",0.05], [100,"#07070a",0.14]],
+    slabSideTop: {fill:"#231c28", fillOpacity:0.34, stroke:"#3a2f28"},
+    slabSideFront: {fill:"#140f18", fillOpacity:0.28, stroke:"#2c2420"},
+    glossStops: [[0,"#ffffff",0.05], [55,"#ffffff",0], [100,"#000000",0.22]],
+    washStops: [[0,"#f4ead9",0.06], [100,"#f4ead9",0]],
+    shadeStops: [[0,"#000000",0.55], [55,"#000000",0.2], [100,"#000000",0]],
+    roomEdgeStroke: "#0a070c",
+    roomFillOpacity: 0.06,
+    roomStrokeOpacity: 0.5,
+    roomStrokeWidth: 1.4,
+    roomGlowStops: [[0,0.45], [45,0.17], [100,0]],
+    roomLabelOpacity: 0.85,
+    roomLabelLetterSpacing: "0.16em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.88], [26,0.5], [58,0.2], [100,0]],
+    fixtureOffFill: "#201c1a",
+    fixtureOnStrokeFallback: "#4a3d2f",
+    fixtureOffStroke: "#4a433c",
+    fixtureBloomOpacity: 0.3,
+    fixtureBodyOnOpacity: 0.85,
+    fixtureBodyOffOpacity: 0.6,
+    inkOffColor: "#57504a",
+    labelColorOff: "#8c8378",
+    codeChipBg: "#0a0810",
+    codeChipBgOpacity: 0.55,
+  },
+  dataviz_precision: {
+    label: "Data-Viz Precision",
+    vignetteStops: [[0,"#4c7fff",0.12], [55,"#0d1220",0.08], [100,"#07080a",0]],
+    slabStops: [[0,"#5b8cff",0.05], [100,"#0b0d14",0.14]],
+    slabSideTop: {fill:"#141721", fillOpacity:0.3, stroke:"#232a3a"},
+    slabSideFront: {fill:"#0b0c12", fillOpacity:0.26, stroke:"#232a3a"},
+    glossStops: [[0,"#fff",0.28], [45,"#fff",0.06], [100,"#000",0.24]],
+    washStops: [[0,"#fff",0.05], [100,"#fff",0]],
+    shadeStops: [[0,"#000",0.45], [55,"#000",0.18], [100,"#000",0]],
+    roomEdgeStroke: "#06070c",
+    roomFillOpacity: 0.05,
+    roomStrokeOpacity: 0.32,
+    roomStrokeWidth: 1.25,
+    roomGlowStops: [[0,0.12], [45,0.04], [100,0]],
+    roomLabelOpacity: 0.82,
+    roomLabelLetterSpacing: "0.09em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.55], [28,0.28], [62,0.1], [100,0]],
+    fixtureOffFill: "#161822",
+    fixtureOnStrokeFallback: "#5b8cff",
+    fixtureOffStroke: "#454b5c",
+    fixtureBloomOpacity: 0.4,
+    fixtureBodyOnOpacity: 0.6,
+    fixtureBodyOffOpacity: 0.85,
+    inkOffColor: "#3a3f4d",
+    labelColorOff: "#5b617a",
+    codeChipBg: "#0f1118",
+    codeChipBgOpacity: 0.6,
+  },
+  organic_bioluminescent: {
+    label: "Organic Bioluminescent",
+    vignetteStops: [[0,"#0d2b3f",0.55], [60,"#071a26",0.24], [100,"#01050a",0]],
+    slabStops: [[0,"#7dfbe6",0.05], [100,"#081c28",0.12]],
+    slabSideTop: {fill:"#0a1f2c", fillOpacity:0.3, stroke:"#173446"},
+    slabSideFront: {fill:"#081720", fillOpacity:0.26, stroke:"#173446"},
+    glossStops: [[0,"#ffffff",0.22], [45,"#ffffff",0.06], [100,"#000000",0.16]],
+    washStops: [[0,"#ffffff",0.06], [100,"#ffffff",0]],
+    shadeStops: [[0,"#00050b",0.5], [55,"#00050b",0.2], [100,"#00050b",0]],
+    roomEdgeStroke: "#02060c",
+    roomFillOpacity: 0.11,
+    roomStrokeOpacity: 0.35,
+    roomStrokeWidth: 1.1,
+    roomGlowStops: [[0,0.22], [50,0.08], [100,0]],
+    roomLabelOpacity: 0.88,
+    roomLabelLetterSpacing: "0.16em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.92], [22,0.55], [50,0.22], [100,0]],
+    fixtureOffFill: "#1e293b",
+    fixtureOnStrokeFallback: "#f6fffb",
+    fixtureOffStroke: "#4b6070",
+    fixtureBloomOpacity: 0.28,
+    fixtureBodyOnOpacity: 0.8,
+    fixtureBodyOffOpacity: 0.4,
+    inkOffColor: "#7e97a8",
+    labelColorOff: "#7c93a5",
+    codeChipBg: "#050b10",
+    codeChipBgOpacity: 0.74,
+  },
+  elevated_blueprint: {
+    label: "Elevated Architectural Blueprint",
+    vignetteStops: [[0,"#151c40",0.65], [55,"#0b0f28",0.32], [100,"#04050d",0]],
+    slabStops: [[0,"#cfdcff",0.05], [100,"#04050d",0.14]],
+    slabSideTop: {fill:"#10193f", fillOpacity:0.35, stroke:"#2b3868"},
+    slabSideFront: {fill:"#0a0e2c", fillOpacity:0.3, stroke:"#232f5c"},
+    glossStops: [[0,"#eef3ff",0.45], [45,"#eef3ff",0.08], [100,"#000000",0.22]],
+    washStops: [[0,"#dce6ff",0.06], [100,"#dce6ff",0]],
+    shadeStops: [[0,"#04050d",0.55], [55,"#04050d",0.22], [100,"#04050d",0]],
+    roomEdgeStroke: "#232f5c",
+    roomFillOpacity: 0.055,
+    roomStrokeOpacity: 0.85,
+    roomStrokeWidth: 1.15,
+    roomGlowStops: [[0,0.12], [45,0.04], [100,0]],
+    roomLabelOpacity: 0.85,
+    roomLabelLetterSpacing: "0.15em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.75], [28,0.3], [62,0.09], [100,0]],
+    fixtureOffFill: "#0d1330",
+    fixtureOnStrokeFallback: "#d9b573",
+    fixtureOffStroke: "#5c6a92",
+    fixtureBloomOpacity: 0.26,
+    fixtureBodyOnOpacity: 0.85,
+    fixtureBodyOffOpacity: 0.5,
+    inkOffColor: "#6d7aa3",
+    labelColorOff: "#7f8fc0",
+    codeChipBg: "#0a0e22",
+    codeChipBgOpacity: 0.82,
+  },
+  material_you: {
+    label: "Material You",
+    vignetteStops: [[0,"#2c2735",0.5], [60,"#1a1622",0.22], [100,"#0d0b12",0]],
+    slabStops: [[0,"#ffc773",0.05], [100,"#0d0b12",0.14]],
+    slabSideTop: {fill:"#2c2735", fillOpacity:0.32, stroke:"#3c3646"},
+    slabSideFront: {fill:"#1a1622", fillOpacity:0.28, stroke:"#3c3646"},
+    glossStops: [[0,"#fff",0.4], [45,"#fff",0.08], [100,"#000",0.12]],
+    washStops: [[0,"#fff",0.06], [100,"#fff",0]],
+    shadeStops: [[0,"#000",0.6], [55,"#000",0.28], [100,"#000",0]],
+    roomEdgeStroke: "#0d0b12",
+    roomFillOpacity: 0.2,
+    roomStrokeOpacity: 0.55,
+    roomStrokeWidth: 1.6,
+    roomGlowStops: [[0,0.14], [50,0.045], [100,0]],
+    roomLabelOpacity: 0.95,
+    roomLabelLetterSpacing: "0.02em",
+    roomLabelUppercase: false,
+    poolStops: [[0,0.9], [28,0.55], [62,0.16], [100,0]],
+    fixtureOffFill: "#2c2735",
+    fixtureOnStrokeFallback: "#ffc773",
+    fixtureOffStroke: "#4a4453",
+    fixtureBloomOpacity: 0.3,
+    fixtureBodyOnOpacity: 0.95,
+    fixtureBodyOffOpacity: 0.7,
+    inkOffColor: "#8b8593",
+    labelColorOff: "#948b9c",
+    codeChipBg: "#0d0b12",
+    codeChipBgOpacity: 0.72,
+  },
+  neon_precision: {
+    label: "Bold Neon Precision",
+    vignetteStops: [[0,"#2a1245",0.5], [55,"#160a28",0.22], [100,"#05050a",0]],
+    slabStops: [[0,"#26e2ff",0.05], [100,"#05050a",0.14]],
+    slabSideTop: {fill:"#0d0d17", fillOpacity:0.32, stroke:"#2a2440"},
+    slabSideFront: {fill:"#08080f", fillOpacity:0.26, stroke:"#1e1930"},
+    glossStops: [[0,"#fff",0.55], [45,"#fff",0.12], [100,"#000",0.2]],
+    washStops: [[0,"#fff",0.06], [100,"#fff",0]],
+    shadeStops: [[0,"#000",0.6], [55,"#000",0.25], [100,"#000",0]],
+    roomEdgeStroke: "#08050f",
+    roomFillOpacity: 0.07,
+    roomStrokeOpacity: 0.95,
+    roomStrokeWidth: 1.6,
+    roomGlowStops: [[0,0.18], [55,0.06], [100,0]],
+    roomLabelOpacity: 0.85,
+    roomLabelLetterSpacing: "0.18em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.95], [22,0.55], [50,0.22], [100,0]],
+    fixtureOffFill: "#0d0d16",
+    fixtureOnStrokeFallback: "#fffaf5",
+    fixtureOffStroke: "#453a5c",
+    fixtureBloomOpacity: 0.4,
+    fixtureBodyOnOpacity: 0.9,
+    fixtureBodyOffOpacity: 0.42,
+    inkOffColor: "#9088ad",
+    labelColorOff: "#82829a",
+    codeChipBg: "#0c0c14",
+    codeChipBgOpacity: 0.72,
+  },
+  luxury_realestate: {
+    label: "Luxury Real-Estate",
+    vignetteStops: [[0,"#8a5a24",0.4], [55,"#3a220f",0.24], [100,"#0a0705",0]],
+    slabStops: [[0,"#f1cf90",0.08], [100,"#241408",0.16]],
+    slabSideTop: {fill:"#2a1a0e", fillOpacity:0.32, stroke:"#3d2814"},
+    slabSideFront: {fill:"#1f130a", fillOpacity:0.28, stroke:"#3d2814"},
+    glossStops: [[0,"#fff8e6",0.55], [45,"#f1cf90",0.12], [100,"#150d06",0.22]],
+    washStops: [[0,"#fff4d9",0.08], [100,"#fff4d9",0]],
+    shadeStops: [[0,"#080503",0.8], [55,"#080503",0.32], [100,"#080503",0]],
+    roomEdgeStroke: "#080503",
+    roomFillOpacity: 0.14,
+    roomStrokeOpacity: 0.7,
+    roomStrokeWidth: 1.4,
+    roomGlowStops: [[0,0.2], [45,0.07], [100,0]],
+    roomLabelOpacity: 0.82,
+    roomLabelLetterSpacing: "0.09em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.92], [35,0.52], [68,0.2], [100,0]],
+    fixtureOffFill: "#443725",
+    fixtureOnStrokeFallback: "#f1cf90",
+    fixtureOffStroke: "#8a7256",
+    fixtureBloomOpacity: 0.28,
+    fixtureBodyOnOpacity: 0.85,
+    fixtureBodyOffOpacity: 0.6,
+    inkOffColor: "#6f5a3f",
+    labelColorOff: "#9c8564",
+    codeChipBg: "#0c0805",
+    codeChipBgOpacity: 0.72,
+  },
+  wabi_sabi: {
+    label: "Wabi-Sabi Zen",
+    vignetteStops: [[0,"#f9f3e7",0.85], [55,"#efe6d3",0.5], [100,"#ddd1ba",0.2]],
+    slabStops: [[0,"#fdf6e8",0.14], [100,"#c8b990",0.16]],
+    slabSideTop: {fill:"#ddd2bd", fillOpacity:0.5, stroke:"#7a6a4c"},
+    slabSideFront: {fill:"#c8b990", fillOpacity:0.45, stroke:"#7a6a4c"},
+    glossStops: [[0,"#fff8e6",0.22], [45,"#fff8e6",0.06], [100,"#332e26",0.12]],
+    washStops: [[0,"#fdf8ec",0.06], [100,"#fdf8ec",0]],
+    shadeStops: [[0,"#332e26",0.35], [55,"#332e26",0.14], [100,"#332e26",0]],
+    roomEdgeStroke: "#332e26",
+    roomFillOpacity: 0.055,
+    roomStrokeOpacity: 0.7,
+    roomStrokeWidth: 1.5,
+    roomGlowStops: [[0,0.08], [45,0.03], [100,0]],
+    roomLabelOpacity: 0.72,
+    roomLabelLetterSpacing: "0.2em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.62], [30,0.3], [65,0.12], [100,0]],
+    fixtureOffFill: "#cfc6b2",
+    fixtureOnStrokeFallback: "#fdf6e8",
+    fixtureOffStroke: "#6b6255",
+    fixtureBloomOpacity: 0.18,
+    fixtureBodyOnOpacity: 0.8,
+    fixtureBodyOffOpacity: 0.6,
+    inkOffColor: "#6b6255",
+    labelColorOff: "#5b5346",
+    codeChipBg: "#f6efe1",
+    codeChipBgOpacity: 0.8,
+  },
+  hygge: {
+    label: "Hygge Warmth",
+    vignetteStops: [[0,"#fff8ea",0.4], [55,"#eddcbc",0.18], [100,"#c8a878",0]],
+    slabStops: [[0,"#fff8ea",0.14], [100,"#c8a262",0.12]],
+    slabSideTop: {fill:"#d9c39c", fillOpacity:0.85, stroke:"#8a6f4e"},
+    slabSideFront: {fill:"#c7ac7c", fillOpacity:0.8, stroke:"#7c6b4d"},
+    glossStops: [[0,"#fff",0.35], [45,"#fff",0.08], [100,"#4a3826",0.1]],
+    washStops: [[0,"#fff",0.15], [100,"#fff",0]],
+    shadeStops: [[0,"#3a2a18",0.35], [55,"#3a2a18",0.14], [100,"#3a2a18",0]],
+    roomEdgeStroke: "#4a3826",
+    roomFillOpacity: 0.14,
+    roomStrokeOpacity: 0.85,
+    roomStrokeWidth: 1.4,
+    roomGlowStops: [[0,0.14], [50,0.05], [100,0]],
+    roomLabelOpacity: 0.85,
+    roomLabelLetterSpacing: "0.15em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.92], [30,0.55], [62,0.18], [100,0]],
+    fixtureOffFill: "#cdbfa5",
+    fixtureOnStrokeFallback: "#e2a251",
+    fixtureOffStroke: "#a4906e",
+    fixtureBloomOpacity: 0.28,
+    fixtureBodyOnOpacity: 0.82,
+    fixtureBodyOffOpacity: 0.6,
+    inkOffColor: "#f3e9d6",
+    labelColorOff: "#8a7458",
+    codeChipBg: "#fbf5ea",
+    codeChipBgOpacity: 0.86,
+  },
+  aurora: {
+    label: "Aurora",
+    vignetteStops: [[0,"#2a1f57",0.55], [60,"#140f34",0.24], [100,"#050311",0]],
+    slabStops: [[0,"#9d7bff",0.05], [100,"#0a0824",0.14]],
+    slabSideTop: {fill:"#140f34", fillOpacity:0.3, stroke:"#2a1f57"},
+    slabSideFront: {fill:"#0a0824", fillOpacity:0.26, stroke:"#2a1f57"},
+    glossStops: [[0,"#ffffff",0.45], [45,"#ffffff",0.12], [100,"#000000",0.22]],
+    washStops: [[0,"#ffffff",0.06], [100,"#ffffff",0]],
+    shadeStops: [[0,"#000000",0.55], [55,"#000000",0.22], [100,"#000000",0]],
+    roomEdgeStroke: "#0a0824",
+    roomFillOpacity: 0.12,
+    roomStrokeOpacity: 0.75,
+    roomStrokeWidth: 1.4,
+    roomGlowStops: [[0,0.2], [45,0.07], [100,0]],
+    roomLabelOpacity: 0.85,
+    roomLabelLetterSpacing: "0.08em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.75], [30,0.4], [65,0.15], [100,0]],
+    fixtureOffFill: "#26233d",
+    fixtureOnStrokeFallback: "#f3f0ff",
+    fixtureOffStroke: "#5f5a82",
+    fixtureBloomOpacity: 0.26,
+    fixtureBodyOnOpacity: 0.8,
+    fixtureBodyOffOpacity: 0.5,
+    inkOffColor: "#7c76a0",
+    labelColorOff: "#a9a3c9",
+    codeChipBg: "#0a081a",
+    codeChipBgOpacity: 0.55,
+  },
+  automotive_hud: {
+    label: "Automotive HUD",
+    vignetteStops: [[0,"#1c1f24",0], [65,"#0a0b0d",0.12], [100,"#020304",0.6]],
+    slabStops: [[0,"#3d4149",0.05], [100,"#08090b",0.14]],
+    slabSideTop: {fill:"#262a31", fillOpacity:0.34, stroke:"#3a3f47"},
+    slabSideFront: {fill:"#15171b", fillOpacity:0.3, stroke:"#22262c"},
+    glossStops: [[0,"#ffffff",0.16], [45,"#ffffff",0.04], [100,"#000000",0.28]],
+    washStops: [[0,"#ffd9a3",0.035], [100,"#ffd9a3",0]],
+    shadeStops: [[0,"#000000",0.6], [55,"#000000",0.25], [100,"#000000",0]],
+    roomEdgeStroke: "#08090c",
+    roomFillOpacity: 0.09,
+    roomStrokeOpacity: 0.5,
+    roomStrokeWidth: 1.4,
+    roomGlowStops: [[0,0.08], [45,0.03], [100,0]],
+    roomLabelOpacity: 0.8,
+    roomLabelLetterSpacing: "0.24em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.95], [35,0.55], [70,0.16], [100,0]],
+    fixtureOffFill: "#1b1e23",
+    fixtureOnStrokeFallback: "#e3a05c",
+    fixtureOffStroke: "#4c525b",
+    fixtureBloomOpacity: 0.4,
+    fixtureBodyOnOpacity: 0.9,
+    fixtureBodyOffOpacity: 0.55,
+    inkOffColor: "#585e66",
+    labelColorOff: "#5c626b",
+    codeChipBg: "#15171b",
+    codeChipBgOpacity: 0.72,
+  },
+  art_deco: {
+    label: "Art Deco Luxury",
+    vignetteStops: [[0,"#182a49",0.55], [55,"#0c1524",0.24], [100,"#04060b",0]],
+    slabStops: [[0,"#e8d8a0",0.06], [100,"#04060b",0.14]],
+    slabSideTop: {fill:"#1b140a", fillOpacity:0.34, stroke:"#3a2c12"},
+    slabSideFront: {fill:"#0c0906", fillOpacity:0.3, stroke:"#3a2c12"},
+    glossStops: [[0,"#faf0ce",0.45], [45,"#d4af37",0.12], [100,"#000000",0.2]],
+    washStops: [[0,"#f5e7b8",0.08], [100,"#f5e7b8",0]],
+    shadeStops: [[0,"#000000",0.55], [55,"#000000",0.24], [100,"#000000",0]],
+    roomEdgeStroke: "#1b140a",
+    roomFillOpacity: 0.22,
+    roomStrokeOpacity: 0.85,
+    roomStrokeWidth: 1.6,
+    roomGlowStops: [[0,0.22], [45,0.08], [100,0]],
+    roomLabelOpacity: 0.85,
+    roomLabelLetterSpacing: "0.22em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.85], [28,0.36], [62,0.12], [100,0]],
+    fixtureOffFill: "#241f18",
+    fixtureOnStrokeFallback: "#f5e7b8",
+    fixtureOffStroke: "#7a6535",
+    fixtureBloomOpacity: 0.3,
+    fixtureBodyOnOpacity: 0.9,
+    fixtureBodyOffOpacity: 0.6,
+    inkOffColor: "#6a5a34",
+    labelColorOff: "#8a7a52",
+    codeChipBg: "#0a0a10",
+    codeChipBgOpacity: 0.72,
+  },
+  swiss_style: {
+    label: "Swiss International",
+    vignetteStops: [[0,"#FFFFFF",0.92], [60,"#F4F4EF",0.85], [100,"#E8E8E1",0.78]],
+    slabStops: [[0,"#FFFFFF",0.55], [100,"#E0E0D8",0.35]],
+    slabSideTop: {fill:"#F2F2EE", fillOpacity:0.85, stroke:"#141414"},
+    slabSideFront: {fill:"#DEDED6", fillOpacity:0.85, stroke:"#141414"},
+    glossStops: [[0,"#fff",0.4], [45,"#fff",0.08], [100,"#000",0.06]],
+    washStops: [[0,"#fff",0.05], [100,"#fff",0]],
+    shadeStops: [[0,"#000",0.18], [55,"#000",0.06], [100,"#000",0]],
+    roomEdgeStroke: "#141414",
+    roomFillOpacity: 0.05,
+    roomStrokeOpacity: 0.75,
+    roomStrokeWidth: 2.0,
+    roomGlowStops: [[0,0.05], [45,0.02], [100,0]],
+    roomLabelOpacity: 0.92,
+    roomLabelLetterSpacing: "0.02em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.34], [28,0.16], [62,0.05], [100,0]],
+    fixtureOffFill: "#FFFFFF",
+    fixtureOnStrokeFallback: "#E2231A",
+    fixtureOffStroke: "#141414",
+    fixtureBloomOpacity: 0.15,
+    fixtureBodyOnOpacity: 0.95,
+    fixtureBodyOffOpacity: 0.9,
+    inkOffColor: "#8A8A82",
+    labelColorOff: "#8A8A82",
+    codeChipBg: "#FFFFFF",
+    codeChipBgOpacity: 0.9,
+  },
+  bauhaus: {
+    label: "Bauhaus",
+    vignetteStops: [[0,"#f7f2e7",0.0], [55,"#e7dfc9",0.1], [100,"#171512",0.06]],
+    slabStops: [[0,"#fbf7ec",0.06], [100,"#171512",0.1]],
+    slabSideTop: {fill:"#e7dfc9", fillOpacity:0.85, stroke:"#171512"},
+    slabSideFront: {fill:"#d8cbae", fillOpacity:0.9, stroke:"#171512"},
+    glossStops: [[0,"#ffffff",0.12], [45,"#ffffff",0.04], [100,"#171512",0.06]],
+    washStops: [[0,"#fbf7ec",0.06], [100,"#fbf7ec",0]],
+    shadeStops: [[0,"#171512",0.28], [55,"#171512",0.1], [100,"#171512",0]],
+    roomEdgeStroke: "#171512",
+    roomFillOpacity: 0.62,
+    roomStrokeOpacity: 0.95,
+    roomStrokeWidth: 2.6,
+    roomGlowStops: [[0,0.05], [45,0.02], [100,0]],
+    roomLabelOpacity: 0.92,
+    roomLabelLetterSpacing: "0.06em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.6], [30,0.25], [65,0.08], [100,0]],
+    fixtureOffFill: "#fbf7ec",
+    fixtureOnStrokeFallback: "#171512",
+    fixtureOffStroke: "#171512",
+    fixtureBloomOpacity: 0.18,
+    fixtureBodyOnOpacity: 0.95,
+    fixtureBodyOffOpacity: 0.6,
+    inkOffColor: "#8f8875",
+    labelColorOff: "#8f8875",
+    codeChipBg: "#171512",
+    codeChipBgOpacity: 0.88,
+  },
+  nightscape: {
+    label: "Nightscape City Lights",
+    vignetteStops: [[0,"#152344",0.6], [60,"#0a1128",0.32], [100,"#03050c",0]],
+    slabStops: [[0,"#5fc8f2",0.05], [100,"#080f22",0.14]],
+    slabSideTop: {fill:"#122043", fillOpacity:0.32, stroke:"#213756"},
+    slabSideFront: {fill:"#0a1530", fillOpacity:0.28, stroke:"#1a2c48"},
+    glossStops: [[0,"#dff0ff",0.42], [45,"#dff0ff",0.08], [100,"#000000",0.22]],
+    washStops: [[0,"#bcd4ff",0.07], [100,"#bcd4ff",0]],
+    shadeStops: [[0,"#000000",0.5], [55,"#000000",0.2], [100,"#000000",0]],
+    roomEdgeStroke: "#0e2038",
+    roomFillOpacity: 0.09,
+    roomStrokeOpacity: 0.65,
+    roomStrokeWidth: 1.4,
+    roomGlowStops: [[0,0.18], [45,0.06], [100,0]],
+    roomLabelOpacity: 0.85,
+    roomLabelLetterSpacing: "0.05em",
+    roomLabelUppercase: false,
+    poolStops: [[0,0.92], [28,0.42], [62,0.14], [100,0]],
+    fixtureOffFill: "#2a3550",
+    fixtureOnStrokeFallback: "#fff3d6",
+    fixtureOffStroke: "#3c4b6b",
+    fixtureBloomOpacity: 0.28,
+    fixtureBodyOnOpacity: 0.85,
+    fixtureBodyOffOpacity: 0.55,
+    inkOffColor: "#6f83a8",
+    labelColorOff: "#93a6c9",
+    codeChipBg: "#050a18",
+    codeChipBgOpacity: 0.72,
+  },
+  holographic: {
+    label: "Holographic Iridescent",
+    vignetteStops: [[0,"#241a3d",0.55], [60,"#140f22",0.24], [100,"#0a0810",0]],
+    slabStops: [[0,"#eef2ff",0.06], [100,"#0a0810",0.14]],
+    slabSideTop: {fill:"#1c1530", fillOpacity:0.34, stroke:"#3a3060"},
+    slabSideFront: {fill:"#130d22", fillOpacity:0.28, stroke:"#3a3060"},
+    glossStops: [[0,"#ffc2ea",0.55], [45,"#c9a6ff",0.25], [100,"#1a1030",0.22]],
+    washStops: [[0,"#8fc7ff",0.08], [100,"#8fc7ff",0]],
+    shadeStops: [[0,"#0b0912",0.5], [55,"#0b0912",0.2], [100,"#0b0912",0]],
+    roomEdgeStroke: "#0a0810",
+    roomFillOpacity: 0.12,
+    roomStrokeOpacity: 0.9,
+    roomStrokeWidth: 1.6,
+    roomGlowStops: [[0,0.22], [45,0.08], [100,0]],
+    roomLabelOpacity: 0.75,
+    roomLabelLetterSpacing: "0.14em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.9], [30,0.5], [65,0.18], [100,0]],
+    fixtureOffFill: "#241e35",
+    fixtureOnStrokeFallback: "#f4f6ff",
+    fixtureOffStroke: "#6a5f85",
+    fixtureBloomOpacity: 0.65,
+    fixtureBodyOnOpacity: 0.9,
+    fixtureBodyOffOpacity: 0.6,
+    inkOffColor: "#8f86a8",
+    labelColorOff: "#9a8fb8",
+    codeChipBg: "#0b0912",
+    codeChipBgOpacity: 0.7,
+  },
+  retro_futurism: {
+    label: "Elevated Retro-Futurism",
+    vignetteStops: [[0,"#ffb27a",0.35], [55,"#c17ba8",0.16], [100,"#201c3a",0]],
+    slabStops: [[0,"#f6d6c9",0.06], [100,"#1c1730",0.14]],
+    slabSideTop: {fill:"#241d3f", fillOpacity:0.34, stroke:"#8a7658"},
+    slabSideFront: {fill:"#1b1730", fillOpacity:0.3, stroke:"#8a7658"},
+    glossStops: [[0,"#fff6e6",0.45], [45,"#fff6e6",0.08], [100,"#150f26",0.2]],
+    washStops: [[0,"#f6e6c9",0.08], [100,"#f6e6c9",0]],
+    shadeStops: [[0,"#150f26",0.5], [55,"#150f26",0.2], [100,"#150f26",0]],
+    roomEdgeStroke: "#140f24",
+    roomFillOpacity: 0.1,
+    roomStrokeOpacity: 0.75,
+    roomStrokeWidth: 1.4,
+    roomGlowStops: [[0,0.18], [45,0.06], [100,0]],
+    roomLabelOpacity: 0.65,
+    roomLabelLetterSpacing: "0.17em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.9], [30,0.5], [60,0.15], [100,0]],
+    fixtureOffFill: "#5a5270",
+    fixtureOnStrokeFallback: "#e8b76a",
+    fixtureOffStroke: "#8a7fa0",
+    fixtureBloomOpacity: 0.28,
+    fixtureBodyOnOpacity: 0.85,
+    fixtureBodyOffOpacity: 0.55,
+    inkOffColor: "#b3a8c9",
+    labelColorOff: "#a79cc0",
+    codeChipBg: "#150f26",
+    codeChipBgOpacity: 0.7,
+  },
+  obsidian_noir: {
+    // Garry, 2026-09-10: "one of the themes need to be mostly black, that
+    // is missing" — every other theme still keeps a lit room fill or a
+    // tinted vignette as its ground; this one goes almost to true black
+    // everywhere and lets the light pools themselves be the only bright
+    // thing on screen, home-theatre-room style, with one warm brass accent
+    // instead of a clinical white so it still reads as premium rather than
+    // as an OLED test pattern.
+    label: "Obsidian Noir",
+    vignetteStops: [[0,"#1a1a1a",0.7], [55,"#0a0a0a",0.4], [100,"#000000",0]],
+    slabStops: [[0,"#2a2a2a",0.05], [100,"#000000",0.3]],
+    slabSideTop: {fill:"#0f0f0f", fillOpacity:0.55, stroke:"#000000"},
+    slabSideFront: {fill:"#050505", fillOpacity:0.62, stroke:"#000000"},
+    glossStops: [[0,"#ffffff",0.16], [45,"#ffffff",0.04], [100,"#000000",0.32]],
+    washStops: [[0,"#ffffff",0.04], [100,"#ffffff",0]],
+    shadeStops: [[0,"#000000",0.72], [55,"#000000",0.36], [100,"#000000",0]],
+    roomEdgeStroke: "#000000",
+    roomFillOpacity: 0.05,
+    roomStrokeOpacity: 0.55,
+    roomStrokeWidth: 1.1,
+    roomGlowStops: [[0,0.10], [45,0.03], [100,0]],
+    roomLabelOpacity: 0.5,
+    roomLabelLetterSpacing: "0.2em",
+    roomLabelUppercase: true,
+    poolStops: [[0,0.95], [26,0.42], [60,0.13], [100,0]],
+    fixtureOffFill: "#0d0d0d",
+    fixtureOnStrokeFallback: "#e8c78a",
+    fixtureOffStroke: "#2a2a2a",
+    fixtureBloomOpacity: 0.42,
+    fixtureBodyOnOpacity: 0.95,
+    fixtureBodyOffOpacity: 0.42,
+    inkOffColor: "#4a4a4a",
+    labelColorOff: "#5a5a5a",
+    codeChipBg: "#000000",
+    codeChipBgOpacity: 0.85,
+  },};
+export const SHOWCASE_THEME_NAMES = Object.keys(SHOWCASE_THEMES);
+
+// Automorph's style dropdown vocabulary — single source of truth for both
+// the label a fixture's Style pulldown shows (lights_map.js derives its
+// options straight from this) and the validation AUTOMORPH_STYLE itself
+// runs below. Before this registry existed, an unrecognised style key was
+// checked against a bare literal array duplicated inline at the validation
+// site — adding a style there without ALSO updating lights_map.js's own
+// hand-written dropdown array (or ws_settings.py's backend whitelist) left
+// the new style's if-block in automorphAuraSvg completely unreachable, with
+// AUTOMORPH_STYLE silently falling back to "glow" and no error anywhere:
+// exactly what happened here while building the 9 shape styles below,
+// caught only by comparing rendered output against the expected shapes.
+export const AUTOMORPH_STYLE_LABELS = {
+  glow: "Glow", blueprint: "Blueprint", nebula: "Nebula", circuit: "Circuit",
+  contour: "Contour", facet: "Facet", sumie: "Ink Wash", stainedglass: "Stained Glass",
+  constellation: "Constellation", halo: "Halo", pulse: "Pulse",
+  spikecrown: "Spike Crown", scallop: "Scalloped Wave", bloomflower: "Bloom",
+  geode: "Geode Cluster", honeycomb: "Honeycomb", orbitring: "Orbit Rings",
+  puzzle: "Puzzle Piece", extrude: "Block Extrude", shatter: "Shatter",
+};
+export const AUTOMORPH_STYLE_NAMES = Object.keys(AUTOMORPH_STYLE_LABELS);
+
 // Flat-top hexagon points in SVG px (pointy-top orientation)
 export function hexPts(cx, cy, r){
   const pts=[];
@@ -1648,6 +2324,11 @@ export function sceneColours(model, floors, byRoom, lightsByEid, hiddenEids, fie
 // data-cx/cy) is untouched, so the map stays fully editable in this mode.
 export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGap, lightsByEid={}, lightsLoading=false, floors=[], opts={}){
   const SHOW = !!opts.showcase;
+  // Which palette Showcase paints with — see SHOWCASE_THEMES above. Falls
+  // back to "classic" for an unknown/missing name exactly the way
+  // AUTOMORPH_STYLE falls back to "glow", so a stale saved value from a
+  // theme that gets retired later never breaks the render.
+  const THEME = SHOWCASE_THEMES[opts.showcaseTheme] || SHOWCASE_THEMES.classic;
   const FIT  = !!opts.fitRooms;
   // Daylight, 0 (night) to 1 (full day), from the sun the callers already
   // know about. Day lifts the ground and mutes the pools — a lit lamp at noon
@@ -1689,8 +2370,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   // morphed ring (see automorphAuraSvg). "glow" is the shipped default;
   // the others are exploratory, kept behind this dropdown so any of them
   // can be dropped later without touching the geometry underneath.
-  const AUTOMORPH_STYLE = ["glow","blueprint","nebula","circuit","contour","facet","sumie",
-    "stainedglass","engrave","constellation","woven","halo","pulse","chevron"].includes(opts.automorphStyle) ? opts.automorphStyle : "glow";
+  const AUTOMORPH_STYLE = AUTOMORPH_STYLE_NAMES.includes(opts.automorphStyle) ? opts.automorphStyle : "glow";
   // Subtlety, 0-100 (Garry, 2026-09-07: "a slider for subtlety, so you can
   // dial from objects looking full, to almost completely lost in
   // background... with shades, thinner lines"). 0 = today's opacity/line-
@@ -2120,11 +2800,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     if(!roomGlowIds.has(rc)) roomGlowIds.set(rc, `psroomglow_${roomGlowIds.size}`);
   }
   for(const [rc,rid] of roomGlowIds){
-    s+=`<radialGradient id="${rid}">`+
-      `<stop offset="0%" stop-color="${rc}" stop-opacity="0.16"/>`+
-      `<stop offset="45%" stop-color="${rc}" stop-opacity="0.05"/>`+
-      `<stop offset="100%" stop-color="${rc}" stop-opacity="0"/>`+
-      `</radialGradient>`;
+    s+=`<radialGradient id="${rid}">${gradStops(THEME.roomGlowStops.map(([off,op])=>[off,rc,op]))}</radialGradient>`;
   }
   // Softens the wall cut on a clipped pool: applied OUTSIDE the clip, so a
   // couple of pixels of light feather over the boundary the way a doorway
@@ -2207,12 +2883,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     // a hard edge, and the near-quadratic falloff here is what makes it look
     // like light landing on a floor rather than a coloured circle.
     for(const [col,id] of glowIds){
-      s+=`<radialGradient id="${id}">`+
-        `<stop offset="0%" stop-color="${col}" stop-opacity="0.85"/>`+
-        `<stop offset="28%" stop-color="${col}" stop-opacity="0.34"/>`+
-        `<stop offset="62%" stop-color="${col}" stop-opacity="0.10"/>`+
-        `<stop offset="100%" stop-color="${col}" stop-opacity="0"/>`+
-        `</radialGradient>`;
+      s+=`<radialGradient id="${id}">${gradStops(THEME.poolStops.map(([off,op])=>[off,col,op]))}</radialGradient>`;
     }
     // With Automorph off, psclipsoft and the room clips are emitted HERE —
     // their pre-Automorph home between the pool gradients and psshade — so
@@ -2224,28 +2895,18 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     }
     // Contact shadow under a fixture — what actually sells a marker as an
     // object sitting in the room rather than a sticker on the glass.
-    s+=`<radialGradient id="psshade">`+
-      `<stop offset="0%" stop-color="#000" stop-opacity="0.55"/>`+
-      `<stop offset="55%" stop-color="#000" stop-opacity="0.22"/>`+
-      `<stop offset="100%" stop-color="#000" stop-opacity="0"/></radialGradient>`;
+    s+=`<radialGradient id="psshade">${gradStops(THEME.shadeStops)}</radialGradient>`;
     // One light source, upper-left, for the whole drawing: the marker gloss and
     // the room sheen use the same ramp so nothing looks lit from two suns.
-    s+=`<linearGradient id="psgloss" x1="0.15" y1="0" x2="0.6" y2="1">`+
-      `<stop offset="0%" stop-color="#fff" stop-opacity="0.5"/>`+
-      `<stop offset="45%" stop-color="#fff" stop-opacity="0.1"/>`+
-      `<stop offset="100%" stop-color="#000" stop-opacity="0.18"/></linearGradient>`;
-    s+=`<linearGradient id="pswash" x1="0" y1="0" x2="0.35" y2="1">`+
-      `<stop offset="0%" stop-color="#fff" stop-opacity="0.075"/>`+
-      `<stop offset="100%" stop-color="#fff" stop-opacity="0"/></linearGradient>`;
-    s+=`<linearGradient id="psslab" x1="0" y1="0" x2="0" y2="1">`+
-      `<stop offset="0%" stop-color="#7dd3a0" stop-opacity="0.05"/>`+
-      `<stop offset="100%" stop-color="#0b1c13" stop-opacity="0.12"/></linearGradient>`;
+    s+=`<linearGradient id="psgloss" x1="0.15" y1="0" x2="0.6" y2="1">${gradStops(THEME.glossStops)}</linearGradient>`;
+    s+=`<linearGradient id="pswash" x1="0" y1="0" x2="0.35" y2="1">${gradStops(THEME.washStops)}</linearGradient>`;
+    s+=`<linearGradient id="psslab" x1="0" y1="0" x2="0" y2="1">${gradStops(THEME.slabStops)}</linearGradient>`;
     // A flat black field reads as an empty canvas; a lit one reads as a room
     // the model is standing in. This is the cheapest depth in the whole file.
-    s+=`<radialGradient id="psvig" cx="50%" cy="42%" r="72%">`+
-      `<stop offset="0%" stop-color="#1a3a26" stop-opacity="0.55"/>`+
-      `<stop offset="60%" stop-color="#0d2016" stop-opacity="0.22"/>`+
-      `<stop offset="100%" stop-color="#040a07" stop-opacity="0"/></radialGradient>`;
+    // Garry, 2026-09-10: the classic mint-green tint here (and on psslab
+    // above) was the "too bright green" complaint — every other theme
+    // picks its own ambient tint instead of inheriting this one.
+    s+=`<radialGradient id="psvig" cx="50%" cy="42%" r="72%">${gradStops(THEME.vignetteStops)}</radialGradient>`;
   }
   levels.forEach((z2,li)=>{
     const c2=levelColor(z2);
@@ -2432,8 +3093,8 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
 
     s+=`<g opacity="${go}"${gpe}>`;
     // Slab sides
-    s+=`<polygon points="${pts([TR,BR,BR_b,TR_b])}" fill="#0d2318" fill-opacity="0.3" stroke="#1c2e24" stroke-width="0.7"/>`;
-    s+=`<polygon points="${pts([BL,BR,BR_b,BL_b])}" fill="#0a1a12" fill-opacity="0.26" stroke="#1c2e24" stroke-width="0.7"/>`;
+    s+=`<polygon points="${pts([TR,BR,BR_b,TR_b])}" fill="${THEME.slabSideTop.fill}" fill-opacity="${THEME.slabSideTop.fillOpacity}" stroke="${THEME.slabSideTop.stroke}" stroke-width="0.7"/>`;
+    s+=`<polygon points="${pts([BL,BR,BR_b,BL_b])}" fill="${THEME.slabSideFront.fill}" fill-opacity="${THEME.slabSideFront.fillOpacity}" stroke="${THEME.slabSideFront.stroke}" stroke-width="0.7"/>`;
     if(SHOW){
       // A dashed border round every storey is drafting shorthand; a lit plate
       // with a hairline edge is what a finished drawing looks like. Same
@@ -2475,7 +3136,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         ? `<rect x="${(hx-w/2).toFixed(1)}" y="${(cy-h/2).toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" `+
           `rx="${(h*0.35).toFixed(1)}" fill="transparent" stroke="none"/>`
         : `<rect x="${(hx-w/2).toFixed(1)}" y="${(cy-h/2).toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" `+
-          `rx="${(h*0.35).toFixed(1)}" fill="#050d09" fill-opacity="0.72" stroke="${tCol}" stroke-opacity="0.45" stroke-width="0.6"/>`;
+          `rx="${(h*0.35).toFixed(1)}" fill="${THEME.codeChipBg}" fill-opacity="${THEME.codeChipBgOpacity}" stroke="${tCol}" stroke-opacity="0.45" stroke-width="0.6"/>`;
       const text=invisible ? "" :
         `<text x="${hx.toFixed(1)}" y="${cy.toFixed(1)}" text-anchor="middle" dominant-baseline="middle" `+
         `font-family="ui-monospace,monospace" font-size="${fs.toFixed(1)}" font-weight="700" `+
@@ -2509,7 +3170,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       const lit=bodyCol(l,entry);
       // Showcase: a dark fixture is slate and recedes; the eye should go to
       // what is actually lit. Working mode keeps the flat pair it always had.
-      const fill=on?lit:(SHOW?"#1b2733":"#374151");
+      const fill=on?lit:(SHOW?THEME.fixtureOffFill:"#374151");
       const stripBorder=l.isWled?WLED_BORDER
         :(l.isPartition?PARTITION_BORDER
         :(l.isFan?FAN_BORDER
@@ -2518,7 +3179,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         :(l.isTemp?TEMP_BORDER
         :(l.isLock?LOCK_BORDER:null))))));
       const stroke=SHOW
-        ? (on?(stripBorder||"#f8fafc"):"#3f5165")
+        ? (on?(stripBorder||THEME.fixtureOnStrokeFallback):THEME.fixtureOffStroke)
         : (stripBorder||"#60a5fa");
       // A class the layer chips have filtered out is dimmed to a ghost and
       // stops taking taps — it keeps its place on the map (that IS the
@@ -2526,7 +3187,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       const dim=dimmed(l);
       const op=(SHOW?(on?1:0.62):(on?1:0.45))*(dim?0.22:1);
       const gAttrs=`data-class="${lightClassOf(l)}"${dim?' pointer-events="none"':""}`;
-      const tCol=SHOW?(on?lit:"#7f93a8"):(on?"#111827":"#e2e8f0");
+      const tCol=SHOW?(on?lit:THEME.labelColorOff):(on?"#111827":"#e2e8f0");
       // A perimeter light's body IS its trace ("should be just the custom
       // shape formed to the room" — Garry, then: "Keep the glow, and the
       // click space of the square, but hide the square"). So: the Showcase
@@ -2538,7 +3199,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // the map doesn't.
       if(l.shape==="perimeter"){
         const HW=HEX_R*0.866;
-        const pCol=SHOW?(on?lit:"#7f93a8"):(on?lit:"#94a3b8");
+        const pCol=SHOW?(on?lit:THEME.labelColorOff):(on?lit:"#94a3b8");
         const pLbl=HIDECODES ? (CODECHIP ? codeChipSvg(l,hx,hy-HEX_R*1.55,pCol,HEX_R*1.55,true) : "") : (CODECHIP
           ? codeChipSvg(l,hx,hy-HEX_R*1.55,pCol)   // the pill sits in the hit space, where the code was
           : `<text x="${hx.toFixed(1)}" y="${hy.toFixed(1)}" text-anchor="middle" dominant-baseline="middle" `+
@@ -2609,14 +3270,14 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         //
         // Detail is skipped below 8 px: markers are sized in metres and floor
         // at 5 px, and a lamp ring inside a 5 px disc is mud, not information.
-        const ink=on?inkOn(lit):"#8fa6bb";
+        const ink=on?inkOn(lit):THEME.inkOffColor;
         const detail=HEX_R>=8
           ? (t.length
               ? `<g transform="${t.join(" ")}">`+shapeDetailSvg(l.shape,0,0,HEX_R,ink,sw)+`</g>`
               : shapeDetailSvg(l.shape,hx,hy,HEX_R,ink,sw))
           : "";
-        body=(on?layer(`fill="none" stroke="${lit}" stroke-width="${(sw*2.6).toFixed(2)}" stroke-opacity="0.22" stroke-linejoin="round"`):"")+
-          layer(`fill="${fill}" stroke="${stroke}" stroke-width="${sw.toFixed(2)}" stroke-opacity="${on?0.75:0.55}" stroke-linejoin="round"`)+
+        body=(on?layer(`fill="none" stroke="${lit}" stroke-width="${(sw*2.6).toFixed(2)}" stroke-opacity="${THEME.fixtureBloomOpacity}" stroke-linejoin="round"`):"")+
+          layer(`fill="${fill}" stroke="${stroke}" stroke-width="${sw.toFixed(2)}" stroke-opacity="${on?THEME.fixtureBodyOnOpacity:THEME.fixtureBodyOffOpacity}" stroke-linejoin="round"`)+
           detail+
           layer(`fill="url(#psgloss)" stroke="none" pointer-events="none"`);
       } else {
@@ -2832,7 +3493,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // outlines. The LIGHT'S colour still shows where it belongs: the
       // Showcase glow underneath stays in the live colour.
       const stripBorder=l.isWled?WLED_BORDER:(l.isPartition?PARTITION_BORDER:null);
-      const lineCol=SHOW ? (on?(stripBorder||"#f8fafc"):"#3f5165") : (stripBorder||"#60a5fa");
+      const lineCol=SHOW ? (on?(stripBorder||THEME.fixtureOnStrokeFallback):THEME.fixtureOffStroke) : (stripBorder||"#60a5fa");
       const op=SHOW?(on?0.95:0.4):(on?1:0.45);
       const sw=Math.max(1.4, frame.scale*0.05);
       const eidAttr=`data-eid="${escSVG(l.entity_id)}"`;
@@ -3304,64 +3965,6 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
 
         return {glow: glowMarkup, edge: edgeMarkup};
       }
-      if(AUTOMORPH_STYLE==="engrave"){
-        // A field of fine, evenly-weighted parallel hatch lines — a
-        // banknote/etching-plate shading pass, nothing but linework. Off
-        // draws one direction, spaced wide (a light outline pass); on
-        // crosses a second pass at 90° and both tighten, the classic
-        // engraver's move from outline to shading. Every stroke holds one
-        // constant, quiet ink weight — state and t read entirely through
-        // line density and direction-count, never opacity.
-        let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
-        for(const [px,py] of ring){
-          if(px<minX)minX=px; if(px>maxX)maxX=px;
-          if(py<minY)minY=py; if(py>maxY)maxY=py;
-        }
-        const cx=(minX+maxX)/2, cy=(minY+maxY)/2;
-        const diag=Math.hypot(maxX-minX,maxY-minY)/2+4;
-
-        const LINEOP=0.85;
-        function hatchSet(angleDeg,spacing){
-          const rad=angleDeg*Math.PI/180;
-          const ux=Math.cos(rad), uy=Math.sin(rad);
-          const nx=-uy, ny=ux;
-          let out="";
-          for(let off=-diag; off<=diag; off+=spacing){
-            const bx=cx+nx*off, by=cy+ny*off;
-            const x1=(bx-ux*diag).toFixed(1), y1=(by-uy*diag).toFixed(1);
-            const x2=(bx+ux*diag).toFixed(1), y2=(by+uy*diag).toFixed(1);
-            out+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${ink}" stroke-width="${swid(0.8)}" stroke-opacity="${opac(LINEOP)}" pointer-events="none"/>`;
-          }
-          return out;
-        }
-
-        const cap=(2*diag)/24;
-        let hatch;
-        if(on){
-          const spacing=Math.max(8-5*t,cap);
-          hatch=hatchSet(45,spacing)+hatchSet(135,spacing);
-        }else{
-          const spacing=Math.max(13-6*t,cap);
-          hatch=hatchSet(45,spacing);
-        }
-        // Clipped to the ring's OWN outline, which is unique per fixture
-        // (position, size, morph state) — never a registered <clipPath>
-        // def keyed by fixture, the same per-fixture-defs bloat this
-        // file's automorph defs are built to avoid elsewhere (compare
-        // psautomorphduo_on/off — exactly two, by STATE — and
-        // psglossauto_${lidx} — one per FLOOR, never per fixture). An
-        // inline CSS clip-path carries the same per-fixture cost class as
-        // the `d` attribute itself already emitted on every path here —
-        // no def, no id, nothing added to <defs>. Needs the `view-box`
-        // geometry-box explicitly: hatch lines run diag past the ring on
-        // every side (see hatchSet), so the clipped content's own bounding
-        // box is nothing like the ring itself, and clip-path's default
-        // reference box is that bounding box, not the SVG's coordinate
-        // space — without `view-box` the path's own coordinates get
-        // reinterpreted relative to that wrong origin and the visible clip
-        // silhouette lands offset from the ring it was meant to trace.
-        return {glow:"", edge: `<g style="clip-path:path('${d}') view-box" pointer-events="none">${hatch}</g>`};
-      }
       if(AUTOMORPH_STYLE==="constellation"){
         // A sparse star-chart: every ring vertex becomes a tiny star (a
         // soft duotone halo plus a crisp core dot), joined by faint
@@ -3410,59 +4013,13 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
 
         return {glow, edge: chords + spokes + cores};
       }
-      if(AUTOMORPH_STYLE==="woven"){
-        // A thin continuous binding line follows the ring like a basket's
-        // rim coil, crossed at regular intervals by short perpendicular
-        // ticks that alternate paint order to fake an over/under
-        // interlace — half painted first (tucked under), half after (on
-        // top, each capped with a tiny gradient-lit knot). On samples
-        // tighter and paints heavier (a defined, close weave); off spaces
-        // out and fades (loose and slack).
-        const ringLen = ring.length;
-        const stateOn = on ? 1 : 0.62;
-        const step = on ? 2 : 3;
-        const wf = 1 + (weightOffPct/7)*0.12;
-        const tickHalf = (4.5 + 3.5*t) * wf;
-        const spineOpac = (0.65 + 0.25*t) * stateOn;
-        const overOpac  = (0.80 + 0.20*t) * stateOn;
-        const underOpac = (0.55 + 0.20*t) * stateOn;
-        const knotOpac  = (0.70 + 0.25*t) * stateOn;
-        const knotR     = (1.1 + 0.6*t) * wf;
-        const spineW = on ? 2.2 : 1.6;
-        const overW  = on ? 2.0 : 1.4;
-        const underW = on ? 1.5 : 1.1;
-        const spineColor = on ? AUTOMORPH_BASE_ON : AUTOMORPH_BASE_OFF;
-
-        let under = "";
-        let over = "";
-        for(let i=0;i<ringLen;i+=step){
-          const [x,y] = ring[i];
-          const [px,py] = ring[(i - 1 + ringLen) % ringLen];
-          const [nx,ny] = ring[(i + 1) % ringLen];
-          let tx = nx - px, ty = ny - py;
-          const len = Math.hypot(tx,ty) || 1;
-          tx /= len; ty /= len;
-          const perpx = -ty, perpy = tx;
-          const x1 = x - perpx*tickHalf, y1 = y - perpy*tickHalf;
-          const x2 = x + perpx*tickHalf, y2 = y + perpy*tickHalf;
-          const isOver = (Math.floor(i/step) % 2) === 0;
-          if(isOver){
-            over += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${ink}" stroke-width="${swid(overW)}" stroke-linecap="round" opacity="${opac(overOpac)}" pointer-events="none"/>`;
-            over += `<circle cx="${x2.toFixed(1)}" cy="${y2.toFixed(1)}" r="${knotR.toFixed(2)}" fill="${duo}" opacity="${opac(knotOpac)}" pointer-events="none"/>`;
-          } else {
-            under += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${ink}" stroke-width="${swid(underW)}" stroke-linecap="round" opacity="${opac(underOpac)}" pointer-events="none"/>`;
-          }
-        }
-
-        const spine = `<path d="${d}" fill="none" stroke="${spineColor}" stroke-width="${swid(spineW)}" opacity="${opac(spineOpac)}" pointer-events="none"/>`;
-
-        return {glow: "", edge: clipWrap(`<g pointer-events="none">${under}${spine}${over}</g>`)};
-      }
-      // Three more styles (Garry, 2026-09-10: the first 8 candidates read as
+      // Halo and Pulse (Garry, 2026-09-10: the first 8 candidates read as
       // "way too subtle" even after the opacity fix above, plus "add some
       // more ideas") — same ring/d/on/t/ink/duo contract as every style
       // above, tuned deliberately BOLDER than the original three so there is
-      // no ambiguity about whether something is drawing.
+      // no ambiguity about whether something is drawing. (A third style from
+      // this batch, Chevron, and two earlier styles, Engrave and Woven, were
+      // all cut on Garry's word, 2026-09-10: "all misses.")
       if(AUTOMORPH_STYLE==="halo"){
         // Maximum-legibility treatment, on purpose: one thick near-opaque
         // ring plus a soft blurred halo behind it. No dash, no wash, no
@@ -3503,35 +4060,716 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         }
         return {glow: clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${dots}</g>`), edge: clipWrap(base)};
       }
-      if(AUTOMORPH_STYLE==="chevron"){
-        // Hazard-tape chevrons around the ring, tangent-aligned — pointing
-        // outward when on (energized, alert), tucked inward when off (at
-        // rest). Segmented ticks read as a different language than woven's
-        // continuous coil or circuit's traces.
-        const ringLen = ring.length;
-        const step = on ? 3 : 4;
-        const armLen = (5+2*t) * (on?1.15:0.85);
-        const chevOp = on ? (0.65+0.30*t) : (0.35+0.20*t);
-        let marks = "";
-        for(let i=0;i<ringLen;i+=step){
-          const [x,y] = ring[i];
-          const [px,py] = ring[(i-1+ringLen)%ringLen];
-          const [nx,ny] = ring[(i+1)%ringLen];
-          let tx = nx-px, ty = ny-py;
-          const len = Math.hypot(tx,ty) || 1;
-          tx/=len; ty/=len;
-          const nrmx = -ty, nrmy = tx;
-          const dir = on ? 1 : -1;
-          const apex = [x + nrmx*armLen*dir*0.6, y + nrmy*armLen*dir*0.6];
-          const a1 = [x - tx*armLen, y - ty*armLen];
-          const a2 = [x + tx*armLen, y + ty*armLen];
-          marks += `<path d="M${a1[0].toFixed(1)},${a1[1].toFixed(1)} L${apex[0].toFixed(1)},${apex[1].toFixed(1)} `+
-            `L${a2[0].toFixed(1)},${a2[1].toFixed(1)}" fill="none" stroke="${ink}" stroke-width="${swid(on?1.6:1.2)}" `+
-            `stroke-linecap="round" stroke-linejoin="round" stroke-opacity="${opac(chevOp)}" pointer-events="none"/>`;
+      if(AUTOMORPH_STYLE==="spikecrown"){
+        // Genuine crown/star silhouette: walk ring's own vertices in order
+        // and place each one inside a spikeCount-sized index segment; a
+        // tent wave over that segment (0 at the segment's two edges, 1 at
+        // its middle) pulls the middle vertex sharply OUTWARD along its own
+        // hx,hy radial and pulls the edge vertices slightly INWARD, so the
+        // built path is a real gear/crown outline, not ring redrawn. Off
+        // reshapes the tent with a power <1 (broad, rounded plateau near
+        // the peak = a blunt bump) and a small outward pull; on reshapes it
+        // with a power >1 (narrow, pointed peak = a knife-tip) and a tall
+        // outward pull, plus a bright dot at every tip that off omits
+        // outright — sharpness, height and dot COUNT all carry state,
+        // never hue. Spike count comes from ring.length so every fixture's
+        // crown is stable frame to frame without any randomness.
+        const n = ring.length;
+        if(n < 3) return {glow:"", edge:""};
+        const spikeCount = 7 + (n % 4); // deterministic 7..10 points
+        const segLen = n / spikeCount;
+        const outAmt = on ? (0.42 + 0.30*t) : (0.14 + 0.10*t);
+        const inAmt  = on ? (0.11 + 0.06*t) : (0.05 + 0.03*t);
+        const tentPow = on ? 2.0 : 0.65;
+        const tents = [];
+        const pts = [];
+        for(let i=0;i<n;i++){
+          const seg = i / segLen;
+          const frac = seg - Math.floor(seg);
+          const tent = 1 - Math.abs(2*frac - 1); // 0 at segment edges, 1 at its middle
+          tents.push(tent);
+          const shaped = Math.pow(tent, tentPow);
+          const vx = ring[i][0], vy = ring[i][1];
+          const dx = vx - hx, dy = vy - hy;
+          const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+          const ux = dx / dist, uy = dy / dist;
+          const mult = 1 + outAmt*shaped - inAmt*(1 - shaped);
+          pts.push([hx + ux*dist*mult, hy + uy*dist*mult]);
         }
-        const spine = `<path d="${d}" fill="none" stroke="${ink}" stroke-width="${swid(on?1.0:0.8)}" `+
-          `stroke-opacity="${opac((on?0.30:0.18)+0.15*t)}" stroke-linejoin="round" pointer-events="none"/>`;
-        return {glow:"", edge: clipWrap(spine+marks)};
+        let crownPath = "";
+        for(let i=0;i<n;i++){
+          crownPath += (i===0?"M":"L") + pts[i][0].toFixed(1) + "," + pts[i][1].toFixed(1) + " ";
+        }
+        crownPath += "Z";
+        // Tip vertices = local maxima of the (unshaped) tent wave, one per spike.
+        const tips = [];
+        for(let i=0;i<n;i++){
+          const prev = tents[(i-1+n)%n], next = tents[(i+1)%n];
+          if(tents[i] >= prev && tents[i] >= next && tents[i] > 0.55) tips.push(i);
+        }
+        const bandOp = opac((on ? 0.26 : 0.16) + 0.10*t);
+        const band = `<path d="${d}" fill="none" stroke="${ink}" stroke-width="${swid(0.8+0.4*t)}" `+
+          `stroke-opacity="${bandOp}" pointer-events="none"/>`;
+        const fillOp = opac((on ? 0.16 : 0.08) + 0.08*t);
+        const fillMarkup = `<path d="${crownPath}" fill="${duo}" fill-opacity="${fillOp}" pointer-events="none"/>`;
+        const crownOp = opac((on ? 0.68 : 0.38) + 0.28*t);
+        const crownW  = swid((on ? 2.0 : 1.4) + 0.9*t);
+        const crownMain = `<path d="${crownPath}" fill="none" stroke="${ink}" stroke-width="${crownW}" `+
+          `stroke-opacity="${crownOp}" stroke-linejoin="miter" pointer-events="none"/>`;
+        let tipDots = "";
+        let glow = "";
+        if(on){
+          const dotR = swid(1.5 + 0.9*t);
+          const dotOp = opac(0.70 + 0.30*t);
+          for(const ti of tips){
+            const [tx, ty] = pts[ti];
+            tipDots += `<circle cx="${tx.toFixed(1)}" cy="${ty.toFixed(1)}" r="${dotR}" fill="${ink}" `+
+              `fill-opacity="${dotOp}" pointer-events="none"/>`;
+          }
+          let tipGlow = "";
+          const glowR = swid(3.2 + 2.0*t);
+          const glowDotOp = opac(0.32 + 0.24*t);
+          for(const ti of tips){
+            const [tx, ty] = pts[ti];
+            tipGlow += `<circle cx="${tx.toFixed(1)}" cy="${ty.toFixed(1)}" r="${glowR}" fill="${duo}" `+
+              `fill-opacity="${glowDotOp}" pointer-events="none"/>`;
+          }
+          glow = clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${tipGlow}</g>`);
+        }
+        const edge = clipWrap(fillMarkup + band + crownMain + tipDots);
+        return {glow, edge};
+      }
+      // "scallop" — the ring's own outline is resampled around its centroid and
+      // pushed in/out by a sine wave (radius * (1 + amp*sin(waveCount*angle+phase))),
+      // then rewoven through a Catmull-Rom spline so the result reads as a smooth
+      // ocean-wave / shell-scallop edge instead of the plain polygon. A second,
+      // smaller nested wave (80% scale, higher frequency, opposite phase) rides
+      // inside the outer one for a layered-water look. Off = slow (few waves),
+      // barely-rippled; on = faster wave count and fuller amplitude, brighter —
+      // both driven by the ring's own local radius so the silhouette still tracks
+      // the room shape. Phase/frequency jitter comes from a deterministic sine-hash
+      // of the fixture's own position, so every render of the same fixture is identical.
+      if(AUTOMORPH_STYLE==="scallop"){
+        let cx=0, cy=0;
+        for(const [vx,vy] of ring){ cx+=vx; cy+=vy; }
+        cx/=ring.length; cy/=ring.length;
+
+        const polar = ring.map(([vx,vy])=>{
+          let a = Math.atan2(vy-cy, vx-cx);
+          if(a<0) a += Math.PI*2;
+          return {a, r: Math.hypot(vx-cx, vy-cy)};
+        }).sort((p,q)=>p.a-q.a);
+        const pm = polar.length;
+
+        const baseRadiusAt=(angIn)=>{
+          let a = angIn % (Math.PI*2);
+          if(a<0) a += Math.PI*2;
+          if(a<=polar[0].a || a>=polar[pm-1].a){
+            const span = (Math.PI*2 - polar[pm-1].a) + polar[0].a;
+            const along = a>=polar[pm-1].a ? (a-polar[pm-1].a) : (a + Math.PI*2 - polar[pm-1].a);
+            const f = span===0 ? 0 : along/span;
+            return polar[pm-1].r + (polar[0].r - polar[pm-1].r)*f;
+          }
+          for(let i=0;i<pm-1;i++){
+            if(a>=polar[i].a && a<=polar[i+1].a){
+              const span = polar[i+1].a - polar[i].a;
+              const f = span===0 ? 0 : (a-polar[i].a)/span;
+              return polar[i].r + (polar[i+1].r - polar[i].r)*f;
+            }
+          }
+          return polar[0].r;
+        };
+
+        const seed = hx*0.7 + hy*1.3;
+        const rnd = (i) => { const x = Math.sin(seed + i*12.9898) * 43758.5453; return x - Math.floor(x); };
+        const phaseA = rnd(1) * Math.PI * 2;
+        const phaseB = phaseA + Math.PI/3 + rnd(2)*0.6;
+
+        const outerWaves = on ? 7 : 4;
+        const innerWaves = on ? 9 : 5;
+        const outerAmp = (on ? 0.09 : 0.03) + (on ? 0.05 : 0.02)*t;
+        const innerAmp = outerAmp * 0.55;
+
+        const N = 56;
+        const buildWave=(scale, amp, waves, phase)=>{
+          const pts=[];
+          for(let i=0;i<N;i++){
+            const ang = (i/N)*Math.PI*2;
+            const base = baseRadiusAt(ang)*scale;
+            const r = base * (1 + amp*Math.sin(waves*ang + phase));
+            pts.push([cx+Math.cos(ang)*r, cy+Math.sin(ang)*r]);
+          }
+          return pts;
+        };
+        const smoothClosedPath=(pts)=>{
+          const n = pts.length;
+          let s = "";
+          for(let i=0;i<n;i++){
+            const p0=pts[(i-1+n)%n], p1=pts[i], p2=pts[(i+1)%n], p3=pts[(i+2)%n];
+            if(i===0) s += "M"+p1[0].toFixed(2)+","+p1[1].toFixed(2)+" ";
+            const c1x=p1[0]+(p2[0]-p0[0])/6, c1y=p1[1]+(p2[1]-p0[1])/6;
+            const c2x=p2[0]-(p3[0]-p1[0])/6, c2y=p2[1]-(p3[1]-p1[1])/6;
+            s += "C"+c1x.toFixed(2)+","+c1y.toFixed(2)+" "+c2x.toFixed(2)+","+c2y.toFixed(2)+" "+p2[0].toFixed(2)+","+p2[1].toFixed(2)+" ";
+          }
+          return s+"Z";
+        };
+
+        const outerPts = buildWave(1, outerAmp, outerWaves, phaseA);
+        const innerPts = buildWave(0.80, innerAmp, innerWaves, phaseB);
+        const outerPath = smoothClosedPath(outerPts);
+        const innerPath = smoothClosedPath(innerPts);
+
+        const dotStep = on ? 4 : 7;
+        let dots = "";
+        for(let i=0;i<N;i+=dotStep){
+          const ang = (i/N)*Math.PI*2;
+          const crest = Math.sin(outerWaves*ang + phaseA);
+          if(crest>0.3){
+            const [px,py] = outerPts[i];
+            const r = (on?1.4:0.8) + (on?1.6:0.8)*crest;
+            const op = ((on?0.30:0.16) + (on?0.35:0.18)*crest) * (0.5+0.5*t);
+            dots += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${r.toFixed(2)}" fill="${duo}" opacity="${opac(op)}" pointer-events="none"/>`;
+          }
+        }
+
+        const glow = clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">`+
+          `<path d="${outerPath}" fill="${duo}" stroke="none" fill-opacity="${opac((on?0.28:0.14)+0.16*t)}" pointer-events="none"/></g>`);
+
+        const edge = clipWrap(
+          `<path d="${outerPath}" fill="none" stroke="${ink}" stroke-width="${swid((on?2.0:1.3)+0.8*t)}" `+
+          `stroke-opacity="${opac((on?0.75:0.45)+0.20*t)}" stroke-linejoin="round" pointer-events="none"/>`+
+          `<path d="${innerPath}" fill="none" stroke="${ink}" stroke-width="${swid((on?1.1:0.7)+0.4*t)}" `+
+          `stroke-opacity="${opac((on?0.40:0.22)+0.14*t)}" stroke-linejoin="round" pointer-events="none"/>`+
+          dots
+        );
+
+        return {glow, edge};
+      }
+      // "bloomflower" — reshapes the ring's own silhouette into a soft scalloped bloom.
+      // The ring's vertices are resampled into a continuous radius-by-angle profile (interpolated
+      // between the room's actual vertices, not a plain circle) so the flower still follows the
+      // room's real proportions. A fixed 5/6/7-petal count comes from ring.length%3 (deterministic),
+      // and each petal is a single cubic bezier running waist->tip->waist so the outline stays
+      // rounded and organic, never faceted. Off = shallow bulge / mild pinch (a barely-scalloped
+      // closed bud); on = big bulge / deep pinch (a fully flared bloom), plus a bright stamen dot
+      // at the fixture's own anchor point.
+      if(AUTOMORPH_STYLE==="bloomflower"){
+        const n = ring.length;
+        const pf = (v) => v.toFixed(2);
+        const pt = (a,r) => [hx + r*Math.cos(a), hy + r*Math.sin(a)];
+        // angle-sorted polar profile of the room outline around the fixture anchor, so a radius
+        // can be interpolated for any angle (keeps the bloom faithful to non-circular rooms)
+        const polar = ring.map(p => {
+          const dx = p[0]-hx, dy = p[1]-hy;
+          let a = Math.atan2(dy,dx);
+          if(a < 0) a += Math.PI*2;
+          return {a, r: Math.hypot(dx,dy)};
+        }).sort((p,q) => p.a - q.a);
+        const baseRadius = (angle) => {
+          let a = angle % (Math.PI*2);
+          if(a < 0) a += Math.PI*2;
+          for(let i=0;i<polar.length;i++){
+            const p0 = polar[i], p1 = polar[(i+1)%polar.length];
+            let a0 = p0.a, a1 = p1.a;
+            if(a1 <= a0) a1 += Math.PI*2;
+            const aa = a < a0 ? a + Math.PI*2 : a;
+            if(aa <= a1){
+              const span = (a1 - a0) || 1;
+              return p0.r + (p1.r - p0.r) * ((aa - a0) / span);
+            }
+          }
+          return polar[0].r;
+        };
+        const seed = hx * 0.7 + hy * 1.3;
+        const rnd = (i) => { const x = Math.sin(seed + i * 12.9898) * 43758.5453; return x - Math.floor(x); };
+        const P = 5 + (n % 3); // 5, 6 or 7 petals, fixed per fixture
+        const seg = (Math.PI*2) / P;
+        const rot = rnd(0) * seg; // per-fixture rotation so same-P flowers don't all align
+        const tipPeak = on ? 1.34 : 1.06;
+        const waistTrough = on ? 0.74 : 0.93;
+        const bulge = 1 + (tipPeak - 1) * t;
+        const waist = 1 - (1 - waistTrough) * t;
+        let bloomD = "";
+        for(let i=0;i<P;i++){
+          const aStart = i*seg + rot, aEnd = aStart + seg, aMid = aStart + seg/2;
+          const rStart = baseRadius(aStart) * waist;
+          const rEnd = baseRadius(aEnd) * waist;
+          const rTip = baseRadius(aMid) * bulge;
+          const pStart = pt(aStart, rStart), pEnd = pt(aEnd, rEnd);
+          const rCtrl = rTip * 1.06; // slight overshoot: a cubic's midpoint falls short of its control points
+          const c1 = pt(aStart + seg*0.25, rCtrl), c2 = pt(aStart + seg*0.75, rCtrl);
+          if(i===0) bloomD += `M${pf(pStart[0])},${pf(pStart[1])} `;
+          bloomD += `C${pf(c1[0])},${pf(c1[1])} ${pf(c2[0])},${pf(c2[1])} ${pf(pEnd[0])},${pf(pEnd[1])} `;
+        }
+        bloomD += "Z";
+        const glowFill = `<path d="${bloomD}" fill="${duo}" fill-opacity="${opac((on?0.55:0.28)*(0.35+0.65*t))}" pointer-events="none"/>`;
+        const glow = clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${glowFill}</g>`);
+        const edgeStroke = `<path d="${bloomD}" fill="none" stroke="${ink}" stroke-width="${swid((on?1.5:1.0)+0.4*t)}" stroke-linejoin="round" stroke-opacity="${opac((on?0.85:0.5)*(0.4+0.6*t))}" pointer-events="none"/>`;
+        const stamen = on ? `<circle cx="${pf(hx)}" cy="${pf(hy)}" r="${swid(1.6+1.1*t)}" fill="${ink}" fill-opacity="${opac(0.9)}" pointer-events="none"/>` : "";
+        const edge = clipWrap(edgeStroke + stamen);
+        return {glow, edge};
+      }
+      if(AUTOMORPH_STYLE==="geode"){
+        // A fractured crystal cluster grown from 2-3 interior seed points
+        // scattered around the fixture's own anchor, not one central fan
+        // (facet) or one fan-cut anchor (stainedglass): every ring EDGE is
+        // claimed by whichever seed's angle it sits closest to (a circular
+        // nearest-neighbour partition — exactly a contiguous arc per seed,
+        // since edges are already angle-ordered around the anchor), then
+        // fanned to that seed's own apex. Wherever the claimed seed changes
+        // between two neighbouring edges is a crystal seam, drawn as a pair
+        // of ridge lines back to both apexes, so the shape reads as several
+        // stones grown together rather than one uniform radial spray.
+        // Per-facet lightness is a deterministic seeded jitter
+        // (stainedglass's rnd() trick) blended toward white/near-black with
+        // a hard cut, never a gradient. Off keeps the jitter shallow and
+        // the fill low (dull matte rock); on widens the jitter spread and
+        // lifts the fill so facets contrast hard against each other, like
+        // light catching separate crystal faces.
+        const n = ring.length;
+        if(n < 3) return {glow: "", edge: ""};
+
+        const seed = hx * 0.7 + hy * 1.3;
+        const rnd = (i) => { const x = Math.sin(seed + i * 12.9898) * 43758.5453; return x - Math.floor(x); };
+
+        const avgR = ring.reduce((s,p)=>s+Math.hypot(p[0]-hx, p[1]-hy), 0) / n;
+        const numSeeds = rnd(90) < 0.5 ? 2 : 3;
+        const startAng = rnd(91) * Math.PI * 2;
+        const cores = [];
+        for(let k=0;k<numSeeds;k++){
+          const ang = startAng + (k/numSeeds)*Math.PI*2 + (rnd(92+k)-0.5)*0.5;
+          const r = avgR * (0.14 + 0.22*rnd(96+k));
+          cores.push({x: hx+Math.cos(ang)*r, y: hy+Math.sin(ang)*r, ang});
+        }
+        const TWO_PI = Math.PI*2;
+        const angDist = (a,b) => { const dd = Math.abs(a-b) % TWO_PI; return dd > Math.PI ? TWO_PI-dd : dd; };
+
+        const assign = [];
+        for(let i=0;i<n;i++){
+          const p = ring[i], q = ring[(i+1)%n];
+          const edgeAng = Math.atan2((p[1]+q[1])/2-hy, (p[0]+q[0])/2-hx);
+          let bestK = 0, bestD = Infinity;
+          for(let k=0;k<numSeeds;k++){
+            const dd = angDist(edgeAng, cores[k].ang);
+            if(dd < bestD){ bestD = dd; bestK = k; }
+          }
+          assign.push(bestK);
+        }
+
+        const baseHex = on ? AUTOMORPH_BASE_ON : AUTOMORPH_BASE_OFF;
+        const baseR = parseInt(baseHex.slice(1,3),16), baseG = parseInt(baseHex.slice(3,5),16), baseB = parseInt(baseHex.slice(5,7),16);
+        const WHITE = [255,255,255], NEARBLACK = [10,10,10];
+        const mixRgb = (c,to,amt) => [0,1,2].map(ci => Math.round(c[ci] + (to[ci]-c[ci])*amt));
+        const CONTRAST = on ? 0.55 : 0.16;
+        const fillOp = (0.46 + 0.38*t) * (on ? 1.15 : 0.72);
+
+        let facets = "", seams = "";
+        for(let i=0;i<n;i++){
+          const p = ring[i], q = ring[(i+1)%n];
+          const k = assign[i];
+          const c = cores[k];
+          const jitter = rnd(i*7+11)*2 - 1;
+          const blend = jitter*CONTRAST;
+          const rgb = blend >= 0
+            ? mixRgb([baseR,baseG,baseB], WHITE, Math.min(1,blend))
+            : mixRgb([baseR,baseG,baseB], NEARBLACK, Math.min(1,-blend));
+          facets += `<path d="M${c.x.toFixed(1)},${c.y.toFixed(1)} L${p[0].toFixed(1)},${p[1].toFixed(1)} L${q[0].toFixed(1)},${q[1].toFixed(1)} Z" `+
+            `fill="rgb(${rgb[0]},${rgb[1]},${rgb[2]})" fill-opacity="${opac(fillOp)}" pointer-events="none"/>`;
+          const prevK = assign[(i-1+n)%n];
+          if(prevK !== k){
+            const pc = cores[prevK];
+            const seamOp = opac(0.45 + 0.30*t);
+            const seamW = swid(0.7);
+            seams += `<line x1="${p[0].toFixed(1)}" y1="${p[1].toFixed(1)}" x2="${pc.x.toFixed(1)}" y2="${pc.y.toFixed(1)}" stroke="${ink}" stroke-width="${seamW}" stroke-opacity="${seamOp}" pointer-events="none"/>`+
+              `<line x1="${p[0].toFixed(1)}" y1="${p[1].toFixed(1)}" x2="${c.x.toFixed(1)}" y2="${c.y.toFixed(1)}" stroke="${ink}" stroke-width="${seamW}" stroke-opacity="${seamOp}" pointer-events="none"/>`;
+          }
+        }
+
+        const rim = `<path d="${d}" fill="none" stroke="${ink}" stroke-width="${swid(on?1.2:0.9)}" `+
+          `stroke-opacity="${opac(0.30+0.35*t)}" stroke-linejoin="round" pointer-events="none"/>`;
+
+        return {glow: clipWrap(facets), edge: clipWrap(rim + seams)};
+      }
+      // Honeycomb — the ring's interior is broken into a hex tessellation
+      // instead of any fan/radial pattern: hexR is derived from the ring's
+      // OWN bounding-box diagonal (diag/10), so cell count stays roughly
+      // scale-invariant across the ROOM% slider — an icon-small ring and a
+      // full room-sized ring both settle around the same handful of cells
+      // instead of the grid getting denser as the ring grows. A hex is kept
+      // only when its CENTER falls inside `ring` (local ray-cast test), so
+      // the honeycomb roughly follows the room's own silhouette even though
+      // individual hex edges can poke slightly past it — real honeycomb
+      // never perfectly follows an arbitrary boundary either, and the whole
+      // group is clip-wrapped to the fixture's room regardless. Each
+      // surviving hex is deterministically marked "occupied" (duo-filled,
+      // like a cell with something inside) or left bare structural outline
+      // via the shared sine-hash rnd(); occupied DENSITY — never hue — is
+      // what carries on/off and the t slider: mostly empty structure at low
+      // t/off, filling in toward a busy hive at high t/on.
+      if(AUTOMORPH_STYLE==="honeycomb"){
+        const minX=Math.min(...ring.map(p=>p[0])), maxX=Math.max(...ring.map(p=>p[0]));
+        const minY=Math.min(...ring.map(p=>p[1])), maxY=Math.max(...ring.map(p=>p[1]));
+        const diag=Math.hypot(maxX-minX, maxY-minY);
+        const hexR=Math.max(3, diag/10);
+        const vertSpacing=1.5*hexR;
+        const horizSpacing=Math.sqrt(3)*hexR;
+        const cx0=(minX+maxX)/2, cy0=(minY+maxY)/2;
+        const rowSpan=Math.ceil((maxY-minY)/(2*vertSpacing))+1;
+        const colSpan=Math.ceil((maxX-minX)/(2*horizSpacing))+1;
+
+        // Local point-in-polygon (ray casting) — only needed to test hex
+        // centers against `ring`, so it stays a plain function inside this
+        // block rather than a shared top-level helper.
+        const pip=(px,py,poly)=>{
+          let inside=false;
+          for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+            const xi=poly[i][0], yi=poly[i][1], xj=poly[j][0], yj=poly[j][1];
+            if(((yi>py)!==(yj>py)) && (px < (xj-xi)*(py-yi)/(yj-yi+1e-9)+xi)) inside=!inside;
+          }
+          return inside;
+        };
+
+        const seed = hx * 0.7 + hy * 1.3;
+        const rnd = (i) => { const x = Math.sin(seed + i * 12.9898) * 43758.5453; return x - Math.floor(x); };
+
+        const density=(on?0.55:0.20)+(on?0.35:0.25)*t;
+        const outlineOp=opac((on?0.55:0.40)+0.30*t);
+        const outlineW=swid(0.9);
+        const fillOp=opac((on?0.55:0.30)+0.30*t);
+
+        const MAX_CELLS=40;
+        let cellIdx=0;
+        let cells="";
+        outer:
+        for(let row=-rowSpan; row<=rowSpan; row++){
+          const cy=cy0+row*vertSpacing;
+          const stagger=(((row%2)+2)%2===1) ? horizSpacing/2 : 0;
+          for(let col=-colSpan; col<=colSpan; col++){
+            const cx=cx0+col*horizSpacing+stagger;
+            if(!pip(cx,cy,ring)) continue;
+            if(cellIdx>=MAX_CELLS) break outer;
+            let pts="";
+            for(let k=0;k<6;k++){
+              const ang=Math.PI/180*(60*k-30);
+              const vx=cx+hexR*Math.cos(ang), vy=cy+hexR*Math.sin(ang);
+              pts+=(k===0?"":" ")+vx.toFixed(1)+","+vy.toFixed(1);
+            }
+            const occupied=rnd(cellIdx)<density;
+            const fillAttr=occupied ? `fill="${duo}" fill-opacity="${fillOp}"` : `fill="none"`;
+            cells+=`<polygon points="${pts}" ${fillAttr} stroke="${ink}" stroke-opacity="${outlineOp}" `+
+              `stroke-width="${outlineW}" stroke-linejoin="round" pointer-events="none"/>`;
+            cellIdx++;
+          }
+        }
+
+        const rim=`<path d="${d}" fill="none" stroke="${ink}" stroke-opacity="${opac((on?0.30:0.18)+0.15*t)}" `+
+          `stroke-width="${swid(1.0)}" pointer-events="none"/>`;
+
+        return {glow:"", edge: clipWrap(`<g pointer-events="none">${rim}${cells}</g>`)};
+      }
+      // ORBIT RINGS — atomic/orbital-model look: instead of tracing ring's
+      // own polygon (or a scaled copy of it, which is what "contour" does),
+      // this reads ring's OWN bounding extent around the fixture's anchor
+      // and draws 2-3 true concentric ellipses sized as fractions of that
+      // extent, each tilted by a different deterministic angle so they
+      // read as a Bohr-model / orbital diagram rather than stacked flat
+      // rings. A handful of "electron" dots ride specific ellipses at an
+      // angle that advances with t — the same static-phase trick pulse
+      // uses to fake motion from a single frozen render — plus a bright
+      // "nucleus" dot at hx,hy itself. Off collapses to 2 tight, dim
+      // orbits with faint electrons and a dark nucleus; on opens to 3 full
+      // orbits with brighter, faster-advancing electrons and a lit core.
+      if(AUTOMORPH_STYLE==="orbitring"){
+        const seed = hx * 0.7 + hy * 1.3;
+        const rnd = (i) => { const x = Math.sin(seed + i * 12.9898) * 43758.5453; return x - Math.floor(x); };
+
+        let maxDx = 4, maxDy = 4;
+        for(const [px,py] of ring){
+          maxDx = Math.max(maxDx, Math.abs(px - hx));
+          maxDy = Math.max(maxDy, Math.abs(py - hy));
+        }
+
+        const fracs = on ? [0.46, 0.70, 0.95] : [0.55, 0.88];
+        const phase = t * Math.PI * 2;
+
+        let orbits = "", satEdge = "", satGlow = "";
+        for(let i=0;i<fracs.length;i++){
+          const frac = fracs[i];
+          const rx = maxDx * frac, ry = maxDy * frac;
+          const rotDeg = (rnd(i*2+1) - 0.5) * 110 + i * 30;
+          const rotRad = rotDeg * Math.PI / 180;
+          const orbitOp = opac((on ? 0.55 : 0.26) + 0.20*t - i*0.05);
+          const orbitW = swid((on ? 1.5 : 1.0) - i*0.15);
+          orbits += `<ellipse cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" rx="${rx.toFixed(1)}" ry="${ry.toFixed(1)}" `+
+            `fill="none" stroke="${ink}" stroke-width="${orbitW}" stroke-opacity="${orbitOp}" `+
+            `transform="rotate(${rotDeg.toFixed(1)} ${hx.toFixed(1)} ${hy.toFixed(1)})" pointer-events="none"/>`;
+
+          // Satellite phase advances faster on outer orbits (like real
+          // orbital periods scaling with radius, just inverted for a
+          // livelier read at a glance) — angle is phase (from t) plus a
+          // per-orbit hashed offset so they never all line up.
+          const ang = phase * (1 + i*0.35) + rnd(i*5+2) * Math.PI * 2;
+          const ex = rx * Math.cos(ang), ey = ry * Math.sin(ang);
+          const sx = hx + ex * Math.cos(rotRad) - ey * Math.sin(rotRad);
+          const sy = hy + ex * Math.sin(rotRad) + ey * Math.cos(rotRad);
+          const satR = (on ? 2.0 : 1.3) + 0.5*t;
+          const satOp = opac((on ? 0.85 : 0.45) + 0.15*t);
+          satEdge += `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${satR.toFixed(2)}" fill="${duo}" `+
+            `stroke="${ink}" stroke-width="${swid(0.4)}" opacity="${satOp}" pointer-events="none"/>`;
+          satGlow += `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${(satR*2.2).toFixed(2)}" fill="${duo}" `+
+            `opacity="${opac(on ? 0.30 : 0.14)}" pointer-events="none"/>`;
+        }
+
+        const nucleusR = (on ? 3.0 : 1.6) + 0.6*t;
+        const nucleus = `<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${nucleusR.toFixed(2)}" fill="${ink}" `+
+          `opacity="${opac(on ? 0.90 : 0.42)}" pointer-events="none"/>`;
+        const nucleusGlow = `<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${(nucleusR*2.4).toFixed(2)}" fill="${duo}" `+
+          `opacity="${opac(on ? 0.38 : 0.16)}" pointer-events="none"/>`;
+
+        const glow = clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${nucleusGlow}${satGlow}</g>`);
+        const edge = clipWrap(`<g pointer-events="none">${orbits}${satEdge}${nucleus}</g>`);
+        return {glow, edge};
+      }
+      // "puzzle" — every other style paints the SAME smooth ring; this one
+      // is the one candidate that reshapes the boundary itself. Each edge
+      // of `ring` gets a single cubic-bezier knob riding its own outward
+      // normal — bulging past the edge (a tab) or cut into it (a blank),
+      // the classic jigsaw motif, alternating tab/blank by edge parity. A
+      // strict parity alternation reads as a toothed gear, so a seeded hash
+      // flips ~1 edge in 5 against that base rhythm — just enough
+      // irregularity to read as hand-fitted puzzle pieces instead of a
+      // machined cog. Bump depth is a FRACTION of each edge's own length
+      // (not a fixed px), so the knuckles stay proportionate whether `ring`
+      // is a tight 24-point icon or a dense 64-point room trace, and grow
+      // with on/t exactly like every other style's presence: barely-there
+      // nicks off, deep interlocking knuckles on. The gloss arc on each
+      // tab's crown only appears lit — nothing to catch light on a blank.
+      if(AUTOMORPH_STYLE==="puzzle"){
+        const seed = hx * 0.7 + hy * 1.3;
+        const rnd = (i) => { const x = Math.sin(seed + i * 12.9898) * 43758.5453; return x - Math.floor(x); };
+        const n = ring.length;
+        let ccx=0, ccy=0;
+        for(const p of ring){ ccx+=p[0]; ccy+=p[1]; }
+        ccx/=n; ccy/=n;
+        const depthFrac = on ? (0.11+0.20*t) : (0.04+0.08*t);
+        const hlOn = on && t>0.03;
+        let pd="", hl="";
+        for(let i=0;i<n;i++){
+          const p=ring[i], q=ring[(i+1)%n];
+          if(i===0) pd+="M"+p[0].toFixed(1)+","+p[1].toFixed(1)+" ";
+          const ex=q[0]-p[0], ey=q[1]-p[1], len=Math.hypot(ex,ey);
+          if(len<1){ pd+="L"+q[0].toFixed(1)+","+q[1].toFixed(1)+" "; continue; }
+          const tx=ex/len, ty=ey/len;
+          let nx=-ty, ny=tx;
+          const midx=(p[0]+q[0])/2, midy=(p[1]+q[1])/2;
+          if(nx*(ccx-midx)+ny*(ccy-midy) > 0){ nx=-nx; ny=-ny; }
+          const outward=(i%2===0)!==(rnd(i*2.7)>0.8);
+          const dir=outward?1:-1;
+          const depth=len*depthFrac;
+          const m1x=p[0]+tx*len*0.30, m1y=p[1]+ty*len*0.30;
+          const m2x=p[0]+tx*len*0.70, m2y=p[1]+ty*len*0.70;
+          const c1x=m1x+nx*dir*depth*1.33, c1y=m1y+ny*dir*depth*1.33;
+          const c2x=m2x+nx*dir*depth*1.33, c2y=m2y+ny*dir*depth*1.33;
+          pd+="L"+m1x.toFixed(1)+","+m1y.toFixed(1)+" C"+c1x.toFixed(1)+","+c1y.toFixed(1)+" "+
+              c2x.toFixed(1)+","+c2y.toFixed(1)+" "+m2x.toFixed(1)+","+m2y.toFixed(1)+" "+
+              "L"+q[0].toFixed(1)+","+q[1].toFixed(1)+" ";
+          if(hlOn && outward){
+            const apx=midx+nx*dir*depth, apy=midy+ny*dir*depth;
+            const g1x=apx-tx*len*0.09, g1y=apy-ty*len*0.09;
+            const g2x=apx+tx*len*0.09, g2y=apy+ty*len*0.09;
+            hl+=`<path d="M${g1x.toFixed(1)},${g1y.toFixed(1)} Q${apx.toFixed(1)},${apy.toFixed(1)} `+
+              `${g2x.toFixed(1)},${g2y.toFixed(1)}" fill="none" stroke="${duo}" stroke-width="${swid(1.1)}" `+
+              `stroke-opacity="${opac(0.40*t)}" stroke-linecap="round" pointer-events="none"/>`;
+          }
+        }
+        pd+="Z";
+        const lineOp=opac((on?0.55:0.34)+0.35*t);
+        const lineW=swid((on?2.0:1.3)+0.9*t);
+        const fillOp=opac((on?0.16:0.07)+0.16*t);
+        const glowOp=opac((on?0.16:0.08)+0.14*t);
+        const glowW=swid((on?7:5)+3*t);
+        const glow=clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">`+
+          `<path d="${pd}" fill="none" stroke="${duo}" stroke-width="${glowW}" `+
+          `stroke-opacity="${glowOp}" stroke-linejoin="round" pointer-events="none"/></g>`);
+        const edge=clipWrap(
+          `<path d="${pd}" fill="${duo}" fill-opacity="${fillOp}" stroke="${ink}" `+
+          `stroke-opacity="${lineOp}" stroke-width="${lineW}" stroke-linejoin="round" pointer-events="none"/>`+hl);
+        return {glow, edge};
+      }
+      // BLOCK EXTRUDE — the ring read as a solid raised plinth instead of a
+      // flat outline: the same silhouette drawn twice (top face at its own
+      // position, a darker base face pushed down-and-right, opposite the
+      // shared upper-left light) with flat mid-tone side-wall quads closing
+      // the gap between every matching pair of edges. Depth is driven by
+      // BOTH on/off (off = a shallow dim slab, on = a tall bright block)
+      // AND the room% slider t (near-flat at t=0, full height at t=1),
+      // scaled off the ring's own bounding extent so small and large auras
+      // extrude proportionately. Three flat RGB tones only, via facet's own
+      // mixRgb-toward-white/black technique reused verbatim — no gradients
+      // inside any one face, hard edges throughout.
+      if(AUTOMORPH_STYLE==="extrude"){
+        const n = ring.length;
+        if(n < 3) return {glow: "", edge: ""};
+
+        let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+        for(const [px,py] of ring){
+          if(px<minX) minX=px; if(px>maxX) maxX=px;
+          if(py<minY) minY=py; if(py>maxY) maxY=py;
+        }
+        const size = Math.max(maxX-minX, maxY-minY) || 1;
+
+        // Depth: shallow+dim when off, tall+bright when on; both gated by
+        // t so t=0 always reads as nearly flat regardless of state.
+        const depthMul = (on ? 1.0 : 0.30) * (0.15 + 0.85*t);
+        const dx = size*0.12*depthMul;
+        const dy = size*0.18*depthMul;
+
+        const baseHex = on ? AUTOMORPH_BASE_ON : AUTOMORPH_BASE_OFF;
+        const baseR = parseInt(baseHex.slice(1,3),16), baseG = parseInt(baseHex.slice(3,5),16), baseB = parseInt(baseHex.slice(5,7),16);
+        const WHITE = [255,255,255], NEARBLACK = [10,10,10];
+        const mixRgb = (c,to,amt) => [0,1,2].map(i => Math.round(c[i] + (to[i]-c[i])*amt));
+        const topRgb  = mixRgb([baseR,baseG,baseB], WHITE, on ? 0.32 : 0.14);
+        const sideRgb = mixRgb([baseR,baseG,baseB], NEARBLACK, 0.22);
+        const baseRgb = mixRgb([baseR,baseG,baseB], NEARBLACK, 0.48);
+        const toRgbStr = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+        const edgeRgbStr = toRgbStr(NEARBLACK);
+
+        const baseRing = ring.map(([x,y]) => [x+dx, y+dy]);
+        const ptsToPath = (pts) => {
+          let p = "";
+          for(let i=0;i<pts.length;i++) p += (i===0?"M":"L")+pts[i][0].toFixed(1)+","+pts[i][1].toFixed(1)+" ";
+          return p+"Z";
+        };
+        const baseD = ptsToPath(baseRing);
+
+        let sides = "";
+        for(let i=0;i<n;i++){
+          const j = (i+1)%n;
+          const [tx1,ty1] = ring[i], [tx2,ty2] = ring[j];
+          const [bx1,by1] = baseRing[i], [bx2,by2] = baseRing[j];
+          sides += `M${tx1.toFixed(1)},${ty1.toFixed(1)} L${tx2.toFixed(1)},${ty2.toFixed(1)} `+
+            `L${bx2.toFixed(1)},${by2.toFixed(1)} L${bx1.toFixed(1)},${by1.toFixed(1)} Z `;
+        }
+
+        const topOp  = opac((on?0.62:0.34) + 0.22*t);
+        const sideOp = opac((on?0.46:0.26) + 0.16*t);
+        const baseOp = opac((on?0.34:0.18) + 0.10*t);
+
+        const baseFace = `<path d="${baseD}" fill="${toRgbStr(baseRgb)}" fill-opacity="${baseOp}" `+
+          `stroke="${edgeRgbStr}" stroke-width="${swid(0.6)}" stroke-opacity="${opac(0.35)}" pointer-events="none"/>`;
+        const sideWalls = `<path d="${sides}" fill="${toRgbStr(sideRgb)}" fill-opacity="${sideOp}" `+
+          `stroke="${edgeRgbStr}" stroke-width="${swid(0.5)}" stroke-opacity="${opac(0.30)}" stroke-linejoin="miter" pointer-events="none"/>`;
+        const topFace = `<path d="${d}" fill="${toRgbStr(topRgb)}" fill-opacity="${topOp}" `+
+          `stroke="${ink}" stroke-width="${swid(on?1.3:0.9)}" stroke-opacity="${opac(0.85)}" stroke-linejoin="round" pointer-events="none"/>`;
+
+        const shadowPts = ring.map(([x,y]) => [x+dx*1.4, y+dy*1.4]);
+        const shadowOp = opac((on?0.28:0.15) * (0.4+0.6*t));
+        const shadow = `<path d="${ptsToPath(shadowPts)}" fill="#050505" fill-opacity="${shadowOp}" pointer-events="none"/>`;
+        const glow = clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${shadow}</g>`);
+
+        return {glow, edge: clipWrap(baseFace + sideWalls + topFace)};
+      }
+      if(AUTOMORPH_STYLE==="shatter"){
+        // Cracked-ice fracture web: a handful of interior seed points are
+        // scattered around the ring's OWN centroid (not hx/hy -- that's
+        // what the fan styles radiate from), each snapped by a straight
+        // "crack" to its nearest ring-boundary vertex (one seed also gets
+        // a second-nearest crack), plus a short seed-to-seed chain. Seed
+        // positions come from the seeded sine-hash, so the chain (drawn in
+        // index order) already crosses itself irregularly -- exactly the
+        // messy, non-radial look real ice fractures have, without needing
+        // a real Voronoi/mesh solve. Segment count is deliberately capped
+        // (seedCount 3-4 -> 6-8 total lines) so it stays a few sharp
+        // fracture lines rather than a dense web. A couple of the
+        // resulting seed/vertex triangles get a near-invisible flat tint
+        // as an optional "broken shard" hint. On lets the primary cracks
+        // catch a soft duo glow (bright/thin/sharp); off drops the glow
+        // entirely and dims to dull hairlines -- no hue ever changes.
+        const n = ring.length;
+        if(n < 3) return {glow: "", edge: ""};
+
+        const seed = hx * 0.7 + hy * 1.3;
+        const rnd = (i) => { const x = Math.sin(seed + i * 12.9898) * 43758.5453; return x - Math.floor(x); };
+
+        let ccx = 0, ccy = 0;
+        for(const [vx, vy] of ring){ ccx += vx; ccy += vy; }
+        ccx /= n; ccy /= n;
+        let maxR = 0;
+        for(const [vx, vy] of ring){
+          const dx = vx - ccx, dy = vy - ccy;
+          const r = Math.sqrt(dx * dx + dy * dy);
+          if(r > maxR) maxR = r;
+        }
+
+        const seedCount = 3 + (rnd(0) < 0.5 ? 0 : 1); // 3 or 4 interior seeds
+        const pts = [];
+        for(let i = 0; i < seedCount; i++){
+          const ang = rnd(i * 2 + 1) * Math.PI * 2;
+          const frac = 0.12 + rnd(i * 2 + 2) * 0.50; // stay well inside the ring's rough extent
+          pts.push([ccx + Math.cos(ang) * maxR * frac, ccy + Math.sin(ang) * maxR * frac]);
+        }
+        const nearestOf = pts.map(([px, py]) => {
+          let bi = 0, bd = Infinity, si = 0, sd = Infinity;
+          for(let j = 0; j < n; j++){
+            const dx = ring[j][0] - px, dy = ring[j][1] - py;
+            const dd = dx * dx + dy * dy;
+            if(dd < bd){ si = bi; sd = bd; bi = j; bd = dd; }
+            else if(dd < sd){ si = j; sd = dd; }
+          }
+          return [bi, si];
+        });
+        const extraIdx = Math.floor(rnd(9) * seedCount); // the one seed that gets a 2nd vertex crack
+
+        const crackOp = opac((on ? 0.62 : 0.28) + 0.30 * t);
+        const crackW  = swid((on ? 0.85 : 0.60) + 0.35 * t);
+        const chainOp = opac((on ? 0.42 : 0.18) + 0.22 * t);
+        const chainW  = swid((on ? 0.65 : 0.50) + 0.25 * t);
+        const shardBase = on ? 0.05 : 0.02;
+        const shardT    = on ? 0.10 : 0.05;
+
+        let cracks = "";
+        let fills = "";
+        for(let i = 0; i < seedCount; i++){
+          const [sx, sy] = pts[i];
+          const [ni, si] = nearestOf[i];
+          const v1 = ring[ni];
+          cracks += `<line x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${v1[0].toFixed(1)}" y2="${v1[1].toFixed(1)}" `+
+            `stroke="${ink}" stroke-width="${crackW}" stroke-opacity="${crackOp}" stroke-linecap="round" pointer-events="none"/>`;
+          if(i === extraIdx){
+            const v2 = ring[si];
+            cracks += `<line x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${v2[0].toFixed(1)}" y2="${v2[1].toFixed(1)}" `+
+              `stroke="${ink}" stroke-width="${crackW}" stroke-opacity="${crackOp}" stroke-linecap="round" pointer-events="none"/>`;
+            const shardOp = opac(shardBase + shardT * t);
+            fills += `<path d="M ${sx.toFixed(1)},${sy.toFixed(1)} L ${v1[0].toFixed(1)},${v1[1].toFixed(1)} L ${v2[0].toFixed(1)},${v2[1].toFixed(1)} Z" `+
+              `fill="${ink}" fill-opacity="${shardOp}" pointer-events="none"/>`;
+          }
+        }
+        for(let i = 0; i < seedCount - 1; i++){
+          const [ax, ay] = pts[i];
+          const [bx, by] = pts[i + 1];
+          cracks += `<line x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" x2="${bx.toFixed(1)}" y2="${by.toFixed(1)}" `+
+            `stroke="${ink}" stroke-width="${chainW}" stroke-opacity="${chainOp}" stroke-linecap="round" pointer-events="none"/>`;
+          if(i === 0){
+            const v1 = ring[nearestOf[0][0]];
+            const shardOp = opac(shardBase * 0.7 + shardT * 0.7 * t);
+            fills += `<path d="M ${ax.toFixed(1)},${ay.toFixed(1)} L ${bx.toFixed(1)},${by.toFixed(1)} L ${v1[0].toFixed(1)},${v1[1].toFixed(1)} Z" `+
+              `fill="${ink}" fill-opacity="${shardOp}" pointer-events="none"/>`;
+          }
+        }
+
+        let glow = "";
+        if(on){
+          let glints = "";
+          for(let i = 0; i < seedCount; i++){
+            const [sx, sy] = pts[i];
+            const v1 = ring[nearestOf[i][0]];
+            glints += `<line x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${v1[0].toFixed(1)}" y2="${v1[1].toFixed(1)}" `+
+              `stroke="${duo}" stroke-width="${swid(2.2 + 1.2 * t)}" stroke-opacity="${opac(0.22 + 0.18 * t)}" stroke-linecap="round" pointer-events="none"/>`;
+          }
+          glow = clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${glints}</g>`);
+        }
+
+        return {glow, edge: clipWrap(fills + cracks)};
       }
       // "glow" (default): a material stack, every layer the SAME path `d`
       // — no second geometry anywhere, so hardness/wobble/cell shape stay
@@ -3920,8 +5158,8 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         // slab, the fill carries the room colour, one sheen from the shared
         // upper-left light source keeps every room lit from the same place,
         // and the room's own soft centre-glow (see roomGlowIds) rounds it out.
-        s+=`<polygon points="${pp}" fill="none" stroke="#04100a" stroke-width="4" stroke-linejoin="round" opacity="0.5"/>`;
-        s+=`<polygon points="${pp}" fill="${color}" fill-opacity="0.085" stroke="${color}" stroke-width="1.3" stroke-opacity="0.8" stroke-linejoin="round"/>`;
+        s+=`<polygon points="${pp}" fill="none" stroke="${THEME.roomEdgeStroke}" stroke-width="4" stroke-linejoin="round" opacity="0.5"/>`;
+        s+=`<polygon points="${pp}" fill="${color}" fill-opacity="${THEME.roomFillOpacity}" stroke="${color}" stroke-width="${THEME.roomStrokeWidth}" stroke-opacity="${THEME.roomStrokeOpacity}" stroke-linejoin="round"/>`;
         s+=`<polygon points="${pp}" fill="url(#${roomGlowIds.get(color)})" stroke="none" pointer-events="none"/>`;
         s+=`<polygon points="${pp}" fill="url(#pswash)" stroke="none" pointer-events="none"/>`;
       } else {
@@ -3952,10 +5190,10 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         // boundary line underneath still reads through it.
         s+=`<text x="${Math.round(lix)}" y="${Math.round(liy)}" text-anchor="middle" dominant-baseline="middle" `+
           `fill="${color}" font-size="${rfs.toFixed(2)}" font-family="system-ui,sans-serif" font-weight="600" `+
-          (SHOW?`letter-spacing="0.16em" `:``)+
+          (SHOW?`letter-spacing="${THEME.roomLabelLetterSpacing}" `:``)+
           `paint-order="stroke" stroke="#071008" stroke-width="1.8" stroke-linejoin="round" `+
-          `opacity="${SHOW?"0.6":"0.78"}" pointer-events="none">`+
-          `${escSVG(SHOW?String(r.room).toUpperCase():r.room)}</text></g>`;
+          `opacity="${SHOW?THEME.roomLabelOpacity:"0.78"}" pointer-events="none">`+
+          `${escSVG(SHOW?(THEME.roomLabelUppercase?String(r.room).toUpperCase():String(r.room)):r.room)}</text></g>`;
         // Room assignment isn't known yet (registry still loading) — show a
         // single pulsing placeholder instead of blocking the whole map on
         // a multi-MB registry fetch; real hexes replace it once it lands.

@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.34";
-const RELEASE_BUILD_ID = "20260910T201800Z";
+const APP_VERSION = "0.38.35";
+const RELEASE_BUILD_ID = "20260911T024606Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -1510,6 +1510,19 @@ class PadSpanHaApp extends HTMLElement {
    * and missing (tags referencing rooms that no longer exist in HA).
    * This separation lets the UI show live positions while preserving the
    * saved map for settings/configuration views.
+   */
+  /**
+   * Reconcile the three room-tag-map sources into the one `roomTagMap` views
+   * actually read. A snapshot (live or sample) can carry its OWN live-derived
+   * tag map (room_tag_map_live) alongside the persisted one (room_tag_map);
+   * live takes priority when present because it reflects the current
+   * session's actual detections, not just what was last saved. With no
+   * snapshot at all (e.g. before the first live_snapshot fetch lands) fall
+   * back to whatever was last fetched from the backend via _getRoomTags
+   * (savedRoomTagMap), so the UI never blanks out mid-boot. savedRoomTagMap
+   * itself is only ever refreshed from a LIVE snapshot — sample mode's
+   * static demo data has no real persisted map to promote it to, and doing
+   * so would overwrite the real saved map with demo content.
    */
   _recomputeDerived(){
     const saved = this.state.savedRoomTagMap || {};

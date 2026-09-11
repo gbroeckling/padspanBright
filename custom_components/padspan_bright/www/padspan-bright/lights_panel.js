@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.34";
-const BUILD_ID = "20260910T201800Z";
+const APP_VERSION = "0.38.35";
+const BUILD_ID = "20260911T024606Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -222,6 +222,7 @@ class PadSpanLightsApp extends HTMLElement {
       this.state._automorphHardness = Number(s.lights_automorph_hardness) || 0;
       this.state._automorphStyle = s.lights_automorph_style || "glow";
       this.state._automorphSubtlety = Number(s.lights_automorph_subtlety) || 0;
+      this.state._showcaseTheme = s.lights_showcase_theme || "classic";
       // The effective tier the backend computed (licence.py). Below `bright`
       // the shared pipeline draws the free map — see lights_map.js. A settings
       // fetch that failed keeps the tier it last knew rather than flickering
@@ -432,6 +433,7 @@ class PadSpanLightsApp extends HTMLElement {
       byRoom,
       hiddenEids: hidden,
       showcase: !!this.state._showcase,
+      showcaseTheme: this.state._showcaseTheme || "classic",
       fitRooms: !!this.state._fitRooms,
       isolux: !!this.state._isolux,
       // Read-only reflection, same reason as showcase/fitRooms/isolux above:
