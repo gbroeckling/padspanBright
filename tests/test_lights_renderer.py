@@ -635,7 +635,7 @@ def test_without_beacons_opt_nothing_changes(tmp_path):
 # 2.38 m across once the scale came from the fabric — wider than the room it
 # sat in, which is what made the sidebar unusable.
 
-_MARKER_JS = 'import * as M from \'./iso_lights.mjs\';\nconst MODEL=__MODEL__;\nconst FLOORS=[{id:\'main\',level:0}];\nconst LBE={\'light.probe\':{entity_id:\'light.probe\',state:\'on\',code:\'A01\',shape:\'circle\',isWled:false}};\nconst f=M.fabricFrame(MODEL,FLOORS,150,0);\nconst svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS);\nconst g=svg.split(\'data-placed="1"\')[1];\nconst r=parseFloat(g.match(/<circle[^>]*r="([0-9.]+)"/)[1]);\nconsole.log(JSON.stringify({px:r*2, m:(r*2)/f.scale, scale:f.scale}));\n'
+_MARKER_JS = 'import * as M from \'./iso_lights.mjs\';\nconst MODEL=__MODEL__;\nconst FLOORS=[{id:\'main\',level:0}];\nconst LBE={\'light.probe\':{entity_id:\'light.probe\',state:\'on\',code:\'A01\',shape:\'circle\',isWled:false}};\nconst f=M.fabricFrame(MODEL,FLOORS,150,0);\nconst svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS);\nconst g=svg.split(\'data-placed="1"\')[1];\nconst circles=[...g.matchAll(/<circle[^>]*>/g)].map(m=>m[0]);\nconst glyph=circles.find(c=>!c.includes(\'data-hit\'));\nconst r=parseFloat(glyph.match(/r="([0-9.]+)"/)[1]);\nconsole.log(JSON.stringify({px:r*2, m:(r*2)/f.scale, scale:f.scale}));\n'
 
 
 def _sq(span_x, span_y):
@@ -2079,12 +2079,13 @@ def test_room_label_steps_out_of_a_markers_way_by_its_own_rendered_width(tmp_pat
     def render_with_room_name(room_name):
         model = {
             "room_geometry_m": {room_name: {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 3], [0, 3]]}},
-            # Calibrated against this exact room polygon (re-tuned 2026-09-07
-            # for the smaller rfsBase — "takes up too much space"): lands
-            # inside a long name's (now narrower) half-width, outside a
-            # short one's, and within the (unchanged) ±9px vertical band
-            # either way.
-            "light_positions_m": {"binary_sensor.probe": {"x_m": 0.7, "y_m": -0.4, "floor_id": "main"}},
+            # Calibrated against this exact room polygon (re-tuned 2026-09-12
+            # when the label's BASE position moved off a bare topmost-vertex
+            # y to a centroid/top-corner blend — see TOP_BLEND in iso_lights.js
+            # — which shifted every screen coordinate here): lands inside a
+            # long name's (now narrower) half-width, outside a short one's,
+            # and within the (unchanged) ±9px vertical band either way.
+            "light_positions_m": {"binary_sensor.probe": {"x_m": 1.815, "y_m": 1.108, "floor_id": "main"}},
         }
         lbe = {"binary_sensor.probe": {"entity_id": "binary_sensor.probe", "state": "off", "code": "M08", "shape": "motion", "isMotion": True, "last_changed": None}}
         return _run_js(tmp_path, (
@@ -2105,11 +2106,14 @@ def test_room_label_steps_out_of_a_markers_way_by_its_own_rendered_width(tmp_pat
         f"own rendered width reaches over — long={long_name}, short={short_name}"
     )
     # The short name's marker sits outside even ITS OWN (narrower) window,
-    # so it must render at the plain, unshifted top-edge position — proving
-    # the fix didn't just make the window bigger for everyone.
-    assert short_name["y"] == long_name["y"] + 13, (
-        f"the short name should be exactly one 13px step below the long "
-        f"name's shifted position, not shifted itself: long={long_name}, short={short_name}"
+    # so it must render at the plain, unshifted base position — proving the
+    # fix didn't just make the window bigger for everyone. Not "exactly one
+    # 13px step" (2026-09-12: the step became a bigger blend fraction along
+    # the room's own centroid-to-corner line, not a fixed pixel delta — see
+    # BLEND_STEP in iso_lights.js), just "clearly did not step at all".
+    assert short_name["y"] > long_name["y"] + 10, (
+        f"the short name should sit at its plain, unshifted position, well "
+        f"below the long name's shifted one: long={long_name}, short={short_name}"
     )
 
 
@@ -3921,6 +3925,51 @@ def test_automorph_suppresses_the_glyph_only_where_an_aura_really_painted(tmp_pa
     )
 
 
+def test_suppressed_glyphs_hit_target_stays_marker_sized_not_the_fixtures_real_size(tmp_path):
+    """Garry, 2026-09-11, live: "I am clearly clicking inside the boundary
+    of the right light, and outside the bounds of the light that actually
+    responds." Root cause: a suppressed (aura-replaced) fixture kept an
+    invisible hit target at its own REAL size/rotation — a 4m valance drew
+    an invisible click-catching silhouette metres wide, silently overlapping
+    and stealing clicks from any other marker that happened to sit inside
+    that footprint. The hit target must now be a plain HEX_R circle
+    regardless of how large or rotated the fixture's own real size is."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 8], [0, 8]]}},
+        "light_positions_m": {
+            # A real, large, rotated fixture — a valance-style strip.
+            "light.valance": {"x_m": 4, "y_m": 4, "floor_id": "main", "width_cm": 400, "height_cm": 8, "rotation": 35},
+        },
+    }
+    lbe = {
+        "light.valance": {"entity_id": "light.valance", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:50, automorphStyle:'glow'}});\n"
+        "const startIdx=svg.indexOf('data-eid=\"light.valance\"');\n"
+        "const body=startIdx>=0 ? svg.slice(startIdx, svg.indexOf('</g>', startIdx)) : '';\n"
+        "const hitCircle=/<circle data-hit=\"1\" fill=\"transparent\"[^>]*r=\"([0-9.]+)\"/.exec(body);\n"
+        "const hasRotatedGroup=/<g transform=\"[^\"]*rotate\\(35/.test(body);\n"
+        "console.log(JSON.stringify({found:startIdx>=0, hitR: hitCircle?Number(hitCircle[1]):null, hasRotatedGroup}));\n"
+    ))
+    assert out["found"], out
+    assert out["hitR"] is not None, "the suppressed glyph must still keep a plain circular hit target"
+    assert out["hitR"] < 30, (
+        "the hit target must stay a plain marker's own radius, not the fixture's real "
+        "400cm-wide, rotated footprint", out
+    )
+    assert not out["hasRotatedGroup"], (
+        "the suppressed hit target must not inherit the fixture's own rotation/scale transform", out
+    )
+
+
 def test_automorph_never_auras_or_suppresses_motion_fan_or_temp_markers(tmp_path):
     """Live regression, reported by Garry (2026-09-08): "the center not
     activating on motion... only some sensors" — a motion sensor sharing a
@@ -4943,12 +4992,17 @@ def test_floor_index_is_one_row_not_one_row_per_floor(tmp_path):
     one = _svg_height(1)
     four = _svg_height(4)
     assert one["height"] is not None and four["height"] is not None, (one, four)
-    assert four["height"] == one["height"], (
-        "the floor index must not grow the SVG's total height as floors are added", one, four
-    )
     assert len(four["badgeYs"]) == 4, four
     assert len(set(four["badgeYs"])) == 1, (
         "all four floor badges must sit on the same row (one cy value)", four["badgeYs"]
+    )
+    # NOT total SVG height — that also includes the top-of-stack padding
+    # (Garry, 2026-09-11: "the top of the map is cut off"), which legitimately
+    # grows with floor count since a taller stack really does draw higher on
+    # screen. The floor index's OWN row is what must stay put regardless.
+    assert four["badgeYs"][0] == one["badgeYs"][0], (
+        "the floor index's row must not shift position as floors are added",
+        one, four
     )
 
 
@@ -4996,3 +5050,225 @@ def test_legend_line_still_caps_at_the_canvas_edge_for_a_height_bound_shape(tmp_
         "a height-bound room's own drawing should reach right up to the "
         "canvas edge, same as the old fixed layout", y
     )
+
+
+def test_view_top_never_clips_a_rooms_own_geometry(tmp_path):
+    """Garry (2026-09-11): "the top of the map is cut off" — viewY was a
+    purely theoretical top-of-stack estimate (CY - maxIsoZ*floorGap - 50)
+    that assumed 50px of pad was always enough slack above that reference
+    point. A real house with enough floors/spacing to eat that slack (three
+    levels at a 260px floor gap — this house's own settings) clamps the
+    formula to exactly 0, while the topmost floor's own room geometry still
+    reaches just as far above it as ever, so the viewBox's top edge sliced
+    straight through the room outline and its floor badge."""
+    model = {
+        "room_geometry_m": {
+            "Basement": {"type": "poly", "floor_id": "f0", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]},
+            "Main":     {"type": "poly", "floor_id": "f1", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]},
+            "Upper":    {"type": "poly", "floor_id": "f2", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]},
+        },
+        "light_positions_m": {},
+    }
+    floors = [
+        {"id": "f0", "name": "Basement", "level": 0},
+        {"id": "f1", "name": "Main", "level": 1},
+        {"id": "f2", "name": "Upper", "level": 2},
+    ]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        "const svg=M.buildIsoSVG(MODEL,{},new Set(),null,260,0,{},false,FLOORS,{});\n"
+        "const vb=svg.match(/viewBox=\"([\\-0-9. ]+)\"/)[1].split(' ').map(Number);\n"
+        "const ys=[...svg.matchAll(/points=\"([^\"]+)\"/g)].flatMap(m=>m[1].trim().split(/\\s+/).map(p=>Number(p.split(',')[1])));\n"
+        "console.log(JSON.stringify({viewY: vb[1], minRenderedY: Math.min(...ys)}));\n"
+    ))
+    assert out["minRenderedY"] >= out["viewY"] - 0.5, (
+        "a room's own drawn geometry must never poke above the viewBox's own "
+        "top edge — three floors at a 260px gap used to clamp viewY to 0 "
+        "while real room points reached well below that", out
+    )
+
+
+def test_view_sides_never_clip_a_slabs_own_bounding_rectangle(tmp_path):
+    """Garry (2026-09-11): "go thru all the visuals looking for error like
+    this" — a follow-up audit found the same bug shape on X. Each floor's
+    slab is an axis-aligned bounding RECTANGLE around that floor's rooms; an
+    L-shaped room's rectangle reaches further than the room's own vertices,
+    and isometric projection of that rectangle's corners can land well past
+    x=0 or x=W. The old viewBox was hard-coded to exactly "0 ... W ...",
+    reserving no slack at all — live on the real house this clipped a slab
+    side-face polygon at x=-72 while the canvas started at x=0."""
+    model = {
+        "room_geometry_m": {
+            "Basement": {"type": "poly", "floor_id": "f0",
+                         "points_m": [[0, 0], [8, 0], [8, 2], [2, 2], [2, 6], [0, 6]]},
+            "Main":     {"type": "poly", "floor_id": "f1",
+                         "points_m": [[0, 0], [8, 0], [8, 2], [2, 2], [2, 6], [0, 6]]},
+            "Upper":    {"type": "poly", "floor_id": "f2",
+                         "points_m": [[0, 0], [8, 0], [8, 2], [2, 2], [2, 6], [0, 6]]},
+        },
+        "light_positions_m": {},
+    }
+    floors = [
+        {"id": "f0", "name": "Basement", "level": 0},
+        {"id": "f1", "name": "Main", "level": 1},
+        {"id": "f2", "name": "Upper", "level": 2},
+    ]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        # -60 L/R spacing matches the real house's own setting that first
+        # exposed this — it shifts each floor's slab sideways by its own
+        # storey's worth of that offset.
+        "const svg=M.buildIsoSVG(MODEL,{},new Set(),null,260,-60,{},false,FLOORS,{});\n"
+        "const vb=svg.match(/viewBox=\"([\\-0-9. ]+)\"/)[1].split(' ').map(Number);\n"
+        "const xs=[...svg.matchAll(/<polygon[^>]*points=\"([^\"]+)\"[^>]*\\/>/g)]"
+        "  .flatMap(m=>m[1].trim().split(/\\s+/).map(p=>Number(p.split(',')[0])));\n"
+        "console.log(JSON.stringify({x0: vb[0], right: vb[0]+vb[2], minX: Math.min(...xs), maxX: Math.max(...xs)}));\n"
+    ))
+    assert out["minX"] >= out["x0"] - 0.5, (
+        "a slab's own bounding rectangle must never poke past the viewBox's "
+        "left edge", out
+    )
+    assert out["maxX"] <= out["right"] + 0.5, (
+        "a slab's own bounding rectangle must never poke past the viewBox's "
+        "right edge", out
+    )
+
+
+def _room_label_y(tmp_path, model, lbe, room, now_ms=2_000_000_000_000):
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        "const FLOORS=[{id:'main',name:'Main',level:0}];\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,{{nowMs:{now_ms}}});\n"
+        f"const i=svg.indexOf('data-room=\"{room}\"');\n"
+        "const m=/<rect x=\"([\\d.-]+)\" y=\"([\\d.-]+)\" width=\"([\\d.-]+)\" height=\"([\\d.-]+)\"/.exec(svg.slice(svg.indexOf('<rect x=\"', i), svg.indexOf('<rect x=\"', i)+120));\n"
+        "console.log(JSON.stringify(m ? {x:+m[1], y:+m[2], w:+m[3], h:+m[4]} : null));\n"
+    ))
+    assert out is not None, f"no label box for {room}"
+    return out
+
+
+def test_room_label_steps_out_of_a_fresh_temperature_readouts_way(tmp_path):
+    """2026-09-12 visual audit, live on Garry's house: a "20" drawn straight
+    through PANTRY. The name's collision check knew a plain marker's ±9px
+    band, but a placed, fresh temperature sensor draws its DIGITS there
+    (TEMP_DIGIT_PX bold monospace, centred on the marker — markerSvg), a
+    footprint several times a marker's. Same sensor, same spot, two ages:
+    fresh (digits showing) must push the name up; stale (back to a plain
+    code, marker-sized) must not — proving the window grew for the readout,
+    not for everyone."""
+    import datetime
+    NOW = 2_000_000_000_000
+    iso = lambda ms: datetime.datetime.fromtimestamp(ms / 1000, tz=datetime.timezone.utc).isoformat()
+    model = {
+        "room_geometry_m": {"Hall": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]}},
+        # Calibrated against this polygon (re-tuned 2026-09-12 alongside the
+        # label's own base-position fix): under the name's x, just past a
+        # marker's ±9px band but inside the fresh digits' much taller one.
+        "light_positions_m": {"sensor.t": {"x_m": 2.29, "y_m": 0.99, "floor_id": "main"}},
+    }
+    def lbe(age_ms):
+        return {"sensor.t": {"entity_id": "sensor.t", "state": "on", "code": "T01", "shape": "tempreadout",
+                             "isTemp": True, "temperature": 20, "last_changed": iso(NOW - age_ms)}}
+    baseline_model = {**model, "light_positions_m": {}}
+    baseline = _room_label_y(tmp_path, baseline_model, {}, "Hall", NOW)
+    fresh = _room_label_y(tmp_path, model, lbe(60_000), "Hall", NOW)
+    stale = _room_label_y(tmp_path, model, lbe(2 * 3_600_000), "Hall", NOW)
+    # Not "exactly one step": the digits' own half-height is wider than the
+    # 13px step itself, so a fresh reading here clears the collision window
+    # in three steps, not one — the meaningful fact is that it steps AT ALL
+    # while a stale reading (a plain, marker-sized code) never moves off the
+    # same unshifted position an empty room renders at.
+    assert fresh["y"] < baseline["y"], (
+        "a fresh readout's digits under the name must push it up; "
+        f"baseline={baseline} fresh={fresh}"
+    )
+    assert stale["y"] == baseline["y"], (
+        "a stale reading (plain code, marker-sized) must not move the name "
+        f"at all: baseline={baseline} stale={stale}"
+    )
+
+
+def test_room_labels_step_out_of_each_others_way(tmp_path):
+    """Same audit: "BEDROOM BATH" drawn through "POWDERROOM" — two small
+    rooms whose names land on the same row, each checked against fixtures
+    only, never against the other's name. Two tiny rooms staggered along
+    the isometric u-axis (same top-edge y, ~40px apart) beside a big room
+    that sets the scale: the second name must step up off the first."""
+    model = {
+        "room_geometry_m": {
+            "Big":          {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [30, 0], [30, 20], [0, 20]]},
+            "Bedroom Bath": {"type": "poly", "floor_id": "main", "points_m": [[0, 20], [1.5, 20], [1.5, 21], [0, 21]]},
+            "Powder Room":  {"type": "poly", "floor_id": "main", "points_m": [[1.5, 18.5], [3, 18.5], [3, 19.5], [1.5, 19.5]]},
+        },
+        "light_positions_m": {},
+    }
+    a = _room_label_y(tmp_path, model, {}, "Bedroom Bath")
+    b = _room_label_y(tmp_path, model, {}, "Powder Room")
+    # Their boxes genuinely collide on the same row (the bug's precondition)...
+    assert abs((a["x"] + a["w"] / 2) - (b["x"] + b["w"] / 2)) < (a["w"] + b["w"]) / 2, (a, b)
+    # ...so the second one placed must have stepped up off the first — but
+    # "Powder Room" here is tiny (1.5m x 1m), too small to clear a full 13px
+    # step without leaving its own room entirely, so the step is capped
+    # short of 13px rather than skipped outright (2026-09-12 audit, live: a
+    # full step on a small room like this put the name back outside it,
+    # right after the base-position fix had just put it inside).
+    assert 0 < a["y"] - b["y"] < 13, (
+        f"the second name must step up, but capped before a full 13px step "
+        f"would carry it outside its own tiny room: a={a} b={b}"
+    )
+
+
+def test_room_label_always_lands_inside_its_own_room_polygon(tmp_path):
+    """2026-09-12, Garry: "the room text is still way off being in the room,
+    so it is hard to tell which room is which from the text label" — live on
+    the real house, 18 of 21 room labels landed outside their own room (the
+    old base position was "centroid x, topmost SCREEN y", correct only for a
+    room whose top is a wide edge; an isometric room's top is one narrow
+    CORNER). The base position now blends toward that corner in BOTH axes
+    (TOP_BLEND), and the marker/label avoidance step is capped at the room's
+    own topmost vertex so dodging a collision can never carry the name back
+    outside — checked here with an L-shaped room (the real shape class that
+    broke a pure centroid-average) AND a fixture placed to force the full
+    3-step avoidance."""
+    model = {
+        "room_geometry_m": {
+            # An L-shape: the plain vertex-average centroid of an L sits in
+            # its own notch, outside the room — the failure mode a simple
+            # rectangle can never exercise.
+            "Nook": {"type": "poly", "floor_id": "main",
+                     "points_m": [[0, 0], [4, 0], [4, 1.5], [1.5, 1.5], [1.5, 4], [0, 4]]},
+        },
+        "light_positions_m": {"binary_sensor.probe": {"x_m": 2, "y_m": 0.5, "floor_id": "main"}},
+    }
+    lbe = {"binary_sensor.probe": {"entity_id": "binary_sensor.probe", "state": "off", "code": "M08",
+                                   "shape": "motion", "isMotion": True, "last_changed": None}}
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        "const FLOORS=[{id:'main',name:'Main',level:0}];\n"
+        "function pip(pt, poly) {\n"
+        "  let inside = false;\n"
+        "  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {\n"
+        "    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];\n"
+        "    if (((yi > pt[1]) !== (yj > pt[1])) && (pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi)) inside = !inside;\n"
+        "  }\n"
+        "  return inside;\n"
+        "}\n"
+        "const frame = M.fabricFrame(MODEL, FLOORS, 150, 0);\n"
+        "const svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,{});\n"
+        "const i=svg.indexOf('data-room=\"Nook\"');\n"
+        "const z=+/data-z=\"([\\d.-]+)\"/.exec(svg.slice(i,i+60))[1];\n"
+        "const m=/<rect x=\"([\\d.-]+)\" y=\"([\\d.-]+)\" width=\"([\\d.-]+)\" height=\"([\\d.-]+)\"/"
+        ".exec(svg.slice(svg.indexOf('<rect x=\"', i), svg.indexOf('<rect x=\"', i)+120));\n"
+        "const lx=+m[1]+ +m[3]/2, ly=+m[2]+ +m[4]/2;\n"
+        "const [mx,my]=frame.isoInv(lx,ly,z);\n"
+        "console.log(JSON.stringify({inside: pip([mx,my], MODEL.room_geometry_m.Nook.points_m), mx, my}));\n"
+    ))
+    assert out["inside"], f"the room name must land inside its own room polygon: {out}"

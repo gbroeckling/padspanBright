@@ -150,8 +150,13 @@ function renderFor(tier) {
     hostModelSame: host.model === model,
     codes, shapes: shapesOut, wled, partition,
     placedMarkers: (svg.match(/data-placed="1"/g) || []).length,
-    stripHasTransform: /<g class="lhex" data-eid="light\.strip"[^>]*>\s*<g transform=/.test(svg)
-      || (marker("light.strip") || "").includes("transform="),
+    stripHasTransform: (() => {
+      const start = svg.indexOf('data-eid="light.strip"');
+      if (start < 0) return false;
+      const nextStart = svg.indexOf('<g class="lhex"', start + 1);
+      const g = svg.slice(start, nextStart > 0 ? nextStart : svg.length);
+      return /<g transform=/.test(g);
+    })(),
     stripMarker: marker("light.strip"),
     loftDrawn: !!marker("light.loft"),
     buttons,
@@ -480,6 +485,43 @@ console.log(JSON.stringify({ foundUnlinkBtn: !!unlinkBtn, unlinkedEid }));
 """)
     assert out["foundUnlinkBtn"], "a linked lock row must offer a clickable Unlink action too"
     assert out["unlinkedEid"] == "lock.shed", out
+
+
+def test_linked_door_row_offers_a_steel_toggle_reflecting_current_material(tmp_path):
+    """Garry, 2026-09-11: "just add the ability to make the door/window
+    steel or not" — the existing confirm() dialog only ever asks once, at
+    creation, and only when the parent wall wasn't already metal. This is a
+    standing toggle: "Steel" when not steel (click sets it), "Steel ✓" when
+    it already is (click clears it back to a lighter material)."""
+    out = _run_pipeline_script(tmp_path, _TABLE_EL + """
+const AREA = {"binary_sensor.truck_door": "Garage"};
+const STATES = {
+  "binary_sensor.truck_door": {state: "on", attributes: {friendly_name: "Truck Door", device_class: "door"}},
+};
+const lights = LM.gatherLights(STATES, AREA, {}, "pro", {}, {});
+let toggled = null;
+
+// Not steel yet: button reads "Steel", clicking it calls onToggleDoorSteel.
+const notSteelHost = { el, hiddenEids: new Set(), lightsLoading: false, model: {},
+  doorLinkedIds: new Set(["binary_sensor.truck_door"]), doorMaterialByEid: {"binary_sensor.truck_door": "custom"},
+  onConfigureDoor: () => {}, onUnlinkDoor: () => {},
+  onToggleDoorSteel: (l) => { toggled = l.entity_id; } };
+const root1 = LM.buildLightsTable(notSteelHost, lights);
+const row1 = [...root1.querySelectorAll("tr")].find(r => r.getAttribute("data-eid") === "binary_sensor.truck_door");
+const steelBtn1 = [...row1.querySelectorAll("button")].find(b => b.textContent === "Steel");
+steelBtn1.dispatchEvent({ type: "click", stopPropagation(){} });
+
+// Already steel: button reads "Steel ✓" instead.
+const steelHost = { ...notSteelHost, doorMaterialByEid: {"binary_sensor.truck_door": "metal"} };
+const root2 = LM.buildLightsTable(steelHost, lights);
+const row2 = [...root2.querySelectorAll("tr")].find(r => r.getAttribute("data-eid") === "binary_sensor.truck_door");
+const steelBtn2 = [...row2.querySelectorAll("button")].find(b => b.textContent === "Steel \\u2713");
+
+console.log(JSON.stringify({ foundNotSteelBtn: !!steelBtn1, toggled, foundSteelBtn: !!steelBtn2 }));
+""")
+    assert out["foundNotSteelBtn"], "a linked, non-steel door row must offer a 'Steel' button"
+    assert out["toggled"] == "binary_sensor.truck_door", out
+    assert out["foundSteelBtn"], "a linked, already-steel door row must show 'Steel ✓' instead"
 
 
 def test_fans_and_motion_sensors_ride_the_pipeline(tmp_path):

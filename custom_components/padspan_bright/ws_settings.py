@@ -100,23 +100,33 @@ def _sanitize_showcase_presets(presets_in: Any) -> list[dict[str, Any]]:
         if not name or not isinstance(vals, dict):
             continue
         try:
-            presets_out.append({
-                "name": name,
-                "values": {
-                    "lights_showcase": bool(vals.get("lights_showcase")),
-                    "lights_showcase_theme": _normalize_showcase_theme(vals.get("lights_showcase_theme")),
-                    "lights_fit_rooms": bool(vals.get("lights_fit_rooms")),
-                    "lights_isolux": bool(vals.get("lights_isolux")),
-                    "lights_show_beacons": bool(vals.get("lights_show_beacons")),
-                    "lights_hide_device_codes": bool(vals.get("lights_hide_device_codes")),
-                    "lights_hide_untouched": bool(vals.get("lights_hide_untouched")),
-                    "lights_automorph_enabled": bool(vals.get("lights_automorph_enabled")),
-                    "lights_automorph_room_pct": max(0, min(100, int(vals.get("lights_automorph_room_pct") or 0))),
-                    "lights_automorph_hardness": max(-100, min(100, int(vals.get("lights_automorph_hardness") or 0))),
-                    "lights_automorph_style": _normalize_automorph_style(vals.get("lights_automorph_style")),
-                    "lights_automorph_subtlety": max(0, min(100, int(vals.get("lights_automorph_subtlety") or 0))),
-                },
-            })
+            values: dict[str, Any] = {
+                "lights_showcase": bool(vals.get("lights_showcase")),
+                "lights_showcase_theme": _normalize_showcase_theme(vals.get("lights_showcase_theme")),
+                "lights_fit_rooms": bool(vals.get("lights_fit_rooms")),
+                "lights_isolux": bool(vals.get("lights_isolux")),
+                "lights_show_beacons": bool(vals.get("lights_show_beacons")),
+                "lights_hide_device_codes": bool(vals.get("lights_hide_device_codes")),
+                "lights_hide_untouched": bool(vals.get("lights_hide_untouched")),
+                "lights_automorph_enabled": bool(vals.get("lights_automorph_enabled")),
+                "lights_automorph_room_pct": max(0, min(100, int(vals.get("lights_automorph_room_pct") or 0))),
+                "lights_automorph_hardness": max(-100, min(100, int(vals.get("lights_automorph_hardness") or 0))),
+                "lights_automorph_style": _normalize_automorph_style(vals.get("lights_automorph_style")),
+                "lights_automorph_subtlety": max(0, min(100, int(vals.get("lights_automorph_subtlety") or 0))),
+            }
+            # Layout & view — Floor focus / Spacing / L-R (Garry, 2026-09-12:
+            # "include more elements into this feature"). OPTIONAL, kept only
+            # when the preset carries them: a look saved before these existed
+            # must keep applying as a pure look, never snap the camera to a
+            # default it never asked for. Same clamps as the live setters.
+            if vals.get("overview_iso_floor_gap") is not None:
+                values["overview_iso_floor_gap"] = max(60, min(340, int(vals["overview_iso_floor_gap"])))
+            if vals.get("overview_iso_horiz_gap") is not None:
+                values["overview_iso_horiz_gap"] = max(-120, min(120, int(vals["overview_iso_horiz_gap"])))
+            if "overview_iso_focus" in vals:
+                f = vals["overview_iso_focus"]
+                values["overview_iso_focus"] = int(f) if f is not None else None
+            presets_out.append({"name": name, "values": values})
         except (TypeError, ValueError):
             continue  # one malformed preset must not reject the whole save
     return presets_out

@@ -122,3 +122,32 @@ def test_sanitize_showcase_presets_keeps_the_50_most_recent_not_the_first_50():
 def test_sanitize_showcase_presets_returns_empty_list_for_non_list_input():
     assert _sanitize_showcase_presets("not-a-list") == []
     assert _sanitize_showcase_presets(None) == []
+
+
+def test_sanitize_showcase_presets_carries_the_layout_trio_when_present():
+    """Garry (2026-09-12): "include more elements into this feature" — a
+    preset may now carry the Floor / Spacing / L-R layout, under the SAME
+    keys Save view writes, clamped exactly like the live setters."""
+    out = _sanitize_showcase_presets([_preset(
+        overview_iso_floor_gap=999, overview_iso_horiz_gap=-999, overview_iso_focus=2,
+    )])
+    v = out[0]["values"]
+    assert v["overview_iso_floor_gap"] == 340
+    assert v["overview_iso_horiz_gap"] == -120
+    assert v["overview_iso_focus"] == 2
+
+
+def test_sanitize_showcase_presets_keeps_a_null_focus_as_all_floors():
+    out = _sanitize_showcase_presets([_preset(overview_iso_floor_gap=150, overview_iso_focus=None)])
+    v = out[0]["values"]
+    assert "overview_iso_focus" in v and v["overview_iso_focus"] is None
+
+
+def test_sanitize_showcase_presets_leaves_the_layout_out_of_an_older_look():
+    """A look saved before the layout keys existed must stay a pure look:
+    no default floor gap / offset / focus may be invented for it, or
+    applying it would snap the camera somewhere the user never chose."""
+    v = _sanitize_showcase_presets([_preset()])[0]["values"]
+    assert "overview_iso_floor_gap" not in v
+    assert "overview_iso_horiz_gap" not in v
+    assert "overview_iso_focus" not in v

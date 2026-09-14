@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.38";
-const BUILD_ID = "20260911T192726Z";
+const APP_VERSION = "0.38.39";
+const BUILD_ID = "20260914T035605Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -23,7 +23,7 @@ const { isWledLight, isPartitionLight } =
 // verbatim by the Mapping → Lights tab (the builder for this display), so the
 // two tools always show the identical map. All lights-view edits go in there.
 const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable, lightIsTouched,
-        sunAmbient, lastBrightness, setOptimistic, clearOptimistic,
+        sunAmbient, lastBrightness, setOptimistic, clearOptimistic, effectiveState,
         wireUseSurface, openControlCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates } =
   await import(`./views/lights_map.js${new URL(import.meta.url).search}`);
 
@@ -223,6 +223,9 @@ class PadSpanLightsApp extends HTMLElement {
       this.state._automorphStyle = s.lights_automorph_style || "glow";
       this.state._automorphSubtlety = Number(s.lights_automorph_subtlety) || 0;
       this.state._showcaseTheme = s.lights_showcase_theme || "classic";
+      // Quick-apply only (see onApplyPreset in the host below) — presets are
+      // authored in Mapping -> Lights, this panel just switches between them.
+      this.state._showcasePresets = Array.isArray(s.lights_showcase_presets) ? s.lights_showcase_presets : [];
       // The effective tier the backend computed (licence.py). Below `bright`
       // the shared pipeline draws the free map — see lights_map.js. A settings
       // fetch that failed keeps the tier it last knew rather than flickering
@@ -276,7 +279,21 @@ class PadSpanLightsApp extends HTMLElement {
     // lock.* (gap #8, best-in-class roadmap) has no on/off at all —
     // "locked" is its normal state, lock/unlock its services.
     const isLockDomain=domain==="lock";
-    const on=isLockDomain ? this._hass.states[eid]?.state==="locked" : this._hass.states[eid]?.state==="on";
+    // The EFFECTIVE state, not the raw HA one (Garry, 2026-09-11: "first
+    // time works great, but if you need to turn the light on/off the next
+    // time, it only is active after the light has reported its state
+    // back"). A slow device (Zigbee, cloud) can easily still be reporting
+    // its OLD state when a second tap lands inside the same 2.5s window —
+    // reading raw state then re-decided "on" from stale data, so the second
+    // tap silently repeated the first command instead of reversing it,
+    // and nothing looked wrong until HA's real report finally arrived.
+    // effectiveState prefers the standing optimistic claim over a reported
+    // state that hasn't caught up to it yet, so each tap toggles relative
+    // to what the marker is ACTUALLY showing, the same value the user is
+    // looking at when they tap again.
+    const reported=this._hass.states[eid]?.state;
+    const eff=effectiveState(eid, reported).state;
+    const on=isLockDomain ? eff==="locked" : eff==="on";
     // Optimistic: the marker flips NOW (shared claim in lights_map.js, so the
     // index row flips with it), and HA's next state reconciles it. A failed
     // call takes the claim back at once and shakes the marker — a tap that
@@ -446,6 +463,35 @@ class PadSpanLightsApp extends HTMLElement {
       automorphHardness: this.state._automorphHardness || 0,
       automorphStyle: this.state._automorphStyle || "glow",
       automorphSubtlety: this.state._automorphSubtlety || 0,
+      // Quick-apply only (Garry, 2026-09-11: "a small preset button in the
+      // lights tab for quick changes") — no onSavePreset/onDeletePreset, so
+      // the shared preset bar renders Apply alone. Saving/deleting a look
+      // stays an editing action for Mapping -> Lights, same line as the
+      // read-only modes above.
+      showcasePresets: this.state._showcasePresets || [],
+      onApplyPreset: async (values) => {
+        this.state._showcase = !!values.lights_showcase;
+        this.state._showcaseTheme = values.lights_showcase_theme || "classic";
+        this.state._fitRooms = !!values.lights_fit_rooms;
+        this.state._isolux = !!values.lights_isolux;
+        this.state._hideDeviceCodes = !!values.lights_hide_device_codes;
+        this.state._hideUntouched = !!values.lights_hide_untouched;
+        this.state._automorph = !!values.lights_automorph_enabled;
+        this.state._automorphPct = Number(values.lights_automorph_room_pct) || 0;
+        this.state._automorphHardness = Number(values.lights_automorph_hardness) || 0;
+        this.state._automorphStyle = values.lights_automorph_style || "glow";
+        this.state._automorphSubtlety = Number(values.lights_automorph_subtlety) || 0;
+        // Layout & view, when the preset carries it — the same keys
+        // _loadSettings seeds this._view from, so the sidebar's sliders land
+        // on the preset's numbers too. Optional: an older look leaves the
+        // camera alone.
+        if (values.overview_iso_floor_gap !== undefined) this._view.floorGap = values.overview_iso_floor_gap;
+        if (values.overview_iso_horiz_gap !== undefined) this._view.horizGap = values.overview_iso_horiz_gap;
+        if (values.overview_iso_focus !== undefined) this._view.focusIdx = values.overview_iso_focus ?? 0;
+        try { await this._hass.callWS({ type: "padspan_bright/settings_set", ...values }); }
+        catch (e) { this._toast("Could not apply the preset: " + String(e), true); }
+        this._render();
+      },
       // Same read-only reflection as the modes above — no onHideDeviceCodes,
       // this panel never edits it, only displays what Mapping -> Lights set.
       hideDeviceCodes: !!this.state._hideDeviceCodes,

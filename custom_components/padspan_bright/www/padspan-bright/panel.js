@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.38";
-const RELEASE_BUILD_ID = "20260911T192726Z";
+const APP_VERSION = "0.38.39";
+const RELEASE_BUILD_ID = "20260914T035605Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -39,7 +39,7 @@ const BUILD_ID = (() => {
     return RELEASE_BUILD_ID;
   }
 })();
-const CHANNEL = "stable";
+const CHANNEL = "beta";
 
 // ── Editions and tiers ───────────────────────────────────────────────────────
 // Which surfaces this build shows (views/editions.js). Loaded with the same
@@ -699,7 +699,21 @@ class PadSpanHaApp extends HTMLElement {
     // _renderCurrentView(fromPoll=true) checks this and skips re-renders within
     // 3 seconds of interaction, preventing form inputs / scroll positions from
     // being destroyed while the user is actively working.
+    //
+    // "pointerdown" is the important one (Garry, 2026-09-11: dragging on the
+    // Lights map "works only sometimes, other times it brings me to the
+    // list" mid-drag). This list used to be click/input/change/focusin/
+    // scroll only — every one of those fires at the END of a gesture (a
+    // "click" doesn't even fire for a real drag), so a press-and-hold or a
+    // slow drag had NO protection for however long it took to complete: if
+    // the 5s poll landed anywhere in that window, it tore down and rebuilt
+    // the whole view mid-gesture, which forces a pointercancel on whatever
+    // was being pressed. _editDragging (maps.js) covers a drag once it's
+    // past its own 8px arm threshold, but nothing covered the gap from the
+    // initial press to that point, or a long-press that never moves at
+    // all — exactly the gap the reported flakiness lived in.
     const _markInteraction = () => { this._lastUserInteraction = performance.now(); };
+    this.$content.addEventListener("pointerdown", _markInteraction, true);
     this.$content.addEventListener("input", _markInteraction, true);
     this.$content.addEventListener("change", _markInteraction, true);
     this.$content.addEventListener("click", _markInteraction, true);

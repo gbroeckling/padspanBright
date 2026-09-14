@@ -19,13 +19,13 @@ const { makeStackXform, mapXform, imageAr, fabricWorldRooms, mapFracToMetres,
 // THE fabric frame — the Lights tab inverts drags through the exact function
 // the renderer draws with, so the two cannot disagree.
 const { fabricFrame, markerScale, markerRadiusPx, cmFromHandlePx, MAX_FIXTURE_CM,
-        floorIdAtLevel, sceneColours, defaultPerimeterMarginM } =
+        floorIdAtLevel, sceneColours, defaultPerimeterMarginM, shapeSvg } =
   await import(`./iso_lights.js${new URL(import.meta.url).search}`);
 // THE shared Lights view (data pipeline, map card, index table) — used
 // verbatim by the Lights sidebar panel, so the two tools always show the
 // identical map; this tab layers the build tools on top of it.
 const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable, lightIsTouched,
-        sunAmbient, lastBrightness, spreadInRoom, createUndoStack, setOptimistic, clearOptimistic,
+        sunAmbient, lastBrightness, spreadInRoom, createUndoStack, setOptimistic, clearOptimistic, effectiveState,
         wireUseSurface, openControlCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates } =
   await import(`./lights_map.js${new URL(import.meta.url).search}`);
 // Fixture-shape vocabulary + derivation (the tab owns the manual override UI).
@@ -1841,14 +1841,22 @@ function _edit(ctx, map, allMaps){
       const sid = r.source ? _sid(r.source) : "";
       mk.title = (r.label || r.id || "receiver") + (sid ? ` [${sid}]` : "") + (r.room ? ` • ${r.room}` : "");
       mk.textContent = sid || (r.label || r.id || "R").slice(0,2).toUpperCase();
-      mk.addEventListener("click", (ev)=>{
-        if(ctx.state.maps._mode==="measure") return; // let click pass through to stage
-        ev.stopPropagation();
+      // Desktop selection: click a marker to load its label + room editor.
+      // Mobile selection: the same edit panel via _makeDraggable's onTap —
+      // touch browsers suppress click after a preventDefault'd touchstart,
+      // so without onTap a tap only starts a drag and never opens the editor.
+      const _selectRx = ()=>{
+        if(ctx.state.maps._mode==="measure") return; // let tap pass through to stage
         if(ctx.state.maps._mode!=="receivers") return;
         ctx.state.maps._selectedRxId = r.id;
         renderAll(); renderTools();
+      };
+      mk.addEventListener("click", (ev)=>{
+        if(ctx.state.maps._mode==="measure") return; // let click pass through to stage
+        ev.stopPropagation();
+        _selectRx();
       });
-      _makeDraggable(mk, r, overlay, ()=>{ renderAll(); refreshList(); }, ()=>ctx.state.maps._mode==="receivers", (v)=>{ if(ctx.state.maps) ctx.state.maps._editDragging=v; });
+      _makeDraggable(mk, r, overlay, ()=>{ renderAll(); refreshList(); }, ()=>ctx.state.maps._mode==="receivers", (v)=>{ if(ctx.state.maps) ctx.state.maps._editDragging=v; }, _selectRx);
       overlay.appendChild(mk);
     }
 
@@ -1963,10 +1971,17 @@ function _edit(ctx, map, allMaps){
       const sel = ctx.state.maps._draftReceivers.find(x=>x.id===ctx.state.maps._selectedRxId) || null;
       if(sel){
         const lbl = el("input",{type:"text", value: sel.label||"", placeholder:"Receiver label"});
+        lbl.setAttribute("aria-label", "Receiver label");
         lbl.addEventListener("input", ()=>{ sel.label = lbl.value; renderAll(); refreshList(); });
 
+        // Same room choices as Add receiver: eligibleRooms (HA areas for this
+        // floor + tag-map + snapshot rooms), prefilled from the selected
+        // receiver's current draft room. Change flows to Save Layout via the
+        // existing draft → mapsUpdateQuiet payload (full receivers list).
+        const roomLbl = el("label",{class:"muted", style:"font-size:12px;margin-top:6px", for:"_rx_room_sel"}, "Room");
         const roomSel = document.createElement("select");
         roomSel.className = "select";
+        roomSel.id = "_rx_room_sel";
         const opt0 = document.createElement("option"); opt0.value=""; opt0.textContent="(no room)"; roomSel.appendChild(opt0);
         for(const r of eligibleRooms){
           const o = document.createElement("option");
@@ -1986,7 +2001,7 @@ function _edit(ctx, map, allMaps){
             el("div",{class:"muted", style:"font-size:12px"}, `x=${(sel.x||0).toFixed(3)} y=${(sel.y||0).toFixed(3)}`),
           ]),
           lbl,
-          el("div",{class:"muted", style:"font-size:12px;margin-top:6px"},"Room"),
+          roomLbl,
           roomSel,
           el("button",{class:"btn inline", style:"margin-top:8px", onclick:()=>{
             ctx.state.maps._draftReceivers = ctx.state.maps._draftReceivers.filter(x=>x.id!==sel.id);
@@ -1995,7 +2010,7 @@ function _edit(ctx, map, allMaps){
           }}, "Delete receiver"),
         ]));
       } else {
-        right.appendChild(el("div",{class:"muted", style:"margin-top:10px;font-size:12px"}, "Tip: click a radio marker to edit its room assignment."));
+        right.appendChild(el("div",{class:"muted", style:"margin-top:10px;font-size:12px"}, "Tip: tap or click a radio marker to edit its room assignment, or use Edit next to a placed radio below."));
       }
 
       // Live BLE Radios panel — shows actual HA BLE scanners for placement
@@ -2007,7 +2022,8 @@ function _edit(ctx, map, allMaps){
         right.appendChild(el("div",{class:"muted", style:"font-size:11px;margin-top:2px;margin-bottom:6px"}, "Click Add to place on map, then drag to position."));
         const radList = el("div",{style:"display:flex;flex-direction:column;gap:5px"});
         for(const radio of liveRadios){
-          const alreadyPlaced = ctx.state.maps._draftReceivers.some(r => (r.source && r.source === radio.source) || (r.label && radio.name && r.label.toLowerCase() === radio.name.toLowerCase()) || r.id === radio.source);
+          const placedRx = ctx.state.maps._draftReceivers.find(r => (r.source && r.source === radio.source) || (r.label && radio.name && r.label.toLowerCase() === radio.name.toLowerCase()) || r.id === radio.source) || null;
+          const alreadyPlaced = !!placedRx;
           const sid = _sid(radio.source || "");
           const borderColor = radio.disabled ? "#5b3b7a" : radio.lost ? "#7d5c2b" : "#1b3526";
           const bg = radio.disabled ? "rgba(148,100,220,.06)" : radio.lost ? "rgba(245,158,11,.06)" : "#0a150e";
@@ -2028,7 +2044,15 @@ function _edit(ctx, map, allMaps){
           } else if(radio.lost){
             row.appendChild(el("span",{style:"font-size:10px;color:#f59e0b;white-space:nowrap"}, "⚠ Lost"));
           } else if(alreadyPlaced){
+            // Existing room editing: selecting a placed radio loads the same
+            // label + room editor above (identical eligibleRooms choices as Add
+            // receiver, same draft, same Save Layout persistence). Identity,
+            // coordinates and all other properties preserved — only room/label
+            // edits change until Save. No backend/schema change.
             row.appendChild(el("span",{style:"font-size:10px;color:#52b788;white-space:nowrap"}, "✓ placed"));
+            row.appendChild(el("button",{class:"btn inline", style:"font-size:10px;padding:2px 8px;white-space:nowrap", onclick:()=>{
+              ctx.state.maps._selectedRxId = placedRx.id; renderAll(); renderTools();
+            }}, "Edit"));
           } else {
             row.appendChild(el("button",{class:"btn inline", style:"font-size:10px;padding:2px 8px;white-space:nowrap", onclick:()=>{
               const id = `rx_${Date.now().toString(16)}`;
@@ -3165,13 +3189,24 @@ function _layoutText(receivers, roomBounds){
 // Makes a receiver marker node draggable within its container. Updates the
 // receiver's (x,y) coordinates in normalized 0–1 space as the user drags.
 // onDragState callback sets ctx.state.maps._editDragging to suppress re-renders.
-function _makeDraggable(node, receiver, container, onMoved=null, isEnabled=null, onDragState=null){
+// onTap callback selects the receiver on a tap (no drag) — the mobile
+// equivalent of the desktop marker click, which touch browsers suppress after
+// a preventDefault'd touchstart. Movement beyond _TAP_PX cancels the tap so a
+// real drag never selects mid-gesture; movement below it is never applied, so
+// a tap never moves the receiver. The drag/commit path itself is
+// untouched by this change (see companion PR #74 for the touch-drag fix).
+function _makeDraggable(node, receiver, container, onMoved=null, isEnabled=null, onDragState=null, onTap=null){
   let dragging = false;
   let rect = null;
+  let _tapX = 0, _tapY = 0, _tapMoved = false;
+  const _TAP_PX = 10;
 
   const onDown = (ev)=>{
     if(isEnabled && !isEnabled()) return;
     dragging = true;
+    _tapMoved = false;
+    if(ev && ev.touches && ev.touches[0]){ _tapX = ev.touches[0].clientX; _tapY = ev.touches[0].clientY; }
+    else if(ev){ _tapX = ev.clientX || 0; _tapY = ev.clientY || 0; }
     if(onDragState) onDragState(true);
     rect = container.getBoundingClientRect();
     ev.preventDefault();
@@ -3180,19 +3215,39 @@ function _makeDraggable(node, receiver, container, onMoved=null, isEnabled=null,
     if(!dragging || !rect) return;
     const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX;
     const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY;
+    if(Math.abs(clientX - _tapX) > _TAP_PX || Math.abs(clientY - _tapY) > _TAP_PX) _tapMoved = true;
+    // Arm the move only once this is genuinely a drag. Below the threshold
+    // nothing is applied, so a tap (or a fingertip's jitter under it) can
+    // never nudge the receiver — the same rule the Lights map's hex drag
+    // uses. Without this a jittery tap both selected AND moved the receiver
+    // by up to _TAP_PX, silently, and Save Layout persisted the nudge.
+    if(!_tapMoved) return;
     const x = (clientX - rect.left)/rect.width;
     const y = (clientY - rect.top)/rect.height;
     receiver.x = clamp01(x);
     receiver.y = clamp01(y);
     node.style.left = `${Math.round(receiver.x*10000)/100}%`;
     node.style.top  = `${Math.round(receiver.y*10000)/100}%`;
-    if(onMoved) onMoved();
+    // NOTE: no onMoved() here - the Edit tab's onMoved rebuilds every marker
+    // (renderAll), which deletes the active touch target mid-gesture. The
+    // browser then retargets the rest of the touch stream to the detached
+    // node, so on mobile only the first touchmove step applied and the marker
+    // crept a short distance and stopped (desktop mouse re-hit-tests each
+    // event, which is why only touch was affected). The commit render runs
+    // once on release in onUp below.
   };
+  // Single commit point: refresh the marker list + summary once the gesture
+  // ends, so the dragged node stays connected for the whole touch stream.
   const onUp = ()=>{
     if(!dragging) return;
     dragging = false;
     if(onDragState) onDragState(false);
     rect = null;
+    // A tap (no drag movement) fires onTap instead of onMoved — the mobile
+    // selection path. Drags fall through to onMoved exactly as before.
+    const wasTap = !_tapMoved;
+    _tapMoved = false;
+    if(wasTap && onTap){ onTap(); return; }
     if(onMoved) onMoved();
   };
 
@@ -3203,6 +3258,10 @@ function _makeDraggable(node, receiver, container, onMoved=null, isEnabled=null,
   node.addEventListener("touchstart", onDown, {passive:false});
   window.addEventListener("touchmove", onMove, {passive:false});
   window.addEventListener("touchend", onUp);
+  // An OS-cancelled gesture (call, alert, browser takeover) must release the
+  // drag the same way a lift does - otherwise dragging/_editDragging stay
+  // stuck true and the poll re-render guard freezes the panel until reload.
+  window.addEventListener("touchcancel", onUp);
 }
 
 // Format receiver list as a numbered text summary (for debug display).
@@ -7309,6 +7368,7 @@ function _wireLightsBuild(ctx, isoDiv, o) {
 
   _wireLightsPicker(ctx, isoDiv, svg, o, toVB);
   _wireDoorCircle(ctx, isoDiv, svg, o, toVB, frame, mapState);
+  const stackAt = _wireHoverHud(ctx, isoDiv, svg, o);
 
   // The drop-marker pin: a second way to place the selected light, dragged
   // from its parked corner onto the map. Reuses exactly the projection
@@ -7373,8 +7433,24 @@ function _wireLightsBuild(ctx, isoDiv, o) {
     }
   }
 
-  // Room name → select every light in the room (the multi-selection).
+  // Room name → select every light in the room (the multi-selection). A
+  // plain click only selects; jumping the table down to the row is gated on
+  // a long press (Garry, 2026-09-11: selecting on the map "just pops to the
+  // part of the list with the device... kills most of the functionality of
+  // the lights map edit" — every select-on-map used to scroll the table
+  // unconditionally, which fights exactly the repeated map-only selection a
+  // multi-light edit needs). 500ms matches the row's own long-press-for-
+  // controls elsewhere in this table.
   for (const rg of isoDiv.querySelectorAll("g.lroom[data-room]")) {
+    let lpTimer = null, longPressed = false;
+    rg.addEventListener("pointerdown", (ev) => {
+      longPressed = false;
+      lpTimer = setTimeout(() => { longPressed = true; }, 500);
+    });
+    const cancelTimer = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+    rg.addEventListener("pointerup", cancelTimer);
+    rg.addEventListener("pointerleave", cancelTimer);
+    rg.addEventListener("pointercancel", cancelTimer);
     rg.addEventListener("click", (ev) => {
       ev.stopPropagation();
       const room = rg.getAttribute("data-room");
@@ -7383,7 +7459,7 @@ function _wireLightsBuild(ctx, isoDiv, o) {
       selSet.clear();
       for (const e of eids) selSet.add(e);
       o.mapState._selLight = { eid: eids[0], mapId: null };
-      o.mapState._focusRow = eids[0];
+      if (longPressed) o.mapState._focusRow = eids[0];
       ctx.actions.renderRooms();
     });
   }
@@ -7534,6 +7610,16 @@ function _wireLightsBuild(ctx, isoDiv, o) {
         } catch (_) { originCx = start.x; originCy = start.y; }
       }
       let moved = false;
+      // The table-jump is gated on a long press, not a plain select (Garry,
+      // 2026-09-11: selecting on the map "just pops to the part of the list
+      // with the device... kills most of the functionality of the lights
+      // map edit" — every click used to scroll the table out from under
+      // whatever you were doing on the map). Cancelled the instant this
+      // turns into a drag, same threshold (500ms) the row's own long-press
+      // uses elsewhere in this table.
+      let longPressed = false;
+      let longPressCancelled = false;
+      const lpTimer = setTimeout(() => { longPressed = true; }, 500);
       try { g.setPointerCapture(ev.pointerId); } catch (_) {}
       // Group drag: when the grabbed light is part of the multi-selection,
       // every selected PLACED light moves with it by the same delta — each
@@ -7548,6 +7634,19 @@ function _wireLightsBuild(ctx, isoDiv, o) {
       const mm = (e) => {
         const v = toVB(e);
         const dx = v.x - start.x, dy = v.y - start.y;
+        // The long press is cancelled by ANY real movement (3px — plain click
+        // jitter, not the 8px drag-arm threshold below), not just a completed
+        // drag. Found live (Garry, 2026-09-11): a slow, deliberate drag that
+        // hadn't yet crossed 8px when 500ms elapsed still had longPressed
+        // flip true underneath it — so releasing a hair under the drag
+        // threshold, which happens naturally on a careful/slow drag, jumped
+        // to the table instead of just doing nothing. Cancelling on the
+        // first sign of movement, whether or not it ever becomes a drag,
+        // means only a genuinely STILL press can ever set longPressed.
+        if (!longPressCancelled && Math.abs(dx) + Math.abs(dy) > 3) {
+          longPressCancelled = true;
+          clearTimeout(lpTimer);
+        }
         // Arm the drag (and the render freeze) only once this is genuinely a
         // drag. 8px, not 3: every hex is draggable now, so a twitch while
         // select-clicking an auto-clustered light would pin it. 3px is inside
@@ -7559,12 +7658,27 @@ function _wireLightsBuild(ctx, isoDiv, o) {
         if (moved) {
           g.setAttribute("transform", `translate(${dx},${dy})`);
           for (const m of group) m.g.setAttribute("transform", `translate(${dx},${dy})`);
+          // The Transform overlay (box/handles/stand-in — see
+          // _wireTransformHandles) is a SEPARATE layer, anchored on this
+          // light's position at the moment it was drawn, not re-read on
+          // every frame — so a plain move-drag (not one of its own resize/
+          // rotate handles) used to leave it standing still while the light
+          // slid out from under it, with nothing visible moving until the
+          // drop (Garry, 2026-09-11: "the object doesn't move until you let
+          // go of it, so there is not real visual indicator of where you
+          // moved it to"). Sliding the WHOLE overlay by the same delta
+          // keeps it glued to the light for the length of the drag.
+          if (o.mapState._lightsTransform && o.mapState._selLight?.eid === eid) {
+            const lxform = isoDiv.querySelector("g.lxform");
+            if (lxform) lxform.setAttribute("transform", `translate(${dx},${dy})`);
+          }
         }
       };
       const up = (e) => {
         g.removeEventListener("pointermove", mm);
         g.removeEventListener("pointerup", up);
         g.removeEventListener("pointercancel", up);
+        clearTimeout(lpTimer);
         try { g.releasePointerCapture(ev.pointerId); } catch (_) {}
         o.mapState._editDragging = false;
         if (!moved || e.type === "pointercancel") {
@@ -7573,14 +7687,28 @@ function _wireLightsBuild(ctx, isoDiv, o) {
           // Shift-click adds to / removes from the multi-selection instead.
           g.removeAttribute("transform");
           for (const m of group) m.g.removeAttribute("transform");
+          // Alt+click: the browser always hands the click to the marker on
+          // TOP, so this is the way to reach one underneath it — the next
+          // marker down the stack at the pointer, cycling round on repeated
+          // Alt+clicks (Garry, 2026-09-12: "make it so the device underneath
+          // can also be selected somehow"). The hover HUD names the stack
+          // (_wireHoverHud) so you can see what you're cycling through.
+          let selEid = eid;
+          if ((e.altKey || ev.altKey) && stackAt) {
+            const stack = stackAt(e.clientX, e.clientY);
+            if (stack.length > 1) {
+              const i = stack.indexOf(o.mapState._selLight ? o.mapState._selLight.eid : null);
+              selEid = stack[i < 0 ? 1 : (i + 1) % stack.length];
+            }
+          }
           if (ev.shiftKey || (o.mapState._multiSelect && e.type !== "pointercancel")) {
-            if (selSet.has(eid)) selSet.delete(eid); else selSet.add(eid);
+            if (selSet.has(selEid)) selSet.delete(selEid); else selSet.add(selEid);
             if (o.mapState._selLight && selSet.size && !selSet.has(o.mapState._selLight.eid)) selSet.add(o.mapState._selLight.eid);
           } else {
             selSet.clear();
           }
-          o.mapState._selLight = { eid, mapId: null };
-          o.mapState._focusRow = eid;
+          o.mapState._selLight = { eid: selEid, mapId: null };
+          if (longPressed) o.mapState._focusRow = selEid;
           ctx.actions.renderRooms();
           return;
         }
@@ -7602,8 +7730,11 @@ function _wireLightsBuild(ctx, isoDiv, o) {
           const [mx, my] = frame.isoInv(m.cx + (v.x - start.x), m.cy + (v.y - start.y), m.z);
           _draftAt(ctx, o, m.eid, mx, my, _floorIdForLight(ctx, m.eid, m.z, frame, o.lightsByEid), "manual");
         }
+        // A completed drag is map work in progress, not a "show me in the
+        // list" request — it never jumps the table (see the pointerdown
+        // comment above), even though the drag itself outlasted the
+        // long-press timer.
         o.mapState._selLight = { eid, mapId: null };
-        o.mapState._focusRow = eid;
         ctx.actions.renderRooms();
       };
       g.addEventListener("pointermove", mm);
@@ -7709,7 +7840,97 @@ function _wireDoorCircle(ctx, isoDiv, svg, o, toVB, frame, mapState) {
 // telling the truth about size. Right-click lists everything under the
 // pointer, SMALLEST FIRST, because the small one is the one you could not get
 // to any other way.
+// The hover HUD, pinned to the upper-left of the stage's visible area: what
+// a click on the map would land on, and what's stacked underneath it
+// (Garry, 2026-09-12: "add a mouse over in the upper left so I can clearly
+// see the device a click would have me work on... make it so the device
+// underneath can also be selected somehow, and showing in the mouseover
+// text"). A true hit-test, not a bounding-box guess like the right-click
+// picker's — elementsFromPoint returns exactly what the browser would give
+// the click, topmost first, so "Click" is never wrong about which marker
+// wins. Returns stackAt for the Alt+click cycle in the marker handler.
+function _wireHoverHud(ctx, isoDiv, svg, o) {
+  const { el } = ctx.helpers;
+  // The panel lives in shadow DOM: document.elementsFromPoint stops at the
+  // shadow HOST and never sees the SVG. The stage's own root does — but
+  // isoDiv is wired (this function runs) BEFORE it is necessarily inserted
+  // into that shadow tree, so getRootNode() called once here can capture
+  // isoDiv itself (a disconnected node is its own root) instead of the real
+  // ShadowRoot, permanently — the fallback below then silently uses
+  // `document`, which finds nothing every time (2026-09-13, live: "no
+  // working mouse over" — the hover HUD's stack was always empty). Resolve
+  // the root FRESH on every call instead of caching it once.
+  const fromPoint = (x, y) => {
+    const root = isoDiv.getRootNode();
+    return (root && root.elementsFromPoint ? root : document).elementsFromPoint(x, y);
+  };
+  const stackAt = (x, y) => {
+    const seen = new Set(), out = [];
+    for (const n of fromPoint(x, y)) {
+      const g = n.closest ? n.closest("g.lhex[data-eid]") : null;
+      if (!g || !svg.contains(g)) continue;
+      const eid = g.getAttribute("data-eid");
+      if (!seen.has(eid)) { seen.add(eid); out.push(eid); }
+    }
+    return out;
+  };
+  const roomAt = (x, y) => {
+    for (const n of fromPoint(x, y)) {
+      const g = n.closest ? n.closest("g.lroom[data-room]") : null;
+      if (g && svg.contains(g)) return g.getAttribute("data-room");
+    }
+    return null;
+  };
+
+  // A zero-height sticky anchor rides the stage's own scroll (both axes)
+  // without pushing the drawing down; the box hangs off it.
+  const anchor = el("div", { class: "lv-hoverhud-anchor" });
+  const hud = el("div", { class: "lv-hoverhud" });
+  hud.hidden = true;
+  anchor.appendChild(hud);
+  isoDiv.insertBefore(anchor, svg);
+
+  const label = (eid) => {
+    const l = o.lightsByEid[eid];
+    return l ? `${l.code ? l.code + " · " : ""}${l.friendly_name || eid}` : eid;
+  };
+  let lastKey = "";
+  const show = (stack, room) => {
+    const key = stack.join("|") + "#" + (room || "");
+    if (key === lastKey) return;
+    lastKey = key;
+    hud.innerHTML = "";
+    if (!stack.length && !room) { hud.hidden = true; return; }
+    hud.hidden = false;
+    if (stack.length) {
+      hud.appendChild(el("div", { class: "lv-hoverhud-hit" }, [el("span", { class: "lv-hoverhud-k" }, "Click"), label(stack[0])]));
+      for (const eid of stack.slice(1)) {
+        hud.appendChild(el("button", { class: "lv-hoverhud-under",
+          title: "Select this one instead — it's under the marker on top",
+          onclick: () => {
+            (o.mapState._selSet || new Set()).clear();
+            o.mapState._selLight = { eid, mapId: null };
+            ctx.actions.renderRooms();
+          } }, [el("span", { class: "lv-hoverhud-k" }, "Under"), label(eid)]));
+      }
+      if (stack.length > 1) hud.appendChild(el("div", { class: "lv-hoverhud-hint" }, "Alt+click cycles through the stack · right-click lists everything here"));
+    } else {
+      const n = Object.values(o.lightsByEid).filter(l => l.area_name === room).length;
+      hud.appendChild(el("div", { class: "lv-hoverhud-hit" }, [el("span", { class: "lv-hoverhud-k" }, "Click"), `${room} — selects its ${n} device${n === 1 ? "" : "s"}`]));
+    }
+  };
+  isoDiv.addEventListener("pointermove", (ev) => {
+    if (ev.pointerType === "touch") return;
+    if (hud.contains(ev.target)) return;          // reading the HUD must not clear it
+    if (o.mapState._editDragging) return;
+    show(stackAt(ev.clientX, ev.clientY), roomAt(ev.clientX, ev.clientY));
+  });
+  isoDiv.addEventListener("pointerleave", () => show([], null));
+  return stackAt;
+}
+
 function _wireLightsPicker(ctx, isoDiv, svg, o, toVB) {
+  const { el } = ctx.helpers;
   const close = () => {
     const old = isoDiv.querySelector(".lpick");
     if (old) old.remove();
@@ -7826,6 +8047,35 @@ function _wireTransformHandles(ctx, svg, g, eid, frame, o, toVB) {
   box.setAttribute("opacity", "0.55"); box.setAttribute("pointer-events", "none");
   layer.appendChild(box);
 
+  // A bright, always-visible stand-in for the fixture itself (Garry,
+  // 2026-09-11: transform tool has "no visual on the object when it is
+  // being transformed... should show the object moving/transforming as it
+  // is being done"). The dashed box above already rotates/resizes live,
+  // but the fixture's OWN glyph (`inner`, below) can be entirely invisible
+  // right now for reasons this tool has nothing to do with — Automorph
+  // replaces a lit fixture's glyph with a room-fitted aura elsewhere on the
+  // map, and a perimeter-shaped fixture's body is its own trace — so
+  // rotating/resizing `inner` was frequently animating something nobody
+  // could see. This is the tool's OWN copy of the fixture's silhouette,
+  // always painted, so the object itself visibly turns and stretches under
+  // your hand regardless of what the underlying marker is doing.
+  const glyphL = o.lightsByEid[eid];
+  const standIn = document.createElementNS(NS, "g");
+  standIn.setAttribute("pointer-events", "none");
+  standIn.innerHTML = shapeSvg(glyphL ? glyphL.shape : "circle", 0, 0, markerRadiusPx(frame.scale),
+    'fill="#f0abfc" fill-opacity="0.55" stroke="#e879f9" stroke-width="1.5"');
+  // Start at the fixture's CURRENT rotation/size, not identity — otherwise
+  // the stand-in snaps from plain-and-unrotated to correct on the first
+  // pointermove instead of matching what's already there.
+  {
+    const { sx: sx0, sy: sy0 } = markerScale(Number(entry.width_cm) || 0, Number(entry.height_cm) || 0,
+                                              frame.scale, markerRadiusPx(frame.scale));
+    standIn.setAttribute("transform",
+      `translate(${cx.toFixed(1)},${cy.toFixed(1)}) rotate(${Number(entry.rotation) || 0}) `
+      + `scale(${sx0.toFixed(3)},${sy0.toFixed(3)})`);
+  }
+  layer.appendChild(standIn);
+
   // kind: "w" widens, "h" lengthens, "wh" does both, "rot" turns.
   const mkHandle = (hx, hy, kind, cursor, title) => {
     const h = kind === "rot"
@@ -7874,9 +8124,29 @@ function _wireTransformHandles(ctx, svg, g, eid, frame, o, toVB) {
         // what lands on pointer-up.
         const { sx, sy } = markerScale(next.width_cm, next.height_cm,
                                        frame.scale, markerRadiusPx(frame.scale));
-        inner.setAttribute("transform",
-          `translate(${cx.toFixed(1)},${cy.toFixed(1)}) rotate(${next.rotation}) `
-          + `scale(${sx.toFixed(3)},${sy.toFixed(3)})`);
+        const liveTransform = `translate(${cx.toFixed(1)},${cy.toFixed(1)}) rotate(${next.rotation}) `
+          + `scale(${sx.toFixed(3)},${sy.toFixed(3)})`;
+        inner.setAttribute("transform", liveTransform);
+        // The tool's own always-visible stand-in (see where `standIn` is
+        // built, above) turns and stretches in lockstep with `inner` — same
+        // transform, so it never disagrees with what actually lands.
+        standIn.setAttribute("transform", liveTransform);
+        // Also update the dashed box itself (Garry, 2026-09-11: "I can not
+        // see the object rotating on my screen... I have no idea where the
+        // rotation lands"). `inner` is that fixture's OWN glyph, and it can
+        // be entirely invisible right now for reasons that have nothing to
+        // do with this tool — Automorph replaces a lit fixture's glyph with
+        // a room-fitted aura elsewhere on the map, and a perimeter-shaped
+        // fixture's "body" is its own trace, not a point icon — so rotating
+        // `inner` was frequently rotating nothing anyone could see. The box
+        // is always drawn, always visible, and never suppressed, so it is
+        // the one part of this tool that can promise feedback regardless of
+        // the fixture underneath it.
+        const boxHalfW = Math.max(14, ((Number(next.width_cm) || 0) / 100) * frame.scale / 2);
+        const boxHalfH = Math.max(14, ((Number(next.height_cm) || 0) / 100) * frame.scale / 2);
+        box.setAttribute("x", cx - boxHalfW); box.setAttribute("y", cy - boxHalfH);
+        box.setAttribute("width", boxHalfW * 2); box.setAttribute("height", boxHalfH * 2);
+        box.setAttribute("transform", `rotate(${next.rotation} ${cx} ${cy})`);
       };
       const up = () => {
         h.removeEventListener("pointermove", mm);
@@ -8239,7 +8509,12 @@ function _lightsTab(ctx, maps, active) {
     const domain = String(eid).split(".")[0];
     if (domain === "binary_sensor") { ctx.toast("Sensors are read-only"); return; }
     if (domain === "sensor") { ctx.toast("Temperature sensors are read-only"); return; }
-    const on = ctx.hass.states[eid]?.state === "on";
+    // The EFFECTIVE state, not the raw HA one (Garry, 2026-09-11: a second
+    // tap inside the same optimistic window re-decided from state that
+    // hadn't caught up yet, so it silently repeated the first command
+    // instead of reversing it — see lights_panel.js's own _toggle for the
+    // full story; this preview path shares the same bug and the same fix).
+    const on = effectiveState(eid, ctx.hass.states[eid]?.state).state === "on";
     // Optimistic, like the sidebar: the marker flips now, HA reconciles.
     setOptimistic(eid, on ? "off" : "on");
     ctx.actions.renderRooms();
@@ -8619,6 +8894,10 @@ function _lightsTab(ctx, maps, active) {
     // column reads this instead of onPlaceRow/placements for l.isDoor rows.
     doorLinkedIds: new Set((ctx.state.model?.rf_barriers_m || [])
       .filter(b => b.linked_entity_id).map(b => b.linked_entity_id)),
+    // Which linked door/lock is currently steel, for the row's own Steel
+    // toggle below — keyed the same way doorLinkedIds is.
+    doorMaterialByEid: Object.fromEntries((ctx.state.model?.rf_barriers_m || [])
+      .filter(b => b.linked_entity_id).map(b => [b.linked_entity_id, b.material])),
     // Arms the on-map circle tool (see _wireLightsBuild's click handler,
     // _wireDoorCircle's drag handlers, and _commitDoorCircle) — builder
     // only, same gate as onPlaceRow. Garry, 2026-09-09: linking has to work
@@ -8654,6 +8933,24 @@ function _lightsTab(ctx, maps, active) {
         await ctx.actions.modelRefresh();
         ctx.toast(`Unlinked — "${l.friendly_name || l.entity_id}" can be placed again.`);
       } catch (e) { ctx.toast("Could not unlink: " + (e.message || e), true); }
+      ctx.actions.renderRooms();
+    } : null,
+    // "Just add the ability to make the door/window steel or not" (Garry,
+    // 2026-09-11) — the confirm() dialog in _commitDoorCircle only ever asks
+    // ONCE, at creation, and only when the parent wall wasn't already metal;
+    // there was no way to change it afterward. Same steel/12dB choice as
+    // that dialog, but a standing toggle: metal (steel) or custom (6dB),
+    // same fetch-raw-record-first pattern as Invert/Unlink above.
+    onToggleDoorSteel: paid && !preview ? async (l) => {
+      const bar = (ctx.state.model?.rf_barriers_m || []).find(b => b.linked_entity_id === l.entity_id);
+      if (!bar) { ctx.toast("That link no longer exists.", true); return; }
+      const toSteel = bar.material !== "metal";
+      try {
+        await ctx.actions.callWS({ type: "padspan_bright/fabric_rf_barrier_set",
+          barrier: { ...bar, material: toSteel ? "metal" : "custom", attenuation_dbm: toSteel ? 12 : 6 } });
+        await ctx.actions.modelRefresh();
+        ctx.toast(toSteel ? "Set to steel (12 dB)." : "No longer steel (6 dB).");
+      } catch (e) { ctx.toast("Could not update: " + (e.message || e), true); }
       ctx.actions.renderRooms();
     } : null,
     // Map → index: the row of the light just selected on the map scrolls
@@ -8830,6 +9127,14 @@ function _lightsTab(ctx, maps, active) {
       mapState._lightsAutomorphHardness = values.lights_automorph_hardness;
       mapState._lightsAutomorphStyle = values.lights_automorph_style;
       mapState._lightsAutomorphSubtlety = values.lights_automorph_subtlety;
+      // Layout & view (Garry, 2026-09-12: "include more elements into this
+      // feature") — the same three keys Save view writes. Optional: a look
+      // saved before these existed carries none, and must not move the
+      // camera. `view` is mapState._lightsView, which survives the re-render
+      // below, so the sliders come back showing the preset's numbers.
+      if (values.overview_iso_floor_gap !== undefined) view.floorGap = values.overview_iso_floor_gap;
+      if (values.overview_iso_horiz_gap !== undefined) view.horizGap = values.overview_iso_horiz_gap;
+      if (values.overview_iso_focus !== undefined) view.focusIdx = values.overview_iso_focus ?? 0;
       try { await ctx.actions.settingsSet(values); }
       catch (e) { ctx.toast("Could not apply the preset: " + String(e), true); }
       ctx.actions.renderRooms();
@@ -8855,6 +9160,12 @@ function _lightsTab(ctx, maps, active) {
         lights_automorph_hardness: Number(mapState._lightsAutomorphHardness === undefined ? ctx.state.settings?.lights_automorph_hardness : mapState._lightsAutomorphHardness) || 0,
         lights_automorph_style: (mapState._lightsAutomorphStyle === undefined ? ctx.state.settings?.lights_automorph_style : mapState._lightsAutomorphStyle) || "glow",
         lights_automorph_subtlety: Number(mapState._lightsAutomorphSubtlety === undefined ? ctx.state.settings?.lights_automorph_subtlety : mapState._lightsAutomorphSubtlety) || 0,
+        // Layout & view — read from `view` (the live slider state), the same
+        // source Save view reads, not ctx.state.settings, for the same
+        // stale-round-trip reason as the overrides above.
+        overview_iso_floor_gap: view.floorGap,
+        overview_iso_horiz_gap: view.horizGap,
+        overview_iso_focus:     view.focusIdx,
       };
       const rest = (ctx.state.settings?.lights_showcase_presets || []).filter((p) => p.name !== name);
       try {

@@ -993,6 +993,19 @@
   letter-spacing:.09em;color:rgba(226,240,232,.38)}
 .lv-val{font-size:11.5px;color:#cbd5e1;font-variant-numeric:tabular-nums;min-width:34px}
 
+/* A GROUP header, not a value label (Garry, 2026-09-11: "the large number of
+   controls is very poorly structured... group by what they do") — forces a
+   line break (flex-basis:100%) so the toolbar's flex-wrap can never split
+   one logical group across two lines, and a hairline above marks a new
+   section starting. Bigger and brighter than .lv-lbl on purpose: that class
+   already means "this is the name of the ONE control beside me" (Theme,
+   Floor, Room %); this means "everything until the next one of these is
+   part of the same topic." */
+.lv-grouplbl{flex-basis:100%;font-size:10px;font-weight:700;text-transform:uppercase;
+  letter-spacing:.12em;color:rgba(226,240,232,.5);margin-top:6px;padding-top:6px;
+  border-top:1px solid rgba(120,190,155,.1)}
+.lv-grouplbl:first-child{margin-top:0;padding-top:0;border-top:none}
+
 /* A related set of sliders (Automorph's own three, the view-layout three)
    reads as one thing at a glance — a faint shade + hairline, one step
    lighter than the toolbar's own background, never louder than that. */
@@ -1183,6 +1196,23 @@
     repeating-linear-gradient(0deg,transparent 0 23px,rgba(232,121,249,.045) 23px 24px),
     repeating-linear-gradient(90deg,transparent 0 23px,rgba(232,121,249,.045) 23px 24px);
   background-blend-mode:normal,screen,screen}
+/* Hover HUD (Mapping → Lights builder): what a click on the map would land
+   on, and what's stacked underneath it (Garry, 2026-09-12: "a mouse over in
+   the upper left so I can clearly see the device a click would have me work
+   on"). The anchor is a zero-height sticky element so the box rides the
+   stage's own scroll without pushing the drawing down. */
+.lv-hoverhud-anchor{position:sticky;top:0;left:0;height:0;overflow:visible;z-index:5}
+.lv-hoverhud{position:absolute;top:0;left:0;min-width:180px;max-width:320px;padding:6px 8px;
+  border-radius:10px;background:rgba(7,16,8,.92);border:1px solid rgba(232,121,249,.35);
+  box-shadow:0 8px 24px rgba(0,0,0,.5);font-size:11.5px;line-height:1.35;color:#e8f0ea;pointer-events:auto}
+.lv-hoverhud-k{display:inline-block;min-width:38px;margin-right:6px;font-size:9.5px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.1em;color:rgba(232,121,249,.85)}
+.lv-hoverhud-hit{font-weight:600;padding:1px 0}
+.lv-hoverhud-under{display:block;width:100%;text-align:left;margin:2px 0 0;padding:2px 4px;border-radius:6px;
+  border:1px solid transparent;background:none;color:rgba(226,240,232,.75);font:inherit;font-size:11px;cursor:pointer}
+.lv-hoverhud-under:hover{border-color:rgba(232,121,249,.5);color:#e8f0ea;background:rgba(232,121,249,.08)}
+.lv-hoverhud-hint{margin-top:4px;font-size:9.5px;color:rgba(226,240,232,.45)}
+
 .lv-check{display:inline-flex;gap:8px;align-items:center;font-size:11px;color:rgba(226,240,232,.6);
   font-variant-numeric:tabular-nums}
 .lv-check b{color:#8ee5b4}

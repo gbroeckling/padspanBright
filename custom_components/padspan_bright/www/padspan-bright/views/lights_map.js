@@ -1553,11 +1553,18 @@ export function buildLightsMapCard(hostIn){
   // unset) already stays reachable as it is, so it is left untouched.
   const ctrlRow = el("div", { class: "lv-toolbar" + (host.stickyToolbar ? " lv-toolbar-sticky" : "") });
   const SEP = () => el("span", { class: "lv-sep" }, "");
+  // A GROUP header (see .lv-grouplbl) — "everything until the next one of
+  // these is the same topic," not a value label for the one control beside
+  // it. One per logical cluster: Presentation, Filters, Automorph, Layout &
+  // view — the same clusters the SEP()s already split the row into, now
+  // named so the split reads as intentional instead of just whitespace.
+  const groupLbl = (text) => el("span", { class: "lv-grouplbl" }, text);
 
   // Showcase — first in the row because it changes everything to its right.
   // Only the Mapping tab offers it (the sidebar host passes no handler), and it
   // is a VIEW: every fixture stays exactly where it was put and stays editable.
   if (host.onShowcase) {
+    ctrlRow.appendChild(groupLbl("Presentation"));
     ctrlRow.appendChild(el("button", {
       class: "lv-tgl tone-violet" + (host.showcase ? " on" : ""),
       title: "Presentation rendering — real fixture colour, light pools, contact shadows",
@@ -1654,7 +1661,7 @@ export function buildLightsMapCard(hostIn){
   // A rendering mode (Showcase and its family) reads as one thing; "Hide
   // untouched" is an independent filter, not part of that family — split so
   // the row groups by what a button actually DOES, not just where it sits.
-  if (host.onShowcase && host.onHideUntouched) ctrlRow.appendChild(SEP());
+  if (host.onHideUntouched || host.onHideDeviceCodes || host.onShowBeacons) ctrlRow.appendChild(groupLbl("Filters"));
 
   // Hide untouched — show only the fixtures that have actually been worked on.
   // MOVING a light is not work on the light: dropping it where it really is is
@@ -1699,6 +1706,7 @@ export function buildLightsMapCard(hostIn){
   // the Showcase gate above. An aesthetic-only aura for now (see
   // automorphAuraSvg in iso_lights.js): the icon itself is untouched.
   if (host.onAutomorph) {
+    ctrlRow.appendChild(groupLbl("Automorph"));
     ctrlRow.appendChild(el("button", {
       class: "lv-tgl tone-pink" + (host.automorph ? " on" : ""),
       title: "Grows a soft aura behind each placed fixture toward its own room's "
@@ -1793,7 +1801,7 @@ export function buildLightsMapCard(hostIn){
     }
     if (automorphGroup && automorphGroup.children.length) ctrlRow.appendChild(automorphGroup);
   }
-  if (host.onShowcase || host.onHideUntouched || host.onAutomorph) ctrlRow.appendChild(SEP());
+  ctrlRow.appendChild(groupLbl("Layout & view"));
 
   // Reset needs to put the focus control back too — see resetFocusCtl below.
   let resetFocusCtl = () => {};
@@ -1927,14 +1935,18 @@ export function buildLightsMapCard(hostIn){
   // in styles.css) rather than one more control folded into the row above —
   // applying a preset changes several unrelated settings at once, a bigger
   // action than any single toggle beside it, and it reads that way too.
-  if (host.showcase && host.onSavePreset) {
+  // Everyday panels (Garry, 2026-09-11: "a small preset button in the lights
+  // tab for quick changes") get quick-apply only — no Save/Delete, the same
+  // read-only-for-modes line this card draws for showcase/automorph/etc.
+  // elsewhere: editing the underlying looks stays in Mapping -> Lights.
+  if (host.showcase && (host.onSavePreset || host.onApplyPreset)) {
     const presets = host.showcasePresets || [];
     const presetBar = el("div", { class: "lv-presetbar" });
     presetBar.appendChild(el("span", { class: "lv-lbl" }, "Presets"));
 
     const presetSel = document.createElement("select");
     presetSel.className = "lv-select";
-    presetSel.title = "A saved combination of Theme, Automorph and the other Showcase controls";
+    presetSel.title = "A saved combination of Theme, Automorph, the other Showcase controls, and the Floor / Spacing / L-R layout";
     presetSel.appendChild(el("option", { value: "" }, presets.length ? "— Select a look —" : "No saved looks yet"));
     for (const p of presets) presetSel.appendChild(el("option", { value: p.name }, p.name));
     presetBar.appendChild(presetSel);
@@ -1944,7 +1956,7 @@ export function buildLightsMapCard(hostIn){
 
     presetBar.appendChild(el("button", {
       class: "lv-act primary",
-      title: "Apply this preset's Theme, Automorph and other Showcase settings",
+      title: "Apply this preset's Theme, Automorph, other Showcase settings and layout (Floor / Spacing / L-R)",
       onclick: async () => {
         const p = presets.find((x) => x.name === presetSel.value);
         if (!p) { flashPreset("Pick a preset first"); return; }
@@ -1953,35 +1965,39 @@ export function buildLightsMapCard(hostIn){
       },
     }, "Apply"));
 
-    const nameInput = document.createElement("input");
-    nameInput.type = "text";
-    nameInput.className = "lv-preset-name";
-    nameInput.placeholder = "Name this look…";
-    nameInput.maxLength = 60;
-    presetBar.appendChild(nameInput);
+    if (host.onSavePreset) {
+      const nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.className = "lv-preset-name";
+      nameInput.placeholder = "Name this look…";
+      nameInput.maxLength = 60;
+      presetBar.appendChild(nameInput);
 
-    presetBar.appendChild(el("button", {
-      class: "lv-act",
-      title: "Save the current Theme, Automorph and other Showcase settings under this name — overwrites a saved look with the same name",
-      onclick: async () => {
-        const name = nameInput.value.trim();
-        if (!name) { flashPreset("Type a name first"); return; }
-        await host.onSavePreset(name);
-        nameInput.value = "";
-        flashPreset("Saved ✓");
-      },
-    }, "Save current"));
+      presetBar.appendChild(el("button", {
+        class: "lv-act",
+        title: "Save the current Theme, Automorph, other Showcase settings and layout (Floor / Spacing / L-R) under this name — overwrites a saved look with the same name",
+        onclick: async () => {
+          const name = nameInput.value.trim();
+          if (!name) { flashPreset("Type a name first"); return; }
+          await host.onSavePreset(name);
+          nameInput.value = "";
+          flashPreset("Saved ✓");
+        },
+      }, "Save current"));
+    }
 
-    const delBtn = el("button", { class: "lv-act", title: "Delete the selected preset" }, "Delete");
-    delBtn.disabled = !presetSel.value;
-    delBtn.addEventListener("click", async () => {
-      if (!presetSel.value) return;
-      const name = presetSel.value;
-      await host.onDeletePreset(name);
-      flashPreset("Deleted");
-    });
-    presetSel.addEventListener("change", () => { delBtn.disabled = !presetSel.value; });
-    presetBar.appendChild(delBtn);
+    if (host.onDeletePreset) {
+      const delBtn = el("button", { class: "lv-act", title: "Delete the selected preset" }, "Delete");
+      delBtn.disabled = !presetSel.value;
+      delBtn.addEventListener("click", async () => {
+        if (!presetSel.value) return;
+        const name = presetSel.value;
+        await host.onDeletePreset(name);
+        flashPreset("Deleted");
+      });
+      presetSel.addEventListener("change", () => { delBtn.disabled = !presetSel.value; });
+      presetBar.appendChild(delBtn);
+    }
     presetBar.appendChild(presetStatus);
 
     mapCard.appendChild(presetBar);
@@ -2337,8 +2353,16 @@ export function buildLightsTable(host, lights){
         // fabric, same fields, either surface.
         ...(l.isDoor ? (() => {
           if (host.doorLinkedIds && host.doorLinkedIds.has(l.entity_id)) {
+            const isSteel = (host.doorMaterialByEid || {})[l.entity_id] === "metal";
             return [
               el("span", { class: "lv-hint", title: "Shows open/closed on the map at the wall section it's linked to" }, "🔗 Linked"),
+              ...(host.onToggleDoorSteel ? [el("button", {
+                class: "lv-act" + (isSteel ? " primary" : ""), style: "margin-left:6px",
+                title: isSteel
+                  ? "Steel (12 dB) — click to change to a lighter material (6 dB)"
+                  : "Set this door/window itself to steel (12 dB), independent of the wall it's cut from",
+                onclick: (e) => { e.stopPropagation(); host.onToggleDoorSteel(l); },
+              }, isSteel ? "Steel ✓" : "Steel")] : []),
               ...(host.onUnlinkDoor ? [el("button", {
                 class: "lv-act", style: "margin-left:6px",
                 title: "Unlink from that wall section — the wall itself is left in place; Place then reappears here",
@@ -2383,8 +2407,16 @@ export function buildLightsTable(host, lights){
           // buttons both saying "Place" would be meaningless.
           ...(l.isLock && host.onConfigureDoor ? (() => {
             if (host.doorLinkedIds && host.doorLinkedIds.has(l.entity_id)) {
+              const isSteel = (host.doorMaterialByEid || {})[l.entity_id] === "metal";
               return [
                 el("span", { class: "lv-hint", title: "Flashes red on the map, on the wall section it's linked to, whenever unlocked" }, "🔗 Linked"),
+                ...(host.onToggleDoorSteel ? [el("button", {
+                  class: "lv-act" + (isSteel ? " primary" : ""), style: "margin-left:6px",
+                  title: isSteel
+                    ? "Steel (12 dB) — click to change to a lighter material (6 dB)"
+                    : "Set this door/window itself to steel (12 dB), independent of the wall it's cut from",
+                  onclick: (e) => { e.stopPropagation(); host.onToggleDoorSteel(l); },
+                }, isSteel ? "Steel ✓" : "Steel")] : []),
                 ...(host.onUnlinkDoor ? [el("button", {
                   class: "lv-act", style: "margin-left:6px",
                   title: "Unlink from that wall section — the wall itself is left in place; Link wall then reappears here",

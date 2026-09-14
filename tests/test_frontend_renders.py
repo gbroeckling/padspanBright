@@ -168,3 +168,43 @@ def test_panel_never_calls_this_actions_unguarded() -> None:
         "optional-chain it if the call is genuinely optional.\n"
         + "\n".join(offenders)
     )
+
+
+# ── ctx.helpers scope ────────────────────────────────────────────────────────
+# Same family, one level deeper: `render(ctx)` destructures `el`/`esc`/`pill`/
+# `helpBtn`/`radioShortId`/`roomColor`/`scannerStatus` from `ctx.helpers` into
+# ITS OWN closure — a sibling top-level function (`_wireLightsBuild`,
+# `_wireLightsPicker`, the whole `_wire*` family maps.js's Lights builder is
+# built from) does not inherit that binding and must destructure it again
+# itself. `node --check` cannot see this (an undeclared identifier is only a
+# RUNTIME ReferenceError), and render_smoke.mjs cannot reach it either: its
+# DOM shim's `innerHTML` setter never parses the SVG STRING buildIsoSVG
+# returns into real nodes, so `isoDiv.querySelector("svg")` finds nothing and
+# every onHexesBuilt wiring function returns before it runs. Two real
+# instances shipped (2026-09-12/13): `_wireHoverHud` threw the instant the
+# Lights builder tab tried to render — a blank tab, live in production for
+# about a day; `_wireLightsPicker` (the right-click marker-disambiguation
+# menu) had carried the same bug since v0.38.37, silent because it only fires
+# on an actual right-click. Full detail and the checker itself are in
+# ctx_helpers_scope.mjs.
+
+_CTX_HELPERS_CHECK = Path(__file__).parent / "js" / "ctx_helpers_scope.mjs"
+
+
+def test_every_ctx_helper_used_is_locally_bound() -> None:
+    res = subprocess.run(
+        [_NODE, str(_CTX_HELPERS_CHECK), str(_VIEWS)],
+        capture_output=True, text=True, encoding="utf-8", timeout=30,
+    )
+    assert res.returncode == 0, f"the checker itself failed:\n{res.stderr[-2000:]}"
+    findings = json.loads(res.stdout.strip().splitlines()[-1])
+    assert not findings, (
+        "function(s) call a ctx.helpers value without destructuring it "
+        "locally — this throws a ReferenceError the moment the function "
+        "actually runs, not when the file is parsed:\n"
+        + "\n".join(
+            f"  {file}:{f['line']} {f['fn']}() calls {f['ident']}() — "
+            f"needs its own `const {{ {f['ident']} }} = ctx.helpers;`"
+            for file, fs_ in findings.items() for f in fs_
+        )
+    )
