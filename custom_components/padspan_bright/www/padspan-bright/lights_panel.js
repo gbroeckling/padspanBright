@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.40";
-const BUILD_ID = "20260914T155036Z";
+const APP_VERSION = "0.38.41";
+const BUILD_ID = "20260915T052953Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -24,7 +24,8 @@ const { isWledLight, isPartitionLight } =
 // two tools always show the identical map. All lights-view edits go in there.
 const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable, lightIsTouched,
         sunAmbient, lastBrightness, setOptimistic, clearOptimistic, effectiveState,
-        wireUseSurface, openControlCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates } =
+        wireUseSurface, openControlCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates,
+        wireHoverHud } =
   await import(`./views/lights_map.js${new URL(import.meta.url).search}`);
 
 // ── DOM helpers ──────────────────────────────────────────────────────────────
@@ -533,7 +534,29 @@ class PadSpanLightsApp extends HTMLElement {
         this._render();
       },
       onHexesBuilt: (isoDiv)=>{
-        requestAnimationFrame(()=>wireUseSurface(isoDiv, this._useApi(lightsByEid, lights)));
+        requestAnimationFrame(()=>{
+          const api = this._useApi(lightsByEid, lights);
+          wireUseSurface(isoDiv, api);
+          // The same hover HUD the builder has (Garry, 2026-09-14: "the mouse
+          // over works in mapping, lights, but not in lights tab"). Here an
+          // "Under" pick does what a tap on that marker does — motion opens
+          // its activity, a holdable device its controls, anything else
+          // toggles — since this surface has no selection to make.
+          wireHoverHud(isoDiv, {
+            lightsByEid,
+            isDragging: () => false,
+            onPickUnder: (eid) => {
+              const l0 = lightsByEid[eid];
+              if (!l0) return;
+              if (l0.isMotion) api.openActivity(eid);
+              else if (api.controlsFor(l0)) api.openControls(eid);
+              else api.toggle(eid);
+            },
+            underTitle: "Act on this one instead — it's under the marker on top",
+            stackHint: null,
+            roomLine: (room, n) => `${room} — opens its ${n} device${n === 1 ? "" : "s"}`,
+          });
+        });
       },
       // A row in the list is the same object as its marker on the map, so a
       // tap here has to mean the same thing a tap THERE means — the map's

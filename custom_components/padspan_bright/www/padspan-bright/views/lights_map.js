@@ -175,13 +175,35 @@ export function roomAggregate(lights, roomName){
     all: here,
   };
 }
+// Mirrors const.OUTDOOR_FLOOR_NAMES / presence_rules.is_outdoor_floor: the
+// fabric's "__outside__" sentinel, the registry's "outside", and the plain
+// names people give a garden. An outdoor "floor" is not a storey.
+export function isOutdoorFloorId(fid){
+  const k = String(fid || "").trim().toLowerCase().replace(/\s+/g, "_");
+  return k === "__outside__" || k === "outside" || k === "outdoor" || k === "outdoors"
+      || k === "exterior" || k === "garden" || k === "yard";
+}
 // A device's floor: the room it is in (the fabric's room → floor), else the
 // floor it was placed on. A device with neither is on no floor.
+//
+// An OUTDOOR room does not anchor (Garry, 2026-09-14: devices "registered to
+// the outside level" could not be placed "on a floor, just outside a room").
+// Outdoors is not a storey and the Lights stack never draws it (fabricFrame
+// drops outdoor rooms and lights before the levels are built), so a device
+// whose only claim to a floor was "Shed" had no marker to grab and every
+// placement path wrote it straight back onto __outside__ — it could never
+// reach the map at all. Its stored placement wins instead: drop it on a real
+// floor's plate beside the room it lives outside of, and that is where it
+// draws. Never placed, it stays on the outside level exactly as before, so
+// nothing already saved moves.
 export function lightFloorId(l, model){
   const geo = (model && model.room_geometry_m) || {};
-  if (l.area_name && geo[l.area_name] && geo[l.area_name].floor_id) return String(geo[l.area_name].floor_id);
+  const g = l.area_name && geo[l.area_name];
+  const roomFid = g && g.floor_id ? String(g.floor_id) : null;
+  if (roomFid && !isOutdoorFloorId(roomFid)) return roomFid;
   const p = ((model && model.light_positions_m) || {})[l.entity_id];
-  return p && p.floor_id ? String(p.floor_id) : null;
+  if (p && p.floor_id) return String(p.floor_id);
+  return roomFid;
 }
 export function floorAggregate(lights, model, floorId){
   const here = (lights || []).filter(l => lightFloorId(l, model) === String(floorId));
@@ -366,6 +388,132 @@ export function wireStageTouch(stage, view, onZoom){
 //   toast(msg, isErr)
 //   rerender()
 // }
+// ── The hover HUD ─────────────────────────────────────────────────────────────
+// Pinned to the upper-left of the stage's visible area: what a click on the
+// map would land on, and what's stacked underneath it (Garry, 2026-09-12:
+// "add a mouse over in the upper left so I can clearly see the device a
+// click would have me work on... make it so the device underneath can also
+// be selected somehow, and showing in the mouseover text"). A true hit-test,
+// not a bounding-box guess — elementsFromPoint returns exactly what the
+// browser would give the click, topmost first, so "Click" is never wrong
+// about which marker wins. Shared by BOTH hosts (Garry, 2026-09-14: "the
+// mouse over works in mapping, lights, but not in lights tab" — it had been
+// builder-only glue in maps.js); what an "Under" pick DOES is the host's
+// (opts.onPickUnder — the builder selects it for the inspector, the sidebar
+// acts on it the way a tap would). Returns stackAt for the builder's
+// Alt+click cycle.
+//   opts.lightsByEid   eid -> light (for the labels)
+//   opts.isDragging()  true while a marker drag is in flight: no HUD churn
+//   opts.onPickUnder(eid)  the "Under" button
+//   opts.underTitle / opts.stackHint (null = none) / opts.roomLine(room, n)
+export function wireHoverHud(isoDiv, opts){
+  const svg = isoDiv.querySelector("svg");
+  if (!svg) return () => [];
+  const lightsByEid = opts.lightsByEid || {};
+  const mk = (tag, cls, kids) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    for (const k of (Array.isArray(kids) ? kids : [kids])) if (k != null) n.appendChild(typeof k === "string" ? document.createTextNode(k) : k);
+    return n;
+  };
+  // The panel lives in shadow DOM: document.elementsFromPoint stops at the
+  // shadow HOST and never sees the SVG. The stage's own root does — but
+  // isoDiv is wired (this function runs) BEFORE it is necessarily inserted
+  // into that shadow tree, so getRootNode() called once here can capture
+  // isoDiv itself (a disconnected node is its own root) instead of the real
+  // ShadowRoot, permanently — the fallback below then silently uses
+  // `document`, which finds nothing every time (2026-09-13, live: "no
+  // working mouse over" — the hover HUD's stack was always empty). Resolve
+  // the root FRESH on every call instead of caching it once.
+  const fromPoint = (x, y) => {
+    const root = isoDiv.getRootNode();
+    return (root && root.elementsFromPoint ? root : document).elementsFromPoint(x, y);
+  };
+  const stackAt = (x, y) => {
+    const seen = new Set(), out = [];
+    for (const n of fromPoint(x, y)) {
+      const g = n.closest ? n.closest("g.lhex[data-eid]") : null;
+      if (!g || !svg.contains(g)) continue;
+      const eid = g.getAttribute("data-eid");
+      if (!seen.has(eid)) { seen.add(eid); out.push(eid); }
+    }
+    return out;
+  };
+  const roomAt = (x, y) => {
+    for (const n of fromPoint(x, y)) {
+      const g = n.closest ? n.closest("g.lroom[data-room]") : null;
+      if (g && svg.contains(g)) return g.getAttribute("data-room");
+    }
+    return null;
+  };
+
+  // A zero-height sticky anchor rides the stage's own scroll (both axes)
+  // without pushing the drawing down; the box hangs off it.
+  const anchor = mk("div", "lv-hoverhud-anchor");
+  const hud = mk("div", "lv-hoverhud");
+  hud.hidden = true;
+  anchor.appendChild(hud);
+  isoDiv.insertBefore(anchor, svg);
+
+  const label = (eid) => {
+    const l = lightsByEid[eid];
+    return l ? `${l.code ? l.code + " · " : ""}${l.friendly_name || eid}` : eid;
+  };
+  // Pin the box to the top-left of the VISIBLE part of the stage. The anchor
+  // is sticky within the stage's own scroll box, but the PAGE scrolls too,
+  // and once the stage's top edge is above the viewport — the ordinary way
+  // to look at the map under the toolbar — the anchor, and the box with it,
+  // sits off-screen (Garry, 2026-09-14: "mouse over no longer works"; live,
+  // the box was filling correctly 291px above the window). Re-measured on
+  // every hover, before the same-content early return, so a page scroll
+  // mid-hover moves the box too.
+  // …and below a sticky toolbar (.lv-toolbar-sticky, the builder's, z-index
+  // 20, above this box's 5): pinned to the viewport top alone, the box landed
+  // exactly under that bar — on-screen by the numbers, invisible in fact.
+  // A host without that bar (the sidebar) measures 0 and pins to the top.
+  const place = () => {
+    const a = anchor.getBoundingClientRect();
+    const root = isoDiv.getRootNode();
+    const bar = root && root.querySelector ? root.querySelector(".lv-toolbar-sticky") : null;
+    const barBottom = bar ? bar.getBoundingClientRect().bottom : 0;
+    const visibleTop = Math.max(0, barBottom);
+    hud.style.top = `${Math.max(visibleTop, a.top) - a.top + 6}px`;
+    hud.style.left = `${Math.max(0, -a.left) + 6}px`;
+  };
+  let lastKey = "";
+  const show = (stack, room) => {
+    place();
+    const key = stack.join("|") + "#" + (room || "");
+    if (key === lastKey) return;
+    lastKey = key;
+    hud.innerHTML = "";
+    if (!stack.length && !room) { hud.hidden = true; return; }
+    hud.hidden = false;
+    if (stack.length) {
+      hud.appendChild(mk("div", "lv-hoverhud-hit", [mk("span", "lv-hoverhud-k", "Click"), label(stack[0])]));
+      for (const eid of stack.slice(1)) {
+        const b = mk("button", "lv-hoverhud-under", [mk("span", "lv-hoverhud-k", "Under"), label(eid)]);
+        b.title = opts.underTitle || "This one is under the marker on top";
+        b.addEventListener("click", () => { if (opts.onPickUnder) opts.onPickUnder(eid); });
+        hud.appendChild(b);
+      }
+      if (stack.length > 1 && opts.stackHint) hud.appendChild(mk("div", "lv-hoverhud-hint", opts.stackHint));
+    } else {
+      const n = Object.values(lightsByEid).filter(l => l.area_name === room).length;
+      const line = opts.roomLine ? opts.roomLine(room, n) : `${room} — ${n} device${n === 1 ? "" : "s"}`;
+      hud.appendChild(mk("div", "lv-hoverhud-hit", [mk("span", "lv-hoverhud-k", "Click"), line]));
+    }
+  };
+  isoDiv.addEventListener("pointermove", (ev) => {
+    if (ev.pointerType === "touch") return;
+    if (hud.contains(ev.target)) return;          // reading the HUD must not clear it
+    if (opts.isDragging && opts.isDragging()) return;
+    show(stackAt(ev.clientX, ev.clientY), roomAt(ev.clientX, ev.clientY));
+  });
+  isoDiv.addEventListener("pointerleave", () => show([], null));
+  return stackAt;
+}
+
 export function wireUseSurface(isoDiv, api){
   const q = (sel) => isoDiv.querySelectorAll(sel);
   const svg = isoDiv.querySelector("svg");
@@ -1498,6 +1646,9 @@ export function buildLightsMapCard(hostIn){
         classFilter: host.classFilter || null, hitHalo: !!host.hitHalo,
         collapseUnplaced: !!host.collapseUnplaced,
         locateEid: host.locateEid || null, dropMarker: !!host.onDropPlace,
+        // When HA came up (model_get's ha_started_at) — a motion sensor whose
+        // last_changed is just the restart's restored timestamp draws quiet.
+        haStartedMs: Date.parse(host.model && host.model.ha_started_at) || 0,
         // In-progress door/window circle (see maps.js's _wireLightsBuild
         // click handler and _wireDoorCircle's drag handlers): drawn with a
         // live wall-gap preview so positioning it is visible feedback, not

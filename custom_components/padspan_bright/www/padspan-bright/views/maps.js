@@ -19,14 +19,15 @@ const { makeStackXform, mapXform, imageAr, fabricWorldRooms, mapFracToMetres,
 // THE fabric frame — the Lights tab inverts drags through the exact function
 // the renderer draws with, so the two cannot disagree.
 const { fabricFrame, markerScale, markerRadiusPx, cmFromHandlePx, MAX_FIXTURE_CM,
-        floorIdAtLevel, sceneColours, defaultPerimeterMarginM, shapeSvg } =
+        floorIdAtLevel, sceneColours, defaultPerimeterMarginM, shapeSvg, pointInPolygon } =
   await import(`./iso_lights.js${new URL(import.meta.url).search}`);
 // THE shared Lights view (data pipeline, map card, index table) — used
 // verbatim by the Lights sidebar panel, so the two tools always show the
 // identical map; this tab layers the build tools on top of it.
 const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable, lightIsTouched,
         sunAmbient, lastBrightness, spreadInRoom, createUndoStack, setOptimistic, clearOptimistic, effectiveState,
-        wireUseSurface, openControlCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates } =
+        wireUseSurface, openControlCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates,
+        isOutdoorFloorId, wireHoverHud } =
   await import(`./lights_map.js${new URL(import.meta.url).search}`);
 // Fixture-shape vocabulary + derivation (the tab owns the manual override UI).
 const { LIGHT_SHAPES, deriveLightShape } =
@@ -7045,6 +7046,30 @@ function _floorIdForZ(ctx, z, frame) {
   return "main";
 }
 
+// Which floor's plate a point (viewBox units) is over — plain geometry
+// against each slab's top face (data-role="slabtop"), topmost-drawn plate
+// first, ghosted (unfocused, opacity-dimmed) plates skipped. Geometry, not
+// elementsFromPoint: the slab groups are pointer-events="none" on purpose (a
+// plate must never swallow a click meant for a marker under it — Garry,
+// 2026-09-14: "all devices [placed outside a room] are not selectable"), and
+// a hit-test cannot see what takes no pointer events. null = no plate here.
+function _floorZAtVb(svg, x, y) {
+  const slabs = [...svg.querySelectorAll('g[data-role="floorslab"]')].reverse();
+  for (const g of slabs) {
+    const op = g.getAttribute("opacity");
+    if (op !== null && Number(op) < 0.5) continue;
+    const top = g.querySelector('polygon[data-role="slabtop"]');
+    if (!top) continue;
+    const pts = (top.getAttribute("points") || "").trim().split(/\s+/)
+      .map(p => p.split(",").map(Number)).filter(p => p.length === 2 && p.every(Number.isFinite));
+    if (pts.length >= 3 && pointInPolygon(pts, x, y)) {
+      const z = Number(g.getAttribute("data-z"));
+      if (Number.isFinite(z)) return z;
+    }
+  }
+  return null;
+}
+
 // A light belongs to a ROOM, and a room belongs to a floor. That is the floor
 // the light keeps — dragging it around the map never re-assigns the storey.
 //
@@ -7055,15 +7080,19 @@ function _floorIdForZ(ctx, z, frame) {
 //
 // Order: the room's own floor from the fabric, then whatever the light was
 // already stored with, and only then the drawn height.
+//
+// An outdoor room or a prior outdoor placement anchors NOTHING — outdoors is
+// not a storey and the stack never draws it (see lightFloorId, lights_map.js),
+// so either would only ever send the light straight back off the map.
 function _floorIdForLight(ctx, eid, z, frame, lightsByEid) {
   const room = ((lightsByEid || {})[eid] || {}).area_name;
   if (room) {
     const geo = (ctx.state.model?.room_geometry_m || {})[room];
     const fid = geo && geo.floor_id;
-    if (fid) return String(fid);
+    if (fid && !isOutdoorFloorId(fid)) return String(fid);
   }
   const prevFid = ((ctx.state.model?.light_positions_m || {})[eid] || {}).floor_id;
-  if (prevFid) return String(prevFid);
+  if (prevFid && !isOutdoorFloorId(prevFid)) return String(prevFid);
   return _floorIdForZ(ctx, z, frame);
 }
 
@@ -7402,7 +7431,13 @@ function _wireLightsBuild(ctx, isoDiv, o) {
         // treat it the same as a cancelled drag, not a placement at the edge.
         const box = svg.viewBox && svg.viewBox.baseVal;
         if (box && (v.x < box.x || v.x > box.x + box.width || v.y < box.y || v.y > box.y + box.height)) return;
-        o.onDropPlace(v.x, v.y);
+        // Which floor's plate the pin landed on — only ever consulted by
+        // onDropPlace for a light with nothing to anchor a storey from (no
+        // room / outdoor room, never placed), so a first placement lands on
+        // the storey it was dropped on instead of always the lowest one. By
+        // geometry (_floorZAtVb) — the plate covers the WHOLE floor, empty
+        // ground just outside a room included.
+        o.onDropPlace(v.x, v.y, _floorZAtVb(svg, v.x, v.y));
       };
       dropG.addEventListener("pointermove", mm);
       dropG.addEventListener("pointerup", up);
@@ -7496,12 +7531,22 @@ function _wireLightsBuild(ctx, isoDiv, o) {
     const floors = ctx.state.model?.floors || [];
     // The room's floor, then a floor it was stored on before, then the
     // lowest drawn storey — same order _floorIdForLight uses for a drag.
+    // An outdoor room / prior outdoor placement anchors nothing — see
+    // lightFloorId (lights_map.js); this is the gear the slab hit is FOR.
     const geo = (ctx.state.model?.room_geometry_m || {})[l.area_name];
-    let fid = geo && geo.floor_id ? String(geo.floor_id) : null;
-    if (!fid) { const prev = ((ctx.state.model || {}).light_positions_m || {})[eid]; fid = prev && prev.floor_id ? String(prev.floor_id) : null; }
-    if (!fid) fid = _floorIdForZ(ctx, frame.levels[0] || 0, frame);
-    const z = _levelForFloorId(frame, ctx.state.model, floors, fid);
+    let fid = geo && geo.floor_id && !isOutdoorFloorId(geo.floor_id) ? String(geo.floor_id) : null;
+    if (!fid) { const prev = ((ctx.state.model || {}).light_positions_m || {})[eid]; fid = prev && prev.floor_id && !isOutdoorFloorId(prev.floor_id) ? String(prev.floor_id) : null; }
     const v = toVB(ev);
+    if (!fid) {
+      // Nothing to anchor a storey from (no room / outdoor room, never
+      // placed) — the plate actually tapped, by geometry (_floorZAtVb: the
+      // plate covers the whole floor, empty ground included), matching this
+      // handler's own comment above. Used to always fall through to the
+      // lowest floor regardless of where the tap landed.
+      const hitZ = _floorZAtVb(svg, v.x, v.y);
+      fid = _floorIdForZ(ctx, Number.isFinite(hitZ) ? hitZ : (frame.levels[0] || 0), frame);
+    }
+    const z = _levelForFloorId(frame, ctx.state.model, floors, fid);
     const [x_m, y_m] = frame.isoInv(v.x, v.y, z);
     _pushUndo(o.mapState, [eid]);
     _draftAt(ctx, o, eid, x_m, y_m, fid, "manual");
@@ -7849,84 +7894,23 @@ function _wireDoorCircle(ctx, isoDiv, svg, o, toVB, frame, mapState) {
 // picker's — elementsFromPoint returns exactly what the browser would give
 // the click, topmost first, so "Click" is never wrong about which marker
 // wins. Returns stackAt for the Alt+click cycle in the marker handler.
+// The HUD itself is shared (wireHoverHud, lights_map.js — the sidebar shows
+// it too); this is the BUILDER's meaning of its parts: "Under" selects that
+// marker for the inspector, and the hint names the builder-only Alt+click
+// cycle and right-click picker.
 function _wireHoverHud(ctx, isoDiv, svg, o) {
-  const { el } = ctx.helpers;
-  // The panel lives in shadow DOM: document.elementsFromPoint stops at the
-  // shadow HOST and never sees the SVG. The stage's own root does — but
-  // isoDiv is wired (this function runs) BEFORE it is necessarily inserted
-  // into that shadow tree, so getRootNode() called once here can capture
-  // isoDiv itself (a disconnected node is its own root) instead of the real
-  // ShadowRoot, permanently — the fallback below then silently uses
-  // `document`, which finds nothing every time (2026-09-13, live: "no
-  // working mouse over" — the hover HUD's stack was always empty). Resolve
-  // the root FRESH on every call instead of caching it once.
-  const fromPoint = (x, y) => {
-    const root = isoDiv.getRootNode();
-    return (root && root.elementsFromPoint ? root : document).elementsFromPoint(x, y);
-  };
-  const stackAt = (x, y) => {
-    const seen = new Set(), out = [];
-    for (const n of fromPoint(x, y)) {
-      const g = n.closest ? n.closest("g.lhex[data-eid]") : null;
-      if (!g || !svg.contains(g)) continue;
-      const eid = g.getAttribute("data-eid");
-      if (!seen.has(eid)) { seen.add(eid); out.push(eid); }
-    }
-    return out;
-  };
-  const roomAt = (x, y) => {
-    for (const n of fromPoint(x, y)) {
-      const g = n.closest ? n.closest("g.lroom[data-room]") : null;
-      if (g && svg.contains(g)) return g.getAttribute("data-room");
-    }
-    return null;
-  };
-
-  // A zero-height sticky anchor rides the stage's own scroll (both axes)
-  // without pushing the drawing down; the box hangs off it.
-  const anchor = el("div", { class: "lv-hoverhud-anchor" });
-  const hud = el("div", { class: "lv-hoverhud" });
-  hud.hidden = true;
-  anchor.appendChild(hud);
-  isoDiv.insertBefore(anchor, svg);
-
-  const label = (eid) => {
-    const l = o.lightsByEid[eid];
-    return l ? `${l.code ? l.code + " · " : ""}${l.friendly_name || eid}` : eid;
-  };
-  let lastKey = "";
-  const show = (stack, room) => {
-    const key = stack.join("|") + "#" + (room || "");
-    if (key === lastKey) return;
-    lastKey = key;
-    hud.innerHTML = "";
-    if (!stack.length && !room) { hud.hidden = true; return; }
-    hud.hidden = false;
-    if (stack.length) {
-      hud.appendChild(el("div", { class: "lv-hoverhud-hit" }, [el("span", { class: "lv-hoverhud-k" }, "Click"), label(stack[0])]));
-      for (const eid of stack.slice(1)) {
-        hud.appendChild(el("button", { class: "lv-hoverhud-under",
-          title: "Select this one instead — it's under the marker on top",
-          onclick: () => {
-            (o.mapState._selSet || new Set()).clear();
-            o.mapState._selLight = { eid, mapId: null };
-            ctx.actions.renderRooms();
-          } }, [el("span", { class: "lv-hoverhud-k" }, "Under"), label(eid)]));
-      }
-      if (stack.length > 1) hud.appendChild(el("div", { class: "lv-hoverhud-hint" }, "Alt+click cycles through the stack · right-click lists everything here"));
-    } else {
-      const n = Object.values(o.lightsByEid).filter(l => l.area_name === room).length;
-      hud.appendChild(el("div", { class: "lv-hoverhud-hit" }, [el("span", { class: "lv-hoverhud-k" }, "Click"), `${room} — selects its ${n} device${n === 1 ? "" : "s"}`]));
-    }
-  };
-  isoDiv.addEventListener("pointermove", (ev) => {
-    if (ev.pointerType === "touch") return;
-    if (hud.contains(ev.target)) return;          // reading the HUD must not clear it
-    if (o.mapState._editDragging) return;
-    show(stackAt(ev.clientX, ev.clientY), roomAt(ev.clientX, ev.clientY));
+  return wireHoverHud(isoDiv, {
+    lightsByEid: o.lightsByEid,
+    isDragging: () => !!o.mapState._editDragging,
+    onPickUnder: (eid) => {
+      (o.mapState._selSet || new Set()).clear();
+      o.mapState._selLight = { eid, mapId: null };
+      ctx.actions.renderRooms();
+    },
+    underTitle: "Select this one instead — it's under the marker on top",
+    stackHint: "Alt+click cycles through the stack · right-click lists everything here",
+    roomLine: (room, n) => `${room} — selects its ${n} device${n === 1 ? "" : "s"}`,
   });
-  isoDiv.addEventListener("pointerleave", () => show([], null));
-  return stackAt;
 }
 
 function _wireLightsPicker(ctx, isoDiv, svg, o, toVB) {
@@ -8777,20 +8761,27 @@ function _lightsTab(ctx, maps, active) {
   // `host.onDropPlace` inside it, which does not exist yet mid-construction)
   // because _wireLightsBuild — wired below via onHexesBuilt — needs this
   // SAME function to actually drive the pin's drag.
-  const onDropPlace = (paid && !preview && mapState._selLight) ? (vbX, vbY) => {
+  const onDropPlace = (paid && !preview && mapState._selLight) ? (vbX, vbY, dropFloorZ) => {
     const sel = mapState._selLight;
     const l = lightsByEid[sel.eid];
     if (!l) return;
-    // The floor comes from the light's own room (or its prior placement,
-    // or the lowest drawn storey) — exactly the same precedence the
-    // placement queue already uses, so the two "drop it somewhere" tools
-    // never disagree about which storey a bare x/y lands on.
+    // The floor comes from the light's own room (or its prior placement) —
+    // a light that already has either KEEPS it, so this can never strand an
+    // established fixture on a different storey than the one it already
+    // belongs to. An OUTDOOR room or prior outdoor placement counts as
+    // neither (lightFloorId, lights_map.js — outdoors is not a storey and
+    // the stack never draws it): that is exactly the gear this exists for.
+    // A light with nothing to anchor a storey from (never placed, no room,
+    // or only an outdoor one) lands on whichever floor's slab the pin was
+    // actually dropped on — so it can be put just outside the room it
+    // belongs beside — and only past that on the lowest drawn storey (the
+    // old, only, fallback), if the drop missed every floor's slab.
     const floors2 = ctx.state.model?.floors || [];
     const frame2 = fabricFrame(ctx.state.model, floors2, view.floorGap, view.horizGap);
     const geo = (ctx.state.model?.room_geometry_m || {})[l.area_name];
-    let fid = geo && geo.floor_id ? String(geo.floor_id) : null;
-    if (!fid) { const prev = ((ctx.state.model || {}).light_positions_m || {})[sel.eid]; fid = prev && prev.floor_id ? String(prev.floor_id) : null; }
-    if (!fid) fid = _floorIdForZ(ctx, frame2.levels[0] || 0, frame2);
+    let fid = geo && geo.floor_id && !isOutdoorFloorId(geo.floor_id) ? String(geo.floor_id) : null;
+    if (!fid) { const prev = ((ctx.state.model || {}).light_positions_m || {})[sel.eid]; fid = prev && prev.floor_id && !isOutdoorFloorId(prev.floor_id) ? String(prev.floor_id) : null; }
+    if (!fid) fid = _floorIdForZ(ctx, Number.isFinite(dropFloorZ) ? dropFloorZ : (frame2.levels[0] || 0), frame2);
     const z = _levelForFloorId(frame2, ctx.state.model, floors2, fid);
     const [x_m, y_m] = frame2.isoInv(vbX, vbY, z);
     _pushUndo(mapState, [sel.eid]);
@@ -9474,10 +9465,16 @@ function _lightsTab(ctx, maps, active) {
         },
       }, "↺ Auto position"));
     } else {
+      // An outdoor room (shed, garden) is not on the floor stack, so there is
+      // no clustered hex to drag — the pin is the way on, same as no room.
+      const _roomFid = ((ctx.state.model?.room_geometry_m || {})[l.area_name] || {}).floor_id;
+      const _indoorRoom = !!(l.area_name && _roomFid && !isOutdoorFloorId(_roomFid));
       insp.appendChild(el("span", { class: "lv-hint" },
-        l.area_name
+        _indoorRoom
           ? "Auto-clustered in its room — drag its hex to place it at its exact spot."
-          : "Not on the map — assign it a room in the index below, then drag its hex into place."));
+          : (l.area_name && _roomFid
+              ? `Its room (${l.area_name}) is outdoors, which the floor stack doesn't draw — drag the pulsing pin (bottom-right of the map) onto the floor it sits beside, just outside the room.`
+              : "Not on the map — drag the pulsing pin (bottom-right of the map) onto a floor to place it directly, or assign it a room in the index below.")));
     }
     insp.appendChild(el("button", { class: "lv-act", onclick: () => {
       mapState._selLight = null; ctx.actions.renderRooms();

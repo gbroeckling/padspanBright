@@ -373,6 +373,57 @@ console.log(JSON.stringify({
     assert out["floorAgg"]["lightsTotal"] == 2 and "light.nowhere" not in out["floorAgg"]["lightEids"], out["floorAgg"]
 
 
+def test_an_outdoor_room_never_anchors_a_devices_floor(tmp_path):
+    """Garry, 2026-09-14: a temperature sensor whose HA area is the Shed (an
+    area on the Outside floor) could not be placed "on a floor, just outside a
+    room" — its room's floor (__outside__) won over everything, and the Lights
+    stack never draws outdoor floors (fabricFrame drops them), so it had no
+    marker and every placement wrote it straight back off the map.
+
+    An outdoor room is not a storey, so it does not anchor: the device's own
+    stored placement decides its floor. Never placed, it stays on the outside
+    level exactly as before — nothing already saved moves. An INDOOR room
+    still wins over a stale placement (the test above), and the registry's
+    "outside" spelling counts the same as the fabric's "__outside__"."""
+    model = {
+        "room_geometry_m": {
+            "Shed": {"floor_id": "__outside__"},
+            "Garden": {"floor_id": "outside"},
+            "Kitchen": {"floor_id": "main"},
+        },
+        "light_positions_m": {
+            "sensor.shed_placed": {"floor_id": "main"},       # dropped on the main plate
+            "sensor.shed_stale": {"floor_id": "__outside__"},  # existing data: saved on outside
+            "sensor.kitchen": {"floor_id": "__outside__"},     # indoor room still wins
+        },
+    }
+    lights = [
+        {"entity_id": "sensor.shed_placed", "area_name": "Shed"},
+        {"entity_id": "sensor.shed_stale", "area_name": "Shed"},
+        {"entity_id": "sensor.shed_never", "area_name": "Shed"},
+        {"entity_id": "sensor.garden_never", "area_name": "Garden"},
+        {"entity_id": "sensor.kitchen", "area_name": "Kitchen"},
+    ]
+    out = _run(tmp_path, r"""
+const MODEL = __MODEL__, LIGHTS = __LIGHTS__;
+console.log(JSON.stringify({
+  placed: LM.lightFloorId(LIGHTS[0], MODEL),
+  stale: LM.lightFloorId(LIGHTS[1], MODEL),
+  never: LM.lightFloorId(LIGHTS[2], MODEL),
+  gardenNever: LM.lightFloorId(LIGHTS[3], MODEL),
+  kitchen: LM.lightFloorId(LIGHTS[4], MODEL),
+  outdoor: ["__outside__", "outside", "Outside", "garden", "yard", "main", "upper", "basement", "", null]
+    .map(f => LM.isOutdoorFloorId(f)),
+}));
+""".replace("__MODEL__", json.dumps(model)).replace("__LIGHTS__", json.dumps(lights)))
+    assert out["placed"] == "main", "an outdoor room must not override where the device was actually placed"
+    assert out["stale"] == "__outside__", "existing outdoor placements stay exactly where they are"
+    assert out["never"] == "__outside__", "never placed: still on the outside level, as before"
+    assert out["gardenNever"] == "outside", "the registry's own 'outside' floor id behaves the same"
+    assert out["kitchen"] == "main", "an INDOOR room still wins over a stale stored placement"
+    assert out["outdoor"] == [True, True, True, True, True, False, False, False, False, False], out["outdoor"]
+
+
 # ── Spread in room ───────────────────────────────────────────────────────────
 
 def test_spread_in_room_places_every_light_inside_the_polygon(tmp_path):

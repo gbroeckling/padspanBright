@@ -63,6 +63,22 @@ def test_payload_declares_floor_elevations():
     )
 
 
+def test_payload_declares_when_ha_started() -> None:
+    """Garry, 2026-09-14: "after a restart of HA, all motion sensors on the
+    light map show active". Every restored motion entity's last_changed is
+    the boot moment, so the renderer needs to know WHEN that was:
+    async_setup stamps it once per process and model_get ships it as
+    ha_started_at; the renderer treats a last_changed at or before it as no
+    motion event."""
+    import custom_components.padspan_bright as pkg
+    src = _model_get_source()
+    assert '"ha_started_at"' in src, "model_get no longer sends ha_started_at"
+    setup_src = inspect.getsource(pkg.async_setup)
+    assert '.setdefault("started_at"' in setup_src and "utcnow()" in setup_src, (
+        "async_setup no longer stamps the boot time the Lights map's restart gate reads"
+    )
+
+
 def test_the_panel_keeps_every_key_model_get_sends() -> None:
     """The panel's copy of the model must not be a whitelist.
 

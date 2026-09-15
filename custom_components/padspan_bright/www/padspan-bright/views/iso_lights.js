@@ -2408,8 +2408,40 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   // clock — every other opt here follows the same pattern.
   const NOW_MS=Number(opts.nowMs)||Date.now();
   const MOTION_RECENT_MS=6*60*60*1000;
+  // When the HA process came up (model.ha_started_at, via the host). After a
+  // restart every restored motion entity's last_changed IS the boot moment,
+  // which read as "just triggered": every sensor flashed for the 5-minute
+  // hold, then walked the 6-hour colour ring (Garry, 2026-09-14: "all motion
+  // sensors on the light map show active, better to have all show inactive
+  // til motion is sensed"). A last_changed at or before boot — plus a short
+  // grace, since the restored states land a few seconds either side of the
+  // integration's own setup — is no event: nothing lit, no ring, until the
+  // sensor actually changes. A sensor honestly reporting "on" is still on.
+  const STARTED_MS=Number(opts.haStartedMs)||0;
+  const BOOT_GRACE_MS=2*60*1000;
+  const bootArtefact=(l)=>{
+    if(!STARTED_MS) return false;
+    const t=l.last_changed ? Date.parse(l.last_changed) : NaN;
+    return t<=STARTED_MS+BOOT_GRACE_MS;
+  };
   // "if they gave the temperature in the last hour" — Garry.
   const TEMP_FRESH_MS=60*60*1000;
+  // "Temp should have a slight red tinge if over or at 20 deg, blue if under
+  // 20" — Garry, 2026-09-14. Degrees as the sensor reports them (°C here).
+  // The tint rides ONLY a live readout — the same placed+fresh gate that
+  // shows the digits — so a stale or unplaced sensor keeps the plain marker
+  // it always had. A translucent wash over the body (the "slight tinge") and
+  // a pastel of the same hue for the digits, so the number reads as warm or
+  // cool at a glance without shouting.
+  // Then: "make the temp bright orange if it is over 34" — strictly over;
+  // 34 itself is still the red band. Three bands, one lookup.
+  const TEMP_WARM_AT=20, TEMP_HOT_OVER=34;
+  const TEMP_TINT={
+    hot:  { wash:"#f97316", ink:"#fb923c" },   // bright orange
+    warm: { wash:"#ef4444", ink:"#fca5a5" },   // slight red
+    cool: { wash:"#3b82f6", ink:"#93c5fd" },   // slight blue
+  };
+  const tempBandOf=(t)=> t>TEMP_HOT_OVER ? "hot" : (t>=TEMP_WARM_AT ? "warm" : "cool");
   const mixHex=(a,b,t)=>{
     const pa=parseInt(a.slice(1),16), pb=parseInt(b.slice(1),16);
     const ch=(sh)=>Math.round(((pa>>sh)&255)+(((pb>>sh)&255)-((pa>>sh)&255))*t);
@@ -3156,7 +3188,16 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         `<stop offset="100%" stop-color="#000" stop-opacity="0.18"/></linearGradient>`;
     }
 
-    s+=`<g opacity="${go}"${gpe}>`;
+    // The slab is decoration and NEVER takes a click — not only when ghosted.
+    // In the exploded stack the next storey's plate overlaps a lower plate's
+    // back edge, and a painted polygon takes the click: a marker placed
+    // there (outdoor gear, just outside a room) was visible through the
+    // plate but unreachable (Garry, 2026-09-14: "all devices [placed outside
+    // a room] are not selectable"). The builder's drop/tap floor lookup
+    // finds a plate by geometry against its top face (data-role="slabtop"
+    // below), so it needs no pointer events here. The floor badge (g.lfloor,
+    // drawn after the markers) keeps its own tap.
+    s+=`<g data-role="floorslab" data-z="${z}" opacity="${go}" pointer-events="none">`;
     // Slab sides
     s+=`<polygon points="${pts([TR,BR,BR_b,TR_b])}" fill="${THEME.slabSideTop.fill}" fill-opacity="${THEME.slabSideTop.fillOpacity}" stroke="${THEME.slabSideTop.stroke}" stroke-width="0.7"/>`;
     s+=`<polygon points="${pts([BL,BR,BR_b,BL_b])}" fill="${THEME.slabSideFront.fill}" fill-opacity="${THEME.slabSideFront.fillOpacity}" stroke="${THEME.slabSideFront.stroke}" stroke-width="0.7"/>`;
@@ -3164,10 +3205,10 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // A dashed border round every storey is drafting shorthand; a lit plate
       // with a hairline edge is what a finished drawing looks like. Same
       // rectangle, same size, same place.
-      s+=`<polygon points="${pts([TL,TR,BR,BL])}" fill="url(#psslab)" stroke="${lyrColor}" stroke-width="0.9" opacity="0.5"/>`;
+      s+=`<polygon points="${pts([TL,TR,BR,BL])}" data-role="slabtop" fill="url(#psslab)" stroke="${lyrColor}" stroke-width="0.9" opacity="0.5"/>`;
       s+=`<line x1="${pt(TL).split(",")[0]}" y1="${pt(TL).split(",")[1]}" x2="${pt(TR).split(",")[0]}" y2="${pt(TR).split(",")[1]}" stroke="${lyrColor}" stroke-width="1.4" opacity="0.45"/>`;
     } else {
-      s+=`<polygon points="${pts([TL,TR,BR,BL])}" fill="#0f2017" fill-opacity="0.05" stroke="${lyrColor}" stroke-width="1" stroke-dasharray="7,7" opacity="0.28"/>`;
+      s+=`<polygon points="${pts([TL,TR,BR,BL])}" data-role="slabtop" fill="#0f2017" fill-opacity="0.05" stroke="${lyrColor}" stroke-width="1" stroke-dasharray="7,7" opacity="0.28"/>`;
     }
     if(lidx!==1) s+=`<polygon points="${pts([TL,TR,BR,BL])}" fill="url(#flrpat_${lidx})" stroke="none"/>`;
 
@@ -3253,6 +3294,14 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       const op=(SHOW?(on?1:0.62):(on?1:0.45))*(dim?0.22:1);
       const gAttrs=`data-class="${lightClassOf(l)}"${dim?' pointer-events="none"':""}`;
       const tCol=SHOW?(on?lit:THEME.labelColorOff):(on?"#111827":"#e2e8f0");
+      // Live temperature readout gate — placed (entry) AND fresh (last
+      // hour). Computed once, up here, because BOTH the body wash below and
+      // the digits further down key off it; two copies of the rule could
+      // tint a marker whose number is not showing, or vice versa.
+      const tempFreshMs=l.isTemp && l.last_changed ? NOW_MS-Date.parse(l.last_changed) : NaN;
+      const tempLive=!!(l.isTemp && entry && Number.isFinite(l.temperature)
+                        && tempFreshMs>=0 && tempFreshMs<TEMP_FRESH_MS);
+      const tempTint=tempLive ? TEMP_TINT[tempBandOf(Number(l.temperature))] : null;
       // A perimeter light's body IS its trace ("should be just the custom
       // shape formed to the room" — Garry, then: "Keep the glow, and the
       // click space of the square, but hide the square"). So: the Showcase
@@ -3316,6 +3365,9 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       const layer=(a)=>t.length
         ? `<g transform="${t.join(" ")}">`+shapeSvg(l.shape, 0, 0, HEX_R, a)+`</g>`
         : shapeSvg(l.shape, hx, hy, HEX_R, a);
+      // The live-readout wash (gate computed up by tCol; drawn here because
+      // it needs `layer`, which does not exist before this line).
+      const tempWash=tempTint ? layer(`fill="${tempTint.wash}" fill-opacity="0.30" stroke="none" pointer-events="none"`) : "";
 
       // Baseline click/drag target, same fixed HEX_R footprint as
       // suppressGlyph's circle below — NOT layer()'s real (possibly
@@ -3369,10 +3421,11 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         body=BASE_HIT+
           (on?layer(`fill="none" stroke="${lit}" stroke-width="${(sw*2.6).toFixed(2)}" stroke-opacity="${THEME.fixtureBloomOpacity}" stroke-linejoin="round"`):"")+
           layer(`fill="${fill}" stroke="${stroke}" stroke-width="${sw.toFixed(2)}" stroke-opacity="${on?THEME.fixtureBodyOnOpacity:THEME.fixtureBodyOffOpacity}" stroke-linejoin="round"`)+
+          tempWash+
           detail+
           layer(`fill="url(#psgloss)" stroke="none" pointer-events="none"`);
       } else {
-        body=BASE_HIT+layer(`fill="${fill}" stroke="${stroke}" stroke-width="${sw.toFixed(2)}"`);
+        body=BASE_HIT+layer(`fill="${fill}" stroke="${stroke}" stroke-width="${sw.toFixed(2)}"`)+tempWash;
       }
 
       // Showcase moves the code out from under the glyph. At CODE_PX the label
@@ -3397,12 +3450,13 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // every other placement-only behaviour here already uses. Replaces
       // the code outright, unconditionally of HIDECODES/CODECHIP — a live
       // reading is status, the same as the motion pulse, not a code.
-      const tempFreshMs=l.isTemp && l.last_changed ? NOW_MS-Date.parse(l.last_changed) : NaN;
-      const tempLbl=(l.isTemp && entry && Number.isFinite(l.temperature)
-                     && tempFreshMs>=0 && tempFreshMs<TEMP_FRESH_MS)
+      // (tempLive — the placed+fresh gate — is computed once above the
+      // body, next to tCol, because the body's wash shares it.) The digits
+      // take the warm/cool pastel of the same hue as that wash.
+      const tempLbl=tempLive
         ? `<text x="${hx.toFixed(1)}" y="${hy.toFixed(1)}" text-anchor="middle" dominant-baseline="middle" `+
           `font-family="ui-monospace,monospace" font-size="${TEMP_DIGIT_PX.toFixed(1)}" font-weight="800" `+
-          `fill="${tCol}" paint-order="stroke" stroke="#050d09" stroke-width="${(TEMP_DIGIT_PX*0.32).toFixed(1)}" `+
+          `fill="${tempTint.ink}" paint-order="stroke" stroke="#050d09" stroke-width="${(TEMP_DIGIT_PX*0.32).toFixed(1)}" `+
           `stroke-linejoin="round" pointer-events="none">${l.temperature}</text>`
         : null;
       // HIDECODES + CODECHIP (the sidebar, always; the builder's own
@@ -5069,6 +5123,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     // was still keyed to the raw 5-second hardware hold.
     const motionActive=(l)=>{
       if(l.state==="on") return true;
+      if(bootArtefact(l)) return false;   // a restart's restored timestamp is not a trigger
       const lastMs=l.last_changed ? Date.parse(l.last_changed) : NaN;
       const e=NOW_MS-lastMs;
       return e>=0 && e<MOTION_HOLD_MS;
@@ -5804,6 +5859,9 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     }
     for(const [l2,hx,hy] of jobs){
       if(!l2.isMotion) continue;
+      // Quiet, and its only timestamp is the restart's — no pulse, no ring
+      // (bootArtefact, above). Still "on" at boot keeps its active pulse.
+      if(l2.state!=="on" && bootArtefact(l2)) continue;
       // No timestamp (or an unparsable one) makes rawElapsed NaN. While OFF
       // that is a genuine bail-out — with no known quiet-since time there is
       // no recency to show. While ON it is not: the sensor is demonstrably

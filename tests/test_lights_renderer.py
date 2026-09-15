@@ -2164,6 +2164,169 @@ def test_temperature_readout_shows_digits_only_when_placed_and_fresh(tmp_path):
     assert out["freshUnplacedShowsCode"], "an UNPLACED reading must fall back to its code even when fresh"
 
 
+def test_temperature_readout_is_tinted_warm_at_or_above_20_and_cool_below(tmp_path):
+    """Garry, 2026-09-14: "Temp should have a slight red tinge if over or at
+    20 deg, blue if under 20 in the mapping, lights map". The tint is a
+    translucent wash over the marker body plus a pastel of the same hue on
+    the digits, and it rides ONLY a live readout — the same placed+fresh gate
+    the digits use — so a stale sensor stays plain. 20 exactly is warm ("at
+    20"); 19.9 is cool. Then: "make the temp bright orange if it is over 34"
+    — strictly over: 34 is still red, 34.1 is orange."""
+    NOW = 2_000_000_000_000
+    H = 3_600_000
+    model = {
+        "room_geometry_m": {"Hall": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [20, 0], [20, 4], [0, 4]]}},
+        "light_positions_m": {
+            "sensor.at20":   {"x_m": 1.0,  "y_m": 2.0, "floor_id": "main"},
+            "sensor.cool":   {"x_m": 4.0,  "y_m": 2.0, "floor_id": "main"},
+            "sensor.stale":  {"x_m": 7.0,  "y_m": 2.0, "floor_id": "main"},
+            "sensor.at34":   {"x_m": 10.0, "y_m": 2.0, "floor_id": "main"},
+            "sensor.hot":    {"x_m": 13.0, "y_m": 2.0, "floor_id": "main"},
+        },
+    }
+    import datetime
+    iso = lambda ms: datetime.datetime.fromtimestamp(ms / 1000, tz=datetime.timezone.utc).isoformat()
+    lbe = {
+        "sensor.at20":  {"entity_id": "sensor.at20",  "state": "on", "code": "T01", "shape": "tempreadout", "isTemp": True, "temperature": 20,   "last_changed": iso(NOW - 5 * 60_000)},
+        "sensor.cool":  {"entity_id": "sensor.cool",  "state": "on", "code": "T02", "shape": "tempreadout", "isTemp": True, "temperature": 19.9, "last_changed": iso(NOW - 5 * 60_000)},
+        # Hot but STALE — must show neither digits nor any tint.
+        "sensor.stale": {"entity_id": "sensor.stale", "state": "on", "code": "T03", "shape": "tempreadout", "isTemp": True, "temperature": 31,   "last_changed": iso(NOW - 2 * H)},
+        # The orange boundary: 34 is NOT over 34 (red); 34.1 is (orange).
+        "sensor.at34":  {"entity_id": "sensor.at34",  "state": "on", "code": "T04", "shape": "tempreadout", "isTemp": True, "temperature": 34,   "last_changed": iso(NOW - 5 * 60_000)},
+        "sensor.hot":   {"entity_id": "sensor.hot",   "state": "on", "code": "T05", "shape": "tempreadout", "isTemp": True, "temperature": 34.1, "last_changed": iso(NOW - 5 * 60_000)},
+    }
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        "const FLOORS=[{id:'main',name:'Main',level:0}];\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,{{nowMs:{NOW}}});\n"
+        "const count=(re)=>(svg.match(re)||[]).length;\n"
+        "const out={\n"
+        "  warmDigits: /fill=\"#fca5a5\"[^>]*>20</.test(svg),\n"
+        "  at34RedDigits: /fill=\"#fca5a5\"[^>]*>34</.test(svg),\n"
+        "  coolDigits: /fill=\"#93c5fd\"[^>]*>19.9</.test(svg),\n"
+        "  hotDigits: /fill=\"#fb923c\"[^>]*>34.1</.test(svg),\n"
+        "  warmWash: count(/fill=\"#ef4444\" fill-opacity=\"0.30\"/g),\n"
+        "  coolWash: count(/fill=\"#3b82f6\" fill-opacity=\"0.30\"/g),\n"
+        "  hotWash: count(/fill=\"#f97316\" fill-opacity=\"0.30\"/g),\n"
+        "  staleUntinted: />T03</.test(svg) && !/>31</.test(svg),\n"
+        "};\n"
+        "console.log(JSON.stringify(out));\n"
+    ))
+    assert out["warmDigits"], "20 exactly is 'at 20' — warm (red) digits"
+    assert out["at34RedDigits"], "34 is not OVER 34 — still red"
+    assert out["coolDigits"], "19.9 is under 20 — cool (blue) digits"
+    assert out["hotDigits"], "34.1 is over 34 — bright orange digits"
+    # One wash layer per live sensor, but a wash is drawn through the shape's
+    # own primitives (a thermometer is stem + bulb), so count per hue rather
+    # than pin a number. Two warm sensors (20, 34), one cool, one hot: warm
+    # must be exactly double the other two, which must match each other.
+    # The stale sensor (31°, would be warm) contributes nothing — a wash on
+    # it would break the 2:1 ratio.
+    assert out["coolWash"] > 0 and out["coolWash"] == out["hotWash"] and out["warmWash"] == 2 * out["coolWash"], (
+        f"two warm, one cool, one hot body wash expected, nothing on the stale sensor: {out}")
+    assert out["staleUntinted"], "a stale reading shows its code and no number"
+
+
+def test_motion_sensors_read_quiet_after_a_restart_until_they_actually_change(tmp_path):
+    """Garry, 2026-09-14: "After a restart of HA, all motion sensors on the
+    light map show active, better to have all show inactive til motion is
+    sensed." Every restored motion entity's last_changed is the boot moment,
+    which the hold-window rule read as "just triggered" — a 5-minute flash
+    then the 6-hour colour ring, on every sensor at once. With
+    opts.haStartedMs (model_get's ha_started_at), a quiet sensor whose
+    last_changed is at or before boot (+ a 2-minute grace for restored states
+    landing either side of the integration's own setup) draws NOTHING — no
+    pulse, no ring, icon unlit — until it actually changes. A sensor still
+    reporting "on" at boot keeps its active pulse: that is a real state, not
+    a timestamp artefact. Without haStartedMs the old behaviour is untouched."""
+    STARTED = 1_000_000_000_000
+    M = 60_000
+    NOW = STARTED + 20 * M
+    model = {
+        "room_geometry_m": {"Hall": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [10, 0], [10, 4], [0, 4]]}},
+        "light_positions_m": {
+            "binary_sensor.boot_off":   {"x_m": 1.0, "y_m": 2.0, "floor_id": "main"},
+            "binary_sensor.boot_grace": {"x_m": 3.0, "y_m": 2.0, "floor_id": "main"},
+            "binary_sensor.boot_on":    {"x_m": 5.0, "y_m": 2.0, "floor_id": "main"},
+            "binary_sensor.real":       {"x_m": 7.0, "y_m": 2.0, "floor_id": "main"},
+        },
+    }
+    import datetime
+    iso = lambda ms: datetime.datetime.fromtimestamp(ms / 1000, tz=datetime.timezone.utc).isoformat()
+    lbe = {
+        # Restored at boot, quiet since: the classic false "active".
+        "binary_sensor.boot_off":   {"entity_id": "binary_sensor.boot_off",   "state": "off", "code": "M01", "shape": "motion", "isMotion": True, "last_changed": iso(STARTED + 3_000)},
+        # Restored 90s after the integration stamped itself: inside the grace.
+        "binary_sensor.boot_grace": {"entity_id": "binary_sensor.boot_grace", "state": "off", "code": "M02", "shape": "motion", "isMotion": True, "last_changed": iso(STARTED + 90_000)},
+        # Honestly "on" at boot — a real state, stays lit.
+        "binary_sensor.boot_on":    {"entity_id": "binary_sensor.boot_on",    "state": "on",  "code": "M03", "shape": "motion", "isMotion": True, "last_changed": iso(STARTED + 3_000)},
+        # A genuine transition 18 minutes after boot, 2 minutes ago: active.
+        "binary_sensor.real":       {"entity_id": "binary_sensor.real",       "state": "off", "code": "M04", "shape": "motion", "isMotion": True, "last_changed": iso(NOW - 2 * M)},
+    }
+    def run(started):
+        return _run_js(tmp_path, (
+            "import * as M from './iso_lights.mjs';\n"
+            f"const MODEL={json.dumps(model)};\n"
+            f"const LBE={json.dumps(lbe)};\n"
+            "const FLOORS=[{id:'main',name:'Main',level:0}];\n"
+            f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,{{nowMs:{NOW}, haStartedMs:{started}}});\n"
+            "const has=(cls,eid)=>new RegExp('class=\"'+cls+'\" data-eid=\"'+eid.replace(/\\./g,'\\\\.')+'\"').test(svg);\n"
+            "const icon=(eid)=>{const m=new RegExp('class=\"lhex\" data-eid=\"'+eid.replace(/\\./g,'\\\\.')+'\"[^>]*opacity=\"([\\\\d.]+)\"').exec(svg); return m?parseFloat(m[1]):null;};\n"
+            "const one=(eid)=>({pulse:has('lpulse',eid), ring:has('lrecent',eid), icon:icon(eid)});\n"
+            "console.log(JSON.stringify({bootOff:one('binary_sensor.boot_off'), bootGrace:one('binary_sensor.boot_grace'), bootOn:one('binary_sensor.boot_on'), real:one('binary_sensor.real')}));\n"
+        ))
+    out = run(STARTED)
+    assert not out["bootOff"]["pulse"] and not out["bootOff"]["ring"], f"a restart's restored timestamp must not read as motion: {out}"
+    assert not out["bootGrace"]["pulse"] and not out["bootGrace"]["ring"], f"inside the boot grace is still the restart, not motion: {out}"
+    assert out["bootOn"]["pulse"], f"a sensor honestly ON at boot keeps its active pulse: {out}"
+    assert out["real"]["pulse"], f"a real transition after boot is active as ever: {out}"
+    assert out["bootOff"]["icon"] < out["real"]["icon"], f"the quiet-since-boot icon must be unlit next to a live one: {out}"
+    # No stamp at all (older backend, or a host that does not pass it): the
+    # gate is off and the boot-time sensor reads exactly as it always did.
+    legacy = run(0)
+    assert legacy["bootOff"]["pulse"] or legacy["bootOff"]["ring"], f"without haStartedMs nothing changes: {legacy}"
+
+
+def test_floor_slabs_never_take_a_click_but_stay_findable_by_geometry(tmp_path):
+    """Garry, 2026-09-14: "all devices [placed outside a room, on a real
+    floor] are not selectable". Root cause found live on four real markers:
+    in the exploded stack the next storey's slab polygon overlaps a lower
+    plate's back edge, and a painted polygon takes the click — the marker
+    under it was visible through the plate but unreachable. The slab is
+    decoration: its group is pointer-events="none" ALWAYS (not just when
+    ghosted), and its top face is tagged data-role="slabtop" so the
+    builder's drop/tap floor lookup (_floorZAtVb) can find the plate by
+    geometry instead. The floor badge, drawn after the markers, keeps its
+    own tap."""
+    model = {
+        "room_geometry_m": {
+            "Hall": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]},
+            "Loft": {"type": "poly", "floor_id": "up",   "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]},
+        },
+        "light_positions_m": {},
+    }
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        "const FLOORS=[{id:'main',name:'Main',level:0},{id:'up',name:'Up',level:1}];\n"
+        "const svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,{},false,FLOORS,{});\n"
+        "const slabs=svg.match(/<g data-role=\"floorslab\"[^>]*>/g)||[];\n"
+        "const badges=svg.match(/<g class=\"lfloor\"[^>]*>/g)||[];\n"
+        "console.log(JSON.stringify({\n"
+        "  slabs: slabs.length,\n"
+        "  slabsInert: slabs.every(s=>/pointer-events=\"none\"/.test(s)),\n"
+        "  slabTops: (svg.match(/<polygon points=\"[^\"]+\" data-role=\"slabtop\"/g)||[]).length,\n"
+        "  badges: badges.length,\n"
+        "  badgesTappable: badges.every(b=>!/pointer-events=\"none\"/.test(b)),\n"
+        "}));\n"
+    ))
+    assert out["slabs"] == 2 and out["slabsInert"], f"every slab group must be pointer-events=none: {out}"
+    assert out["slabTops"] == 2, f"each slab's top face must be tagged for the geometry lookup: {out}"
+    assert out["badges"] == 2 and out["badgesTappable"], f"the floor badges must still take taps: {out}"
+
+
 def test_use_surface_ergonomics_opts(tmp_path):
     """The ergonomics opts buildIsoSVG grew for the sidebar/preview use
     surface: codeChip splits the tap target into its own data-role="code"

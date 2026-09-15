@@ -341,6 +341,16 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """One-time HA boot setup: stores → websockets → panel → BLE feed → services."""
     hass.data.setdefault(DOMAIN, {})
+    # When THIS HA process came up. After a restart every restored motion
+    # entity's last_changed is the boot moment, and the Lights map read that
+    # as "just triggered" — every sensor flashing for 5 minutes, then walking
+    # the 6-hour colour ring (Garry, 2026-09-14: "after a restart of HA, all
+    # motion sensors on the light map show active, better to have all show
+    # inactive til motion is sensed"). model_get ships this as ha_started_at
+    # and the renderer treats a last_changed at or before it as no event.
+    # Stamped once per process (async_setup), not per entry reload.
+    from homeassistant.util import dt as dt_util  # noqa: PLC0415
+    hass.data[DOMAIN].setdefault("started_at", dt_util.utcnow().isoformat())
 
     _LOGGER.info("PadSpan Bright starting v%s (build %s)", BUILD_VERSION, BUILD_ID)
 

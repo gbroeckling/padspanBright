@@ -376,6 +376,44 @@ def test_a_lights_floor_comes_from_its_room_first():
     )
 
 
+def test_an_outdoor_room_anchors_no_placement_path():
+    """Garry, 2026-09-14: a sensor whose HA area is the Shed (Outside floor)
+    could not be placed "on a floor, just outside a room". Outdoors is not a
+    storey and the stack never draws it, so every path that took the floor
+    from the room (or from a prior outdoor placement) wrote the light straight
+    back off the map. All three builder paths — the drag's _floorIdForLight,
+    the drop-marker pin (onDropPlace) and the queue's tap-the-map — must skip
+    an outdoor floor for BOTH the room and the prior placement, and the shared
+    rule must be the one import, not three hand-copies."""
+    src = (_VIEWS / "maps.js").read_text(encoding="utf-8")
+    imp = src[:src.index("await import(`./lights_map.js")]
+    assert "isOutdoorFloorId" in imp[imp.rindex("const {"):], (
+        "isOutdoorFloorId is used in maps.js but not imported from lights_map.js — "
+        "the Lights tab would throw the instant it rendered"
+    )
+    drag = _floor_fn_block()
+    pin = src[src.index("const onDropPlace ="):]
+    pin = pin[:pin.index("} : null;")]
+    tap = src[src.index("// The placement queue: while lights are queued"):]
+    tap = tap[:tap.index("_draftAt(")]
+    for name, blk in (("_floorIdForLight", drag), ("onDropPlace", pin), ("queue tap", tap)):
+        assert blk.count("isOutdoorFloorId(") >= 2, (
+            f"{name}: an outdoor room or prior outdoor placement still anchors the floor"
+        )
+    # And the pin/tap fall through to the plate that was actually hit — by
+    # geometry (_floorZAtVb; the slabs take no pointer events, see
+    # test_lights_renderer's slab test) — not unconditionally to the lowest
+    # storey.
+    assert "dropFloorZ" in pin and "_floorZAtVb(" in tap
+    build = src[src.index("function _wireLightsBuild"):]
+    assert "_floorZAtVb(svg, v.x, v.y)" in build[:build.index("\nfunction ")], (
+        "the drop-marker pin no longer resolves its floor by plate geometry")
+    helper = src[src.index("function _floorZAtVb"):]
+    helper = helper[:helper.index("\nfunction ")]
+    assert "pointInPolygon(" in helper and 'data-role="slabtop"' in helper and "elementsFromPoint" not in helper, (
+        "_floorZAtVb must hit-test the plate by geometry, not by pointer events")
+
+
 def test_both_write_paths_pin_the_floor_to_the_room():
     """The position drag and the transform commit both store a floor."""
     src = (_VIEWS / "maps.js").read_text(encoding="utf-8")

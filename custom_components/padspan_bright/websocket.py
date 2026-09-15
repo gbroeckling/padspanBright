@@ -504,6 +504,9 @@ async def ws_model_get(hass: HomeAssistant, connection, msg) -> None:
         "beacon_positions_m": beacon_positions_m,
         "fabric_floors": fabric_floors,
         "floor_elevations": _mdl_el.floor_base_elevations_m() if _mdl_el else {},
+        # When this HA process came up (stamped in async_setup) — the Lights
+        # map's "a last_changed at or before boot is not a motion event" gate.
+        "ha_started_at": hass.data.get(DOMAIN, {}).get("started_at"),
         # The house's metre scale, stored. The panel used to work it out for
         # itself, in `stack_transform.js`'s metreAnchor, from the maps and
         # their transforms — a second implementation of the same measurement,
