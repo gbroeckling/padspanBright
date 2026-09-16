@@ -2289,6 +2289,120 @@ def test_motion_sensors_read_quiet_after_a_restart_until_they_actually_change(tm
     assert legacy["bootOff"]["pulse"] or legacy["bootOff"]["ring"], f"without haStartedMs nothing changes: {legacy}"
 
 
+def test_poor_air_draws_faded_bars_rising_through_the_room(tmp_path):
+    """Garry, 2026-09-14: "air quality sensors. When placed in a room, and in
+    poor state, make a very faded set of bars move from the bottom of the
+    room to the top. Make it subtle but very noticable. Have it start at
+    blue, and move thru to green, same as motion depending on how bad the
+    air quality is." The bars appear ONLY for a placed sensor whose position
+    falls inside a room and whose reading is past "good" — clipped to that
+    room's polygon (so the clips must exist on a plain working map), hue
+    stepped through the motion colour stops by badness (1450 ppm CO₂ is
+    0.38 → green; 4000 ppm is 0.9 → red), the group translating upward one
+    bar-gap per cycle. Good air, an unplaced sensor, and a sensor placed
+    outside every room draw nothing."""
+    model = {
+        "room_geometry_m": {
+            "Hall": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]},
+            "Den":  {"type": "poly", "floor_id": "main", "points_m": [[10, 0], [16, 0], [16, 4], [10, 4]]},
+        },
+        "light_positions_m": {
+            "sensor.co2_poor":    {"x_m": 2.0,  "y_m": 2.0, "floor_id": "main"},   # in Hall, poor
+            "sensor.co2_bad":     {"x_m": 12.0, "y_m": 2.0, "floor_id": "main"},   # in Den, very bad
+            "sensor.co2_good":    {"x_m": 6.0,  "y_m": 2.0, "floor_id": "main"},   # in Hall, good
+            "sensor.co2_outside": {"x_m": 30.0, "y_m": 30.0, "floor_id": "main"},  # placed, no room
+            "sensor.bath_air":    {"x_m": 20.0, "y_m": 2.0, "floor_id": "main"},   # in Loo, enum "poor"
+            "sensor.bath_air_ok": {"x_m": 22.0, "y_m": 2.0, "floor_id": "main"},   # in Loo, enum "good"
+        },
+    }
+    model["room_geometry_m"]["Loo"] = {"type": "poly", "floor_id": "main", "points_m": [[18, 0], [24, 0], [24, 4], [18, 4]]}
+    def aq(eid, code, ppm):
+        return {"entity_id": eid, "state": str(ppm), "code": code, "shape": "airquality", "isAir": True,
+                "device_class": "carbon_dioxide", "air_value": ppm, "air_unit": "ppm"}
+    def aq_word(eid, code, word):
+        return {"entity_id": eid, "state": word, "code": code, "shape": "airquality", "isAir": True,
+                "device_class": "enum", "air_value": None, "air_unit": "", "air_level": word}
+    lbe = {
+        "sensor.co2_poor":     aq("sensor.co2_poor",     "Q01", 1450),
+        "sensor.co2_bad":      aq("sensor.co2_bad",      "Q02", 4000),
+        "sensor.co2_good":     aq("sensor.co2_good",     "Q03", 600),
+        "sensor.co2_outside":  aq("sensor.co2_outside",  "Q04", 2500),
+        "sensor.co2_unplaced": aq("sensor.co2_unplaced", "Q05", 2500),   # auto-clustered in Hall
+        # The bathroom outlets' kind: a graded WORD, no number.
+        "sensor.bath_air":     aq_word("sensor.bath_air",    "Q06", "poor"),
+        "sensor.bath_air_ok":  aq_word("sensor.bath_air_ok", "Q07", "good"),
+    }
+    by_room = {"Hall": [lbe["sensor.co2_unplaced"]]}
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const BYROOM={json.dumps(by_room)};\n"
+        "const FLOORS=[{id:'main',name:'Main',level:0}];\n"
+        "const svg=M.buildIsoSVG(MODEL,BYROOM,new Set(),null,150,0,LBE,false,FLOORS,{});\n"
+        "const grp=(eid)=>{const m=new RegExp('<g class=\"lair\" data-eid=\"'+eid.replace(/\\./g,'\\\\.')+'\"[^>]*>').exec(svg); return m?m[0]:null;};\n"
+        "const hue=(g)=>{const m=/hsl\\((\\d+),/.exec(g||''); return m?parseInt(m[1],10):null;};\n"
+        "console.log(JSON.stringify({\n"
+        "  groups:(svg.match(/<g class=\"lair\"/g)||[]).length,\n"
+        "  poor:grp('sensor.co2_poor'), poorHue:hue(grp('sensor.co2_poor')),\n"
+        "  bad:grp('sensor.co2_bad'), badHue:hue(grp('sensor.co2_bad')),\n"
+        "  good:grp('sensor.co2_good'), outside:grp('sensor.co2_outside'), unplaced:grp('sensor.co2_unplaced'),\n"
+        "  bathPoor:grp('sensor.bath_air'), bathPoorHue:hue(grp('sensor.bath_air')), bathOk:grp('sensor.bath_air_ok'),\n"
+        "  clips:(svg.match(/<clipPath id=\"psclip_/g)||[]).length,\n"
+        "  rises:/<animateTransform attributeName=\"transform\" type=\"translate\" from=\"0 0\" to=\"0 -[\\d.]+\"/.test(svg),\n"
+        "  markerGlyph:/data-eid=\"sensor\\.co2_poor\"/.test(svg),\n"
+        "}));\n"
+    ))
+    assert out["groups"] == 3, f"exactly the three poor-air rooms get bars (two numeric, one graded word): {out}"
+    assert out["bathPoor"] and out["bathPoorHue"] == 120, f"an enum sensor grading itself 'poor' draws green bars: {out}"
+    assert out["bathOk"] is None, f"'good' draws nothing: {out}"
+    assert out["poor"] and 'clip-path="url(#psclip_' in out["poor"] and 'pointer-events="none"' in out["poor"], out["poor"]
+    assert out["poorHue"] == 120, f"1450 ppm is 0.38 bad — the motion GREEN step: {out}"
+    assert out["badHue"] == 0, f"4000 ppm is 0.9 bad — the motion RED step: {out}"
+    assert out["good"] is None and out["outside"] is None and out["unplaced"] is None, out
+    assert out["clips"] == 3, f"the room clips must be emitted on the plain working map when bars need them: {out}"
+    assert out["rises"], "the bars must translate upward, looping"
+    assert out["markerGlyph"], "the sensor's own marker is still drawn"
+
+
+def test_the_legend_line_carries_an_air_quality_colour_index_beside_motion(tmp_path):
+    """Garry, 2026-09-14: "the index for motion at the bottom with the colors,
+    should also add air quality to that". Same line as the floor index and
+    the motion strip; the SAME seven hues, but as hard equal bands (by how
+    bad, not how long ago), from the motion blue at moderate to magenta at
+    hazardous."""
+    model = {
+        "room_geometry_m": {"Hall": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 4], [0, 4]]}},
+        "light_positions_m": {},
+    }
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        "const FLOORS=[{id:'main',name:'Main',level:0}];\n"
+        # The strip is drawn only for a house that HAS an air-quality sensor.
+        "const LBE={'sensor.q':{entity_id:'sensor.q',state:'good',code:'Q01',shape:'airquality',isAir:true,device_class:'enum',air_level:'good'}};\n"
+        "const svg=M.buildIsoSVG(MODEL,{'Hall':[LBE['sensor.q']]},new Set(),null,150,0,LBE,false,FLOORS,{});\n"
+        "const bare=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,{},false,FLOORS,{});\n"
+        "const grad=/<linearGradient id=\"psairlegend\"[^>]*>([^]*?)<\\/linearGradient>/.exec(svg);\n"
+        "const hues=grad ? [...grad[1].matchAll(/hsl\\((\\d+),/g)].map(m=>parseInt(m[1],10)) : [];\n"
+        "const distinct=[...new Set(hues)];\n"
+        "const motionAt=svg.indexOf('>Motion</text>'), airAt=svg.indexOf('>Air</text>');\n"
+        "const offs=grad ? [...grad[1].matchAll(/offset=\"([\\d.]+)%\"/g)].map(m=>parseFloat(m[1])) : [];\n"
+        "console.log(JSON.stringify({hasGrad:!!grad, distinct, stopCount:hues.length, airAfterMotion: motionAt>=0 && airAt>motionAt,\n"
+        "  strip:/<rect x=\"[\\d.]+\" y=\"[\\d.]+\" width=\"120\" height=\"1.5\" rx=\"0.75\" fill=\"url\\(#psairlegend\\)\"\\/>/.test(svg),\n"
+        "  bareHasStrip:/>Air<\\/text>/.test(bare), magentaStart: offs[12]}));\n"
+    ))
+    assert out["hasGrad"], "the air legend gradient is missing from the defs"
+    assert out["distinct"] == [240, 180, 120, 60, 30, 0, 300], f"the motion hues, in the motion order: {out}"
+    assert out["stopCount"] == 14, f"seven HARD bands = two stops each: {out}"
+    assert out["airAfterMotion"] and out["strip"], f"'Air' and its strip must follow Motion on the legend line: {out}"
+    # Laid out as the map steps it: six equal bands across most of the strip,
+    # magenta only as the terminal sliver (the map paints magenta only AT
+    # hazardous) — the strip never promises a colour the map does not paint.
+    assert out["magentaStart"] == 92.0, f"magenta must be the terminal sliver, not a seventh equal band: {out}"
+    assert not out["bareHasStrip"], "a house with no air-quality sensor gets no Air strip"
+
+
 def test_floor_slabs_never_take_a_click_but_stay_findable_by_geometry(tmp_path):
     """Garry, 2026-09-14: "all devices [placed outside a room, on a real
     floor] are not selectable". Root cause found live on four real markers:
@@ -2770,6 +2884,48 @@ def test_moving_a_light_does_not_count_as_touching_it(tmp_path):
     assert out["doorLinked"] is True, out
     assert out["doorUnlinkedOther"] is False, out
     assert out["doorNoLinkedSet"] is False, out
+
+
+def test_a_placed_motion_temp_humidity_air_or_lock_sensor_is_touched_by_a_bare_position(tmp_path):
+    """Garry, 2026-09-15, live: "I did place the air sensors, the placing
+    tools don't work". A motion/temperature/humidity/air-quality/lock
+    sensor draws its CLASS's fixed glyph and border colour — the same
+    shape of problem as a door (see the test above), never resized/
+    rotated/recoloured as a real customization. The width/height/rotation/
+    colour heuristic can never be satisfied by one of these, so a fresh
+    drop (only x_m/y_m, the default amber/zero stamp — "movedOnly" above)
+    read as forever untouched and Hide-untouched hid the marker right
+    back, mid-drag and after Save, with nothing left on the map to see,
+    drag, or confirm. An ordinary light with the exact same bare placement
+    must still read as untouched — this is a carve-out for these five
+    classes, not a general relaxation.
+    """
+    src = (_VIEWS / "lights_map.js").read_text(encoding="utf-8")
+    body = src[src.index("const _DROP_COLOR"):]
+    body = body[:body.index("// Legend for the shape vocabulary")]
+    bare = "{x_m:1,y_m:2,floor_id:'main',color:'#fbbf24',width_cm:0,height_cm:0,rotation:0}"
+    out = _run_js(tmp_path, (
+        body + "\n"
+        "const T=(cls)=>lightIsTouched({entity_id:'x',[cls]:true},{},{'x':" + bare + "});\n"
+        "const unplacedT=(cls)=>lightIsTouched({entity_id:'x',[cls]:true},{},{});\n"
+        "console.log(JSON.stringify({\n"
+        "  motion: T('isMotion'), temp: T('isTemp'), humidity: T('isHumidity'), air: T('isAir'), lock: T('isLock'),\n"
+        "  plainLightStillUntouched: lightIsTouched({entity_id:'x'},{},{'x':" + bare + "}),\n"
+        "  unplacedMotionStillUntouched: unplacedT('isMotion'),\n"
+        "}));\n"
+    ))
+    assert out["motion"] is True, out
+    assert out["temp"] is True, out
+    assert out["humidity"] is True, out
+    assert out["air"] is True, out
+    assert out["lock"] is True, out
+    assert out["plainLightStillUntouched"] is False, (
+        "the carve-out is for the four read-only sensor classes only — "
+        "an ordinary light fixture with the same bare drop stays untouched"
+    )
+    assert out["unplacedMotionStillUntouched"] is False, (
+        "never placed at all is still never placed, sensor class or not"
+    )
 
 
 def test_fit_to_room_caps_an_oversized_fixture_and_leaves_a_gap(tmp_path):

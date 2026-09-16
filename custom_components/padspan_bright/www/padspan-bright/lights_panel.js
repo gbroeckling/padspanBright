@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.41";
-const BUILD_ID = "20260915T052953Z";
+const APP_VERSION = "0.38.42";
+const BUILD_ID = "20260916T002107Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -276,7 +276,7 @@ class PadSpanLightsApp extends HTMLElement {
     // same way — its "state" is the number it just showed on the marker.
     const domain=String(eid).split(".")[0];
     if(domain==="binary_sensor"){ this._toast("Sensors are read-only"); return; }
-    if(domain==="sensor"){ this._toast("Temperature sensors are read-only"); return; }
+    if(domain==="sensor"){ this._toast("Temperature and air quality sensors are read-only"); return; }
     // lock.* (gap #8, best-in-class roadmap) has no on/off at all —
     // "locked" is its normal state, lock/unlock its services.
     const isLockDomain=domain==="lock";
@@ -395,7 +395,7 @@ class PadSpanLightsApp extends HTMLElement {
     root.appendChild(el("div",{class:"lv-hero"},[
       el("div",{class:"lv-hero-title"},"Lights"),
       el("span",{class:"lv-ver"},`v${APP_VERSION}`),
-      el("span",{class:"lv-hint"},"Tap a light to switch it \u00b7 tap its code or hold for controls \u00b7 tap a room name for the whole room \u00b7 motion and temperature tiles are read-only"),
+      el("span",{class:"lv-hint"},"Tap a light to switch it \u00b7 tap its code or hold for controls \u00b7 tap a room name for the whole room \u00b7 motion, temperature and air-quality tiles are read-only"),
       // Admin only: the pencil to the builder. Same map, the other tool.
       ...(this._isAdmin() ? [el("button",{class:"lv-act",style:"margin-left:auto",title:"Open Mapping \u2192 Lights",
         onclick:()=>this._gotoBuilder(null)},"\u270e Edit map")] : []),
@@ -406,7 +406,7 @@ class PadSpanLightsApp extends HTMLElement {
     // One-time coach mark. Dismissed once per browser; never again.
     if(!this.state._coachSeen){
       root.appendChild(el("div",{class:"lv-coach"},[
-        el("span",{},"\u{1F4A1} Tap a light to switch it. Tap its code, or press and hold, for brightness, colour, effects and fan speed. Hold a dimmable light and slide up or down to dim it. Tap a room name for everything in the room. Motion and temperature tiles are read-only — they just show what's happening."),
+        el("span",{},"\u{1F4A1} Tap a light to switch it. Tap its code, or press and hold, for brightness, colour, effects and fan speed. Hold a dimmable light and slide up or down to dim it. Tap a room name for everything in the room. Motion, temperature and air-quality tiles are read-only — they just show what's happening."),
         el("button",{class:"lv-act",onclick:()=>{
           this.state._coachSeen=true;
           try{ localStorage.setItem(LS_COACH,"1"); }catch(_){}

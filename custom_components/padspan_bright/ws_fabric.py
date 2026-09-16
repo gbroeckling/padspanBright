@@ -109,7 +109,7 @@ async def ws_fabric_light_position_set(hass: HomeAssistant, connection, msg) -> 
     # relevant, there is no sub-class to exclude.
     if not (eid.startswith("light.") or eid.startswith("fan.") or eid.startswith("binary_sensor.")
             or eid.startswith("sensor.") or eid.startswith("lock.")):
-        connection.send_error(msg["id"], "invalid", "a light, fan, motion-sensor, temperature-sensor or lock entity_id is required")
+        connection.send_error(msg["id"], "invalid", "a light, fan, motion-sensor, temperature/humidity/air-quality-sensor or lock entity_id is required")
         return
     await mdl.async_set_light_position_m(
         eid, float(msg["x_m"]), float(msg["y_m"]),

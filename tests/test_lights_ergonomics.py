@@ -341,6 +341,31 @@ console.log(JSON.stringify(LM.roomAggregate(LIGHTS, 'Nonexistent')));
     assert out["lightEids"] == [] and out["fanEids"] == []
 
 
+def test_room_and_floor_aggregates_summarise_air_quality_by_the_worst_reading(tmp_path):
+    """The room sheet's sub-line says what the air is like when the room has
+    an air-quality sensor (numeric or graded-word), by its WORST reading —
+    a room the map is painting with bars must not read "Motion clear" alone.
+    Nothing reporting → NaN → the sheet says "—"."""
+    model = {"room_geometry_m": {"Bath": {"floor_id": "main"}}, "light_positions_m": {}}
+    lights = [
+        {"entity_id": "sensor.bath_co2",  "area_name": "Bath", "isAir": True, "device_class": "carbon_dioxide", "air_value": 1450, "state": "1450"},
+        {"entity_id": "sensor.bath_air",  "area_name": "Bath", "isAir": True, "device_class": "enum", "air_level": "poor", "air_value": None, "state": "poor"},
+        {"entity_id": "sensor.bath_dead", "area_name": "Bath", "isAir": True, "device_class": "enum", "air_level": "unknown", "air_value": None, "state": "unknown"},
+        {"entity_id": "light.bath",       "area_name": "Bath", "state": "on"},
+    ]
+    out = _run(tmp_path, r"""
+const MODEL = __MODEL__, LIGHTS = __LIGHTS__;
+const room = LM.roomAggregate(LIGHTS, 'Bath');
+const floor = LM.floorAggregate(LIGHTS, MODEL, 'main');
+console.log(JSON.stringify({roomAirTotal: room.airTotal, roomAirWorst: room.airWorst, floorAirTotal: floor.airTotal, floorAirWorst: floor.airWorst,
+  none: LM.airWorstOf([LIGHTS[2]]), noneIsNaN: Number.isNaN(LM.airWorstOf([LIGHTS[2]]))}));
+""".replace("__MODEL__", json.dumps(model)).replace("__LIGHTS__", json.dumps(lights)))
+    assert out["roomAirTotal"] == 3 and out["floorAirTotal"] == 3, out
+    assert abs(out["roomAirWorst"] - 0.4) < 1e-9 and abs(out["floorAirWorst"] - 0.4) < 1e-9, \
+        f"the WORST reading wins: 'poor' (0.4) over 1450 ppm (0.38); the unknown one is ignored: {out}"
+    assert out["noneIsNaN"], f"no reporting sensor → NaN, not 0 (0 would read as Good): {out}"
+
+
 def test_floor_aggregate_derives_the_floor_from_room_then_placement(tmp_path):
     """lightFloorId: a device's floor is its ROOM's floor first (the fabric's
     room_geometry_m), and only when it has no room does its own stored

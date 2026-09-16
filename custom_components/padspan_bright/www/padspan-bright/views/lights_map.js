@@ -15,7 +15,8 @@ const { buildIsoSVG, shapeSvg, fabricFrame, sampleSceneField, pointInPolygon, of
         lightClassOf, SHOWCASE_THEMES, AUTOMORPH_STYLE_LABELS } =
   await import(`./iso_lights.js${new URL(import.meta.url).search}`);
 const { assignLightCodes, resolveLightShape, LIGHT_SHAPES, LIGHT_TYPE_OVERRIDES,
-        WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, TEMP_BORDER, LOCK_BORDER, DOOR_BORDER, healthOf } =
+        WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, TEMP_BORDER, LOCK_BORDER, DOOR_BORDER, healthOf,
+        AIR_QUALITY_CLASSES, AIR_BORDER, HUMIDITY_BORDER, airQualityBadness, airQualityWord, isAirQualityEntity } =
   await import(`./light_codes.js${new URL(import.meta.url).search}`);
 const { tierAtLeast } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
@@ -140,7 +141,7 @@ export function effectiveState(eid, reported, now = Date.now()){
 // ── Device classes on the map ────────────────────────────────────────────────
 // The layer chips: the map keeps every class in view and DIMS the others,
 // because a fan's place on the ceiling is context for the light beside it.
-export const LIGHT_CLASSES = [["all","All"],["light","Lights"],["strip","Strips"],["fan","Fans"],["motion","Motion"],["temp","Temps"],["lock","Locks"],["door","Doors/Windows"]];
+export const LIGHT_CLASSES = [["all","All"],["light","Lights"],["strip","Strips"],["fan","Fans"],["motion","Motion"],["temp","Temps"],["humidity","Humidity"],["air","Air"],["lock","Locks"],["door","Doors/Windows"]];
 
 // Automorph's style dropdown vocabulary — derived from AUTOMORPH_STYLE_LABELS
 // itself (iso_lights.js) rather than a hand-copied list. A style added there
@@ -157,6 +158,18 @@ export const SHOWCASE_THEME_OPTIONS = Object.entries(SHOWCASE_THEMES).map(([key,
 export { lightClassOf };
 export function classMatches(l, cls){ return !cls || cls === "all" || lightClassOf(l) === cls; }
 
+// The index/room-sheet text for an air-quality reading: "1450 ppm · Poor".
+export function airQualityLabel(l){
+  // An enum sensor's own word, as it grades itself: "Moderate".
+  if (typeof l.air_level === "string" && l.air_level && !/^(unknown|unavailable|none)$/.test(l.air_level)) {
+    const w = l.air_level.replace(/_/g, " ");
+    return w.charAt(0).toUpperCase() + w.slice(1);
+  }
+  if (!Number.isFinite(l.air_value)) return "—";
+  const v = Math.abs(l.air_value) >= 100 ? Math.round(l.air_value) : Math.round(l.air_value * 10) / 10;
+  return `${v}${l.air_unit ? " " + l.air_unit : ""} · ${airQualityWord(airQualityBadness(l))}`;
+}
+
 // ── Room and floor aggregates ────────────────────────────────────────────────
 // What a room sheet says: lights and fans counted SEPARATELY (so "all off"
 // is never ambiguous about the fan), motion summarised. The eids handed back
@@ -166,11 +179,14 @@ export function roomAggregate(lights, roomName){
   const lightsHere = here.filter(l => lightClassOf(l) === "light" || lightClassOf(l) === "strip");
   const fansHere = here.filter(l => l.isFan);
   const motionHere = here.filter(l => l.isMotion);
+  const airHere = here.filter(l => l.isAir);
   return {
     room: roomName,
     lightsOn: lightsHere.filter(l => l.state === "on").length, lightsTotal: lightsHere.length,
     fansOn: fansHere.filter(l => l.state === "on").length, fansTotal: fansHere.length,
     motionActive: motionHere.filter(l => l.state === "on").length, motionTotal: motionHere.length,
+    // Air quality: the worst reading in the room (NaN = none reporting).
+    airTotal: airHere.length, airWorst: airWorstOf(airHere),
     lightEids: lightsHere.map(l => l.entity_id), fanEids: fansHere.map(l => l.entity_id),
     all: here,
   };
@@ -214,8 +230,18 @@ export function floorAggregate(lights, model, floorId){
     lightsOn: lightsHere.filter(l => l.state === "on").length, lightsTotal: lightsHere.length,
     fansOn: fansHere.filter(l => l.state === "on").length, fansTotal: fansHere.length,
     motionActive: here.filter(l => l.isMotion && l.state === "on").length,
+    airTotal: here.filter(l => l.isAir).length, airWorst: airWorstOf(here.filter(l => l.isAir)),
     lightEids: lightsHere.map(l => l.entity_id), fanEids: fansHere.map(l => l.entity_id),
   };
+}
+// The worst air-quality badness among these sensors, NaN when none reports.
+export function airWorstOf(airLights){
+  let worst = NaN;
+  for (const l of airLights || []) {
+    const b = airQualityBadness(l);
+    if (Number.isFinite(b) && !(worst >= b)) worst = b;
+  }
+  return worst;
 }
 
 // ── Spread in room ───────────────────────────────────────────────────────────
@@ -514,25 +540,28 @@ export function wireHoverHud(isoDiv, opts){
   return stackAt;
 }
 
+// The pressed ring: appears at PRESS_RING_MS, fills over the rest of the
+// hold, and turns gold (the .armed CSS class) when the hold is armed — the
+// affordance a bare setTimeout-driven long press never has on its own.
+// Exported so every long-press site on the map — not just wireUseSurface's
+// own marker taps — can show the SAME ring instead of each growing its own.
+export function pressRing(svg, cx, cy, r){
+  if (!svg) return null;
+  const NS = "http://www.w3.org/2000/svg";
+  const c = document.createElementNS(NS, "circle");
+  c.setAttribute("class", "lpress"); c.setAttribute("cx", cx); c.setAttribute("cy", cy); c.setAttribute("r", r);
+  c.setAttribute("fill", "none"); c.setAttribute("stroke", "#fbbf24"); c.setAttribute("stroke-width", "1.6");
+  c.setAttribute("pointer-events", "none");
+  const circ = (2 * Math.PI * r).toFixed(1);
+  c.setAttribute("stroke-dasharray", circ); c.setAttribute("stroke-dashoffset", circ);
+  c.style.setProperty("--lv-ring-ms", `${HOLD_MS - PRESS_RING_MS}ms`);
+  svg.appendChild(c);
+  return c;
+}
 export function wireUseSurface(isoDiv, api){
   const q = (sel) => isoDiv.querySelectorAll(sel);
   const svg = isoDiv.querySelector("svg");
-  const NS = "http://www.w3.org/2000/svg";
-  // The pressed ring: appears at PRESS_RING_MS, fills over the rest of the
-  // hold, and turns gold when the hold is armed — the affordance the bare
-  // 500 ms hold never had.
-  const ringAt = (cx, cy, r) => {
-    if (!svg) return null;
-    const c = document.createElementNS(NS, "circle");
-    c.setAttribute("class", "lpress"); c.setAttribute("cx", cx); c.setAttribute("cy", cy); c.setAttribute("r", r);
-    c.setAttribute("fill", "none"); c.setAttribute("stroke", "#fbbf24"); c.setAttribute("stroke-width", "1.6");
-    c.setAttribute("pointer-events", "none");
-    const circ = (2 * Math.PI * r).toFixed(1);
-    c.setAttribute("stroke-dasharray", circ); c.setAttribute("stroke-dashoffset", circ);
-    c.style.setProperty("--lv-ring-ms", `${HOLD_MS - PRESS_RING_MS}ms`);
-    svg.appendChild(c);
-    return c;
-  };
+  const ringAt = (cx, cy, r) => pressRing(svg, cx, cy, r);
   const wirePress = (g, eid, cx, cy, ringR = 12) => {
     const l0 = api.lightsByEid[eid];
     if (!l0) return;
@@ -680,13 +709,18 @@ export function openAggregateSheet(api, { title, sub, items, actions }){
   for (const l of items) {
     const on = l.state === "on";
     const row = mk("div", _S.row);
-    const col = l.isWled ? WLED_BORDER : (l.isPartition ? PARTITION_BORDER : (l.isFan ? FAN_BORDER : (l.isMotion ? MOTION_BORDER : (l.isTemp ? TEMP_BORDER : (l.isDoor ? DOOR_BORDER : "#52b788")))));
+    const col = l.isWled ? WLED_BORDER : (l.isPartition ? PARTITION_BORDER : (l.isFan ? FAN_BORDER : (l.isMotion ? MOTION_BORDER : (l.isTemp ? TEMP_BORDER : (l.isHumidity ? HUMIDITY_BORDER : (l.isAir ? AIR_BORDER : (l.isDoor ? DOOR_BORDER : "#52b788")))))));
     row.appendChild(mk("span", _S.code + `;color:${col}`, l.code));
     row.appendChild(mk("span", _S.name, l.friendly_name));
     if (l.isMotion) {
       row.appendChild(mk("span", _S.state(on), on ? "MOTION" : "clear"));
     } else if (l.isTemp) {
       row.appendChild(mk("span", _S.state(false), Number.isFinite(l.temperature) ? `${l.temperature}°` : "—"));
+    } else if (l.isHumidity) {
+      row.appendChild(mk("span", _S.state(false), Number.isFinite(l.humidity) ? `${l.humidity}%` : "—"));
+    } else if (l.isAir) {
+      // Read-only, like temp: the reading, its unit and the band word.
+      row.appendChild(mk("span", _S.state(false), airQualityLabel(l)));
     } else if (l.isDoor) {
       // Read-only, same as motion/temp above — a door/window sensor is not
       // a switch, and the generic On/Off button below would fire a toggle
@@ -725,6 +759,7 @@ export function openRoomSheet(api, lights, room, onlyEids){
   if (agg.lightsTotal) parts.push(`Lights ${agg.lightsOn}/${agg.lightsTotal}`);
   if (agg.fansTotal) parts.push(`Fans ${agg.fansOn}/${agg.fansTotal}`);
   if (agg.motionTotal) parts.push(agg.motionActive ? `Motion ×${agg.motionActive}` : "Motion clear");
+  if (agg.airTotal) parts.push(`Air ${airQualityWord(agg.airWorst)}`);
   const actions = [];
   if (lightEids.length) {
     actions.push({ label: "All lights off", run: () => api.setMany(lightEids, false) });
@@ -742,10 +777,13 @@ export function openFloorSheet(api, lights, model, z){
   const fid = f ? String(f.id) : null;
   if (!fid) { api.toast("No floor record for this storey"); return; }
   const agg = floorAggregate(lights, model, fid);
-  const items = lights.filter(l => agg.lightEids.includes(l.entity_id) || agg.fanEids.includes(l.entity_id) || (l.isMotion && l.state === "on"));
+  const items = lights.filter(l => agg.lightEids.includes(l.entity_id) || agg.fanEids.includes(l.entity_id) || (l.isMotion && l.state === "on")
+    || (l.isAir && lightFloorId(l, model) === String(fid)));
   const parts = [`Lights ${agg.lightsOn}/${agg.lightsTotal}`];
   if (agg.fansTotal) parts.push(`Fans ${agg.fansOn}/${agg.fansTotal}`);
   if (agg.motionActive) parts.push(`Motion ×${agg.motionActive}`);
+  // Like motion: only worth a word on the floor line when something is up.
+  if (agg.airTotal && agg.airWorst > 0) parts.push(`Air ${airQualityWord(agg.airWorst)}`);
   const actions = [];
   if (agg.lightEids.length) {
     actions.push({ label: "All lights off", run: () => api.setMany(agg.lightEids, false) });
@@ -1301,9 +1339,15 @@ export function ensureLightsRegistry(store, hass, areas, onLoaded){
           // touched could never cluster onto the map or be placed at all —
           // found live, 2026-09-03 (Garry: "don't see any way to move the
           // temp in mapping, lights").
-          const isTempSensor = e.entity_id.startsWith("sensor.")
-            && hass.states[e.entity_id]?.attributes?.device_class === "temperature";
-          if (!/^(light|fan|binary_sensor)\./.test(e.entity_id) && !isTempSensor) continue;
+          // Air-quality sensors (2026-09-14) ride the same admission — the
+          // same class set gatherLights uses — or "Assign room…" would save
+          // in HA and never move the Q-tile, the 2026-09-03 bug all over again.
+          // Humidity (2026-09-15): same reasoning, same fix.
+          const _attrs = hass.states[e.entity_id]?.attributes;
+          const isMapSensor = e.entity_id.startsWith("sensor.")
+            && ((_attrs && _attrs.device_class === "temperature") || (_attrs && _attrs.device_class === "humidity")
+                || isAirQualityEntity(e.entity_id, _attrs));
+          if (!/^(light|fan|binary_sensor)\./.test(e.entity_id) && !isMapSensor) continue;
           const aid = e.area_id || devAreaId[e.device_id] || null;
           areaMap[e.entity_id] = aid ? (areaIdToName[aid] || null) : null;
           // The platform that CREATED the entity — "partition" for an
@@ -1405,6 +1449,18 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
       // like a motion sensor" (Garry). sensor.* is a domain nothing else
       // here admits, so this can never collide with a light/fan/binary_sensor.
       || (eid.startsWith("sensor.") && states[eid].attributes?.device_class === "temperature")
+      // Humidity (Garry, 2026-09-15: "set it up like temperature") — same
+      // reasoning, same admission, its own class rather than folded into
+      // temperature (device_class distinguishes them; a sensor is never
+      // both).
+      || (eid.startsWith("sensor.") && states[eid].attributes?.device_class === "humidity")
+      // Air quality (Garry, 2026-09-14): the FOURTH read-only sensor class —
+      // sensor.* by HA's air-quality device classes (AQI, PM, CO₂, CO, VOC,
+      // NO₂, O₃, SO₂). Its job on the map: a faded stream of bars rising
+      // through its room while the air is poor.
+      // (isAirQualityEntity: a numeric class, OR an enum sensor named
+      // "air quality" that reports a graded word — the bathroom outlets.)
+      || isAirQualityEntity(eid, states[eid].attributes)
       // lock.* — gap #8, best-in-class roadmap: the first domain this
       // pipeline generalized to beyond light/fan/binary_sensor/sensor.
       // Whole domain, no device_class gate needed (every lock entity is
@@ -1449,8 +1505,22 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
       // The reading itself, rounded — "inside is simply the temperature, 3
       // digit, and larger". Only sensor.* entities carry one; everything
       // else is null, same gating convention as the fan card's own fields.
-      temperature:   eid.startsWith("sensor.") && Number.isFinite(Number(states[eid].state))
+      temperature:   eid.startsWith("sensor.") && states[eid].attributes?.device_class === "temperature"
+                       && Number.isFinite(Number(states[eid].state))
                        ? Math.round(Number(states[eid].state)) : null,
+      // The same reading, one class down — humidity, rounded the same way.
+      humidity:      eid.startsWith("sensor.") && states[eid].attributes?.device_class === "humidity"
+                       && Number.isFinite(Number(states[eid].state))
+                       ? Math.round(Number(states[eid].state)) : null,
+      // An air-quality reading, unrounded (airQualityBadness bands it), and
+      // its unit for the index — only for the air-quality classes.
+      air_value:     eid.startsWith("sensor.") && AIR_QUALITY_CLASSES.includes(states[eid].attributes?.device_class)
+                       && Number.isFinite(Number(states[eid].state)) ? Number(states[eid].state) : null,
+      air_unit:      eid.startsWith("sensor.") ? (states[eid].attributes?.unit_of_measurement || "") : "",
+      // The graded WORD an enum air-quality sensor reports ("moderate") —
+      // airQualityBadness bands it; the index shows the word itself.
+      air_level:     states[eid].attributes?.device_class === "enum" && isAirQualityEntity(eid, states[eid].attributes)
+                       ? String(states[eid].state).toLowerCase() : null,
       // The effect list is what makes a light WLED-class (W-series code,
       // purple border, effects dialog). Free tier: every light is a light.
       effect_list:   paid && Array.isArray(states[eid].attributes?.effect_list) ? states[eid].attributes.effect_list : null,
@@ -1531,6 +1601,21 @@ export function lightIsTouched(l, shapeOverrides, placements, linkedDoorEids) {
   if (shapeOverrides && shapeOverrides[eid]) return true;
   const p = placements && placements[eid];
   if (!p) return false;
+  // The same shape of problem as a door, for the same reason: a motion,
+  // temperature, humidity, air-quality or lock sensor draws its class's
+  // fixed glyph and border colour (TEMP_BORDER, AIR_BORDER, ...) — there is
+  // no size, rotation or colour of its own to have touched, so the checks
+  // below can never be satisfied by anything short of the undocumented
+  // "bump the width to fake it" workaround every currently-visible one of
+  // these was given by hand. Placement is the only real work these classes
+  // have. Garry, 2026-09-15, live: "I did place the air sensors, the
+  // placing tools don't work" — a fresh drop (draft or saved) sets x_m/y_m
+  // alone, so it read as untouched and Hide-untouched hid it right back,
+  // both while dragging and forever after, with no marker left to see or
+  // save. Humidity is included pre-emptively — it draws the exact same
+  // fixed glyph shape, so it would hit the identical trap the moment
+  // anyone placed one.
+  if (l.isMotion || l.isTemp || l.isHumidity || l.isAir || l.isLock) return true;
   if (Number(p.width_cm) > 0 || Number(p.height_cm) > 0) return true;
   if (Number(p.rotation)) return true;
   if (p.color && String(p.color).toLowerCase() !== _DROP_COLOR) return true;
@@ -2321,6 +2406,8 @@ export function buildLightsTable(host, lights){
     // reading numerically (so 105° sorts above 68°, not alphabetically),
     // everything else by its actual on/off.
     ["state", "State", (l) => l.isTemp ? (Number.isFinite(l.temperature) ? l.temperature : -Infinity)
+      : l.isHumidity ? (Number.isFinite(l.humidity) ? l.humidity : -Infinity)
+      : l.isAir ? (Number.isFinite(airQualityBadness(l)) ? airQualityBadness(l) : -Infinity)   // numeric OR graded word, one scale
       : l.isLock ? (l.state === "locked" ? 1 : 0) : (l.state === "on" ? 1 : 0)],
   ];
   const th = (key, label, extraStyle) => {
@@ -2377,7 +2464,7 @@ export function buildLightsTable(host, lights){
       // Code + the same outline the map draws, so a row and its marker are
       // recognisably the same object. W-series purple = WLED-class,
       // P-series blue = an ESPHome-style partition segment, F green = fan,
-      // M blue = motion sensor, T orange = temperature.
+      // M blue = motion sensor, T orange = temperature, Q teal = air quality.
       // Its own click target, separate from the row's: the row click carries
       // a per-type action (motion opens its activity history, free tier
       // toggles), which for motion means there is otherwise NO way to
@@ -2398,8 +2485,10 @@ export function buildLightsTable(host, lights){
           : (l.isFan ? FAN_BORDER
           : (l.isMotion ? MOTION_BORDER
           : (l.isTemp ? TEMP_BORDER
+          : (l.isHumidity ? HUMIDITY_BORDER
+          : (l.isAir ? AIR_BORDER
           : (l.isLock ? LOCK_BORDER
-          : (l.isDoor ? DOOR_BORDER : "#52b788"))))));
+          : (l.isDoor ? DOOR_BORDER : "#52b788"))))))));
         const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
         svg.setAttribute("width", "15"); svg.setAttribute("height", "15");
         svg.setAttribute("viewBox", "0 0 15 15");
@@ -2446,6 +2535,10 @@ export function buildLightsTable(host, lights){
       el("td", { class: "muted", style: "font-size:11px" }, l.brand || "—"),
       el("td", {}, l.isTemp
         ? el("span", { class: "lv-state off" }, Number.isFinite(l.temperature) ? `${l.temperature}°` : "—")
+        : l.isHumidity
+        ? el("span", { class: "lv-state off" }, Number.isFinite(l.humidity) ? `${l.humidity}%` : "—")
+        : l.isAir
+        ? el("span", { class: "lv-state off", title: "Air quality — read-only" }, airQualityLabel(l))
         : l.isLock
         ? el("span", { class: `lv-state ${l.state === "jammed" ? "off" : (on ? "on" : "off")}` },
              l.state === "jammed" ? "JAMMED" : (on ? "LOCKED" : "UNLOCKED"))
@@ -2483,7 +2576,7 @@ export function buildLightsTable(host, lights){
       el("td", { style: "text-align:center;white-space:nowrap" }, [
         // The visible way to the controls (sidebar): a "⋯" that opens the
         // card — the same card the hold opens, offered in plain sight.
-        ...(host.onRowMore && !l.isMotion && !l.isTemp ? [el("button", {
+        ...(host.onRowMore && !l.isMotion && !l.isTemp && !l.isHumidity && !l.isAir ? [el("button", {
           class: "lv-act", title: "Controls", style: "margin-right:6px",
           onclick: (e) => { e.stopPropagation(); host.onRowMore(l); },
         }, "⋯")] : []),
@@ -2540,12 +2633,18 @@ export function buildLightsTable(host, lights){
           ...(host.onPlaceRow && !placements[l.entity_id] ? [(() => {
             // The placement queue (builder): arm this light, then tap the map
             // where it is. Only offered while it has no position of its own.
+            // Garry, 2026-09-15: "use the placement + symbol that is there
+            // for other placements" — the SAME "+ " prefix this app already
+            // uses for "+ Add room" / "+ Add a floor", not an invented bare
+            // glyph. Queued reuses the SAME "◎ " prefix "◎ Queue all
+            // unplaced" and "◎ N queued — tap the map" already use for
+            // "armed, tap the map now" — one vocabulary, not two.
             const q = !!(queued && queued.has(l.entity_id));
             return el("button", {
               class: "lv-act" + (q ? " primary" : ""), style: "margin-right:6px",
-              title: q ? "Queued — tap the map to place it" : "Queue it, then tap the map where it is",
+              title: q ? "Queued — tap the map to place it" : "Place on the map — then tap where it is",
               onclick: (e) => { e.stopPropagation(); host.onPlaceRow(l.entity_id); },
-            }, q ? "Queued" : "Place");
+            }, q ? "◎ Queued" : "+ Place");
           })()] : []),
           // A lock keeps its ordinary point marker above (it still has a
           // real physical spot, unlike a door/window sensor) — this is

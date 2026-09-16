@@ -638,20 +638,30 @@ def test_ensure_lights_registry_resolves_a_temperature_sensors_room(tmp_path):
     sensor.* temperature entity's "Assign room…" pick genuinely saved (HA's
     own registry had it) but areaMap[eid] stayed undefined forever, so
     gatherLights' l.area_name was always null and the light could never
-    cluster onto the map or be placed. A plain (non-temperature) sensor.*
+    cluster onto the map or be placed. A plain (unadmitted-class) sensor.*
     must still be excluded — the fix is scoped to gatherLights' own
-    admission rule, not "every sensor.*"."""
+    admission rule, not "every sensor.*". Humidity (2026-09-15) is admitted
+    the same way temperature and CO2 are."""
     out = _run_pipeline_script(tmp_path, """
 const AREAS = [{id: "bedroom", name: "Bedroom"}];
 const REG = [
   {entity_id: "light.lamp", area_id: "bedroom", device_id: null, platform: "hue"},
   {entity_id: "sensor.temp1", area_id: "bedroom", device_id: null, platform: "zha"},
   {entity_id: "sensor.humidity1", area_id: "bedroom", device_id: null, platform: "zha"},
+  {entity_id: "sensor.battery1", area_id: "bedroom", device_id: null, platform: "zha"},
+  // Air quality (2026-09-14): the same admission as gatherLights, or a
+  // Q-tile's "Assign room…" saves in HA and never moves it — the 2026-09-03
+  // bug this test exists for, for the next sensor class.
+  {entity_id: "sensor.co2_1", area_id: "bedroom", device_id: null, platform: "mqtt"},
+  {entity_id: "sensor.bath_air_quality", area_id: "bedroom", device_id: null, platform: "mqtt"},
 ];
 const STATES = {
   "light.lamp": {state: "on", attributes: {friendly_name: "Lamp"}},
   "sensor.temp1": {state: "68", attributes: {device_class: "temperature"}},
   "sensor.humidity1": {state: "44", attributes: {device_class: "humidity"}},
+  "sensor.battery1": {state: "80", attributes: {device_class: "battery"}},
+  "sensor.co2_1": {state: "900", attributes: {device_class: "carbon_dioxide", unit_of_measurement: "ppm"}},
+  "sensor.bath_air_quality": {state: "moderate", attributes: {friendly_name: "Bath Air quality", device_class: "enum"}},
 };
 const hass = {
   states: STATES,
@@ -676,8 +686,14 @@ console.log(JSON.stringify({loaded, areaMap: store.reg ? store.reg.areaMap : nul
     assert areaMap["light.lamp"] == "Bedroom", areaMap
     assert areaMap["sensor.temp1"] == "Bedroom", \
         f"a temperature sensor's own room pick must resolve here — this is the ONLY place gatherLights reads area_name from: {areaMap}"
-    assert "sensor.humidity1" not in areaMap, \
-        f"a non-temperature sensor.* must stay excluded — the fix is scoped to gatherLights' own admission rule: {areaMap}"
+    assert areaMap["sensor.humidity1"] == "Bedroom", \
+        f"a humidity sensor's own room pick must resolve here too, same as temperature: {areaMap}"
+    assert "sensor.battery1" not in areaMap, \
+        f"an unadmitted sensor.* class must stay excluded — the fix is scoped to gatherLights' own admission rule: {areaMap}"
+    assert areaMap["sensor.co2_1"] == "Bedroom", \
+        f"an air-quality sensor's room pick must resolve here too, same admission as gatherLights: {areaMap}"
+    assert areaMap["sensor.bath_air_quality"] == "Bedroom", \
+        f"an ENUM air-quality sensor (the bathroom outlets) must resolve here too: {areaMap}"
 
 
 def test_ensure_lights_registry_resolves_ip_from_configuration_url(tmp_path):
@@ -1034,24 +1050,59 @@ const AREA = {"sensor.living_room_temp": "Living Room", "sensor.living_room_humi
 const STATES = {
   "sensor.living_room_temp": {state: "71.6", last_updated: "2026-01-01T00:00:00.000Z",
                                attributes: {friendly_name: "Living Room Temperature", device_class: "temperature"}},
-  // A humidity sensor is ALSO a plain sensor.* entity — must NOT be admitted.
-  "sensor.living_room_humidity": {state: "44", last_updated: "2026-01-01T00:00:00.000Z",
+  // Humidity (Garry, 2026-09-15: "set it up like temperature") — its own
+  // class, admitted by device_class exactly like temperature is.
+  "sensor.living_room_humidity": {state: "43.6", last_updated: "2026-01-01T00:00:00.000Z",
                                    attributes: {friendly_name: "Living Room Humidity", device_class: "humidity"}},
   "light.lamp": {state: "off", attributes: {friendly_name: "Lamp", supported_color_modes: ["onoff"]}},
+  // Air quality (Garry, 2026-09-14): a CO2 sensor is a plain sensor.* too —
+  // admitted by its device_class, as its OWN class (Q-series), never as a
+  // thermometer: isTempSensor used to be "any sensor.*".
+  "sensor.living_room_co2": {state: "1450", last_updated: "2026-01-01T00:00:00.000Z",
+                              attributes: {friendly_name: "Living Room CO2", device_class: "carbon_dioxide", unit_of_measurement: "ppm"}},
+  // An ENUM air-quality sensor grading itself with a word — Garry's bathroom
+  // outlets (sensor.invisoutlet_air_quality = "moderate"): admitted by its
+  // name, banded by the word. An enum sensor that is NOT about air stays out.
+  "sensor.bath_air_quality": {state: "moderate", last_updated: "2026-01-01T00:00:00.000Z",
+                               attributes: {friendly_name: "Bath Air quality", device_class: "enum",
+                                            options: ["excellent", "good", "moderate", "poor", "unhealthy", "hazardous"]}},
+  "sensor.bath_power_on_behavior": {state: "previous", last_updated: "2026-01-01T00:00:00.000Z",
+                                     attributes: {friendly_name: "Bath Power-on behavior", device_class: "enum", options: ["off", "on", "previous"]}},
 };
 const lights = LM.gatherLights(STATES, AREA, {}, "pro", {}, {}, {});
 const by = Object.fromEntries(lights.map(l => [l.entity_id, l]));
+const q = by["sensor.living_room_co2"];
+const e = by["sensor.bath_air_quality"];
+const h = by["sensor.living_room_humidity"];
 console.log(JSON.stringify({
   ids: lights.map(l => l.entity_id).sort(),
   temp: by["sensor.living_room_temp"] && {code: by["sensor.living_room_temp"].code, isTemp: by["sensor.living_room_temp"].isTemp,
     shape: by["sensor.living_room_temp"].shape, temperature: by["sensor.living_room_temp"].temperature,
     last_changed: by["sensor.living_room_temp"].last_changed, dimmable: by["sensor.living_room_temp"].dimmable},
+  air: q && {code: q.code, isAir: q.isAir, isTemp: q.isTemp, shape: q.shape, air_value: q.air_value, air_unit: q.air_unit,
+    label: LM.airQualityLabel(q)},
+  enumAir: e && {code: e.code, isAir: e.isAir, isTemp: e.isTemp, shape: e.shape, air_level: e.air_level, air_value: e.air_value,
+    label: LM.airQualityLabel(e)},
+  humidity: h && {code: h.code, isHumidity: h.isHumidity, isTemp: h.isTemp, shape: h.shape, humidity: h.humidity, dimmable: h.dimmable},
 }));
 """)
-    assert out["ids"] == ["light.lamp", "sensor.living_room_temp"], "a humidity sensor must not join the lights map"
+    assert out["ids"] == ["light.lamp", "sensor.bath_air_quality", "sensor.living_room_co2",
+                           "sensor.living_room_humidity", "sensor.living_room_temp"], \
+        "a non-air enum must stay out; a CO2 sensor, an enum air-quality sensor and a humidity sensor must join"
+    e = out["enumAir"]
+    assert e["code"] == "Q01" and e["isAir"] and not e["isTemp"] and e["shape"] == "airquality", e
+    assert e["air_level"] == "moderate" and e["air_value"] is None and e["label"] == "Moderate", e
     t = out["temp"]
     assert t["code"] == "T01" and t["isTemp"] and t["shape"] == "tempreadout", t
     assert t["temperature"] == 72, f"71.6 must round to 72: {t}"
+    a = out["air"]
+    assert a["code"] == "Q02" and a["isAir"] and not a["isTemp"] and a["shape"] == "airquality", a   # Q01 is the bath sensor (sorted by entity_id)
+    assert a["air_value"] == 1450 and a["air_unit"] == "ppm", a
+    h = out["humidity"]
+    assert h["code"] == "H01" and h["isHumidity"] and not h["isTemp"] and h["shape"] == "humidityreadout", h
+    assert h["humidity"] == 44, f"43.6 must round to 44: {h}"
+    assert h["dimmable"] is False, "a read-only sensor must never offer the brightness card"
+    assert a["label"] == "1450 ppm · Poor", a
     assert t["last_changed"] == "2026-01-01T00:00:00.000Z", "last_updated feeds the freshness gate, not an attribute"
     assert t["dimmable"] is False, "a read-only sensor must never offer the brightness card"
 
@@ -1433,7 +1484,7 @@ const doorCodeCell = unlinkedRow.querySelectorAll("td")[0];
 doorCodeCell.dispatchEvent({ type: "click", stopPropagation(){}, preventDefault(){} });
 
 const lampHasPlace = [...lampRow.querySelectorAll("td")[7].querySelectorAll("button")]
-  .some(b => /Place/.test(b.textContent));
+  .some(b => b.textContent.trim() === "+ Place");
 
 console.log(JSON.stringify({
   linkedMapCell, hasUnlinkedBtn: !!unlinkedBtn, configuredFor, selectedFor, lampHasPlace,
@@ -1443,7 +1494,7 @@ console.log(JSON.stringify({
     assert out["hasUnlinkedBtn"] is True, "an unlinked door must offer a Place button"
     assert out["configuredFor"] == "binary_sensor.back_door", "the button must call host.onConfigureDoor with the row's light"
     assert out["selectedFor"] is None, "a door's code column must never arm point-placement"
-    assert out["lampHasPlace"] is True, "an ordinary light must keep its Place button unaffected"
+    assert out["lampHasPlace"] is True, "an ordinary light must keep its + (place) button unaffected"
 
 
 def test_a_lock_row_keeps_its_place_button_and_also_offers_link_wall(tmp_path):
@@ -1473,14 +1524,14 @@ const root = LM.buildLightsTable(host, lights);
 const lockRow = root.querySelector('tr[data-eid="lock.front_door"]');
 const cellBtns = [...lockRow.querySelectorAll("td")[7].querySelectorAll("button")];
 const btnsText = cellBtns.map(b => b.textContent.trim());
-const placeBtn = cellBtns.find(b => /^Place$/.test(b.textContent.trim()));
+const placeBtn = cellBtns.find(b => b.textContent.trim() === "+ Place");
 const linkBtn = cellBtns.find(b => /Link wall/.test(b.textContent));
 placeBtn.dispatchEvent({ type: "click", stopPropagation(){}, preventDefault(){} });
 linkBtn.dispatchEvent({ type: "click", stopPropagation(){}, preventDefault(){} });
 
 console.log(JSON.stringify({ btns: btnsText, configuredFor, placedFor }));
 """)
-    assert any(b == "Place" for b in out["btns"]), out["btns"]
+    assert any(b == "+ Place" for b in out["btns"]), out["btns"]
     assert any("Link wall" in b for b in out["btns"]), out["btns"]
     assert out["placedFor"] == "lock.front_door", "the ordinary Place button must still arm the point-placement queue"
     assert out["configuredFor"] == "lock.front_door", "Link wall must call host.onConfigureDoor with the lock"

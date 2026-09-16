@@ -27,7 +27,7 @@ const { fabricFrame, markerScale, markerRadiusPx, cmFromHandlePx, MAX_FIXTURE_CM
 const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable, lightIsTouched,
         sunAmbient, lastBrightness, spreadInRoom, createUndoStack, setOptimistic, clearOptimistic, effectiveState,
         wireUseSurface, openControlCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates,
-        isOutdoorFloorId, wireHoverHud } =
+        isOutdoorFloorId, wireHoverHud, pressRing, HOLD_MS, PRESS_RING_MS } =
   await import(`./lights_map.js${new URL(import.meta.url).search}`);
 // Fixture-shape vocabulary + derivation (the tab owns the manual override UI).
 const { LIGHT_SHAPES, deriveLightShape } =
@@ -3824,7 +3824,7 @@ const BRIGHT_PRO_MANUAL = [
         "heading": "Choose what to show and which floor",
         "body": "The buttons above the map are split into two groups: what to show, and, in a multi-floor home, which floor to show it on.",
         "steps": [
-          "Tap All, Lights, Strips, Fans, Motion or Temps to bring just that kind of device to the front. Everything else dims and stops responding to taps until you tap the same button again, or tap All. Only buttons for devices your house actually has appear.",
+          "Tap All, Lights, Strips, Fans, Motion, Temps or Air to bring just that kind of device to the front. Everything else dims and stops responding to taps until you tap the same button again, or tap All. Only buttons for devices your house actually has appear.",
           "On a home with more than one floor, tap a floor's name to jump straight to it, or All to see every floor again. Each floor button carries a small number showing how much is on up there.",
           "Tap Find active to jump straight to whatever's on or tripped right now."
         ],
@@ -3834,16 +3834,16 @@ const BRIGHT_PRO_MANUAL = [
         "heading": "The light index",
         "body": "Below the map is a table listing every light in the house, whether or not it's placed on the map.",
         "steps": [
-          "Pick a type from the dropdown above the table — All types, Lights, Strips, Fans, Motion or Temps — to show only that kind.",
+          "Pick a type from the dropdown above the table — All types, Lights, Strips, Fans, Motion, Temps or Air — to show only that kind.",
           "Click a column heading — Code, Light, Room or State — to sort by it. Click the same heading again to reverse the order, and a third click puts the list back in its normal order."
         ],
         "notes": [
-          "State sorts off before on — click again to bring what's on to the top. For a temperature sensor it sorts by the reading itself, not just on or off."
+          "State sorts off before on — click again to bring what's on to the top. For a temperature sensor it sorts by the reading itself, and for an air-quality sensor by how bad the air is, not just on or off."
         ]
       },
       {
-        "heading": "Motion and temperature aren't switches",
-        "body": "Motion and temperature tiles are indicators, not switches — they show you what's happening rather than let you change it. Tap a motion tile and it opens a 7-day activity history instead — how many hours it's tripped, day by day. Tap a temperature tile and the panel tells you it's read-only; there's nothing to switch.",
+        "heading": "Motion, temperature and air quality aren't switches",
+        "body": "Motion, temperature and air-quality tiles are indicators, not switches — they show you what's happening rather than let you change it. Tap a motion tile and it opens a 7-day activity history instead — how many hours it's tripped, day by day. Tap a temperature tile and the panel tells you it's read-only; there's nothing to switch.",
         "steps": [],
         "notes": [
           "Some sensors report both motion and presence for the same spot — common on radar/mmWave hardware. When PadSpan can match them to the same physical sensor, it shows one tile instead of two."
@@ -3942,7 +3942,7 @@ const BRIGHT_PRO_MANUAL = [
         "body": "Open Mapping → Lights. Every light starts out clustered at the centre of its room, waiting to be placed. There are two ways to move it to its real spot: drag it there directly, or queue it and tap the map.",
         "steps": [
           "To place one by dragging: click its marker on the map and drag it to where the fixture really sits, then let go.",
-          "To place one by tapping: click Place next to its row in the light index below the map — or click \"Queue all unplaced\" to queue every unplaced light in the house at once.",
+          "To place one by tapping: click + Place next to its row in the light index below the map — or click \"Queue all unplaced\" to queue every unplaced light in the house at once.",
           "Click the map exactly where that light is. It's placed, and the next light waiting in the queue is named in the bar above the map, ready for its own tap.",
           "Press Esc, or click the queue button again, to clear whatever is still queued."
         ],
@@ -3992,7 +3992,7 @@ const BRIGHT_PRO_MANUAL = [
         "body": "",
         "steps": [
           "Click Undo (or press Ctrl+Z) to step back through your unsaved edits one at a time; click Redo (Ctrl+Y) to step forward again.",
-          "Use the filter dropdown above the light index to show only one kind of device at a time — lights, strips, fans, motion sensors or temperature sensors.",
+          "Use the filter dropdown above the light index to show only one kind of device at a time — lights, strips, fans, motion sensors, temperature sensors or air-quality sensors.",
           "Click a column heading — Code, Light, Room or State — to sort the index by it. Click again to reverse the order; a third click returns to the underlying order, sorted by room and then by name.",
           "Click \"Hide untouched\" to show only the fixtures you've actually resized, rotated, recoloured or given a shape — useful once most of the house is placed and you just want to see what's left to style. Moving a light on its own doesn't count as touching it.",
           "Click Hide on a light's row to drop it off the map entirely — it stays listed in the index. Click Show on a hidden row to bring it back."
@@ -4026,14 +4026,14 @@ const BRIGHT_PRO_MANUAL = [
           "Leave it on Auto (derived) to go back to PadSpan's own guess."
         ],
         "notes": [
-          "Motion sensor and Temperature readout are also in the shape list, but your motion and temperature entities already draw that way on their own — you won't need to set them."
+          "Motion sensor, Temperature readout and Air quality sensor are also in the shape list, but your motion, temperature and air-quality entities already draw that way on their own — you won't need to set them."
         ]
       },
       {
         "heading": "Class chips and floor tabs",
         "body": "",
         "steps": [
-          "Above the map, tap a class chip — All, Lights, Strips, Fans, Motion or Temps — to isolate that class. Its count shows how many of that class are on the map; everything else dims and stops responding to taps.",
+          "Above the map, tap a class chip — All, Lights, Strips, Fans, Motion, Temps or Air — to isolate that class. Its count shows how many of that class are on the map; everything else dims and stops responding to taps.",
           "Tap the same chip again, or tap All, to bring everything back.",
           "On a house with more than one storey, floor tabs sit next to the chips: All, then one tab per floor. Each floor's tab carries a dot showing how many of its devices are on, and switches to a motion dot when something up there is tripped.",
           "Tap a floor's tab to work on just that storey — its own zoom and scroll position come back the way you left them.",
@@ -4046,7 +4046,7 @@ const BRIGHT_PRO_MANUAL = [
         "body": "Marker outlines use the same colours on the map and in the light list. Purple is a WLED or other effect-capable strip. Blue is an ESPHome partition — one physical strip split into several zones, each with its own colour. Green is a fan; tap its code, or press and hold, to open its controls. Depending on the fan, those controls can include speed, presets, oscillation and direction.\n\nMotion sensors are also outlined in blue, with a pulsing ring underneath that shows how long it has been since the sensor last changed state — whether it is currently tripped or has gone quiet: blue for the first five minutes, violet at five minutes, magenta at 20, red at 40, orange at 65, yellow at 90, and green from two hours until the ring disappears at six hours. A sensor that stays tripped for a long time sweeps through the same stages a quiet one does — it is one clock either way, so two sensors with different hardware hold-times still read the same way at the same elapsed time. Past six hours the ring disappears even if the sensor is still reporting tripped.\n\nTemperature sensors are outlined in orange. A placed sensor shows its reading as large digits while that reading is less than an hour old. If the reading is older, or the sensor has not been placed, the marker shows its code instead.",
         "steps": [],
         "notes": [
-          "Motion and temperature sensors are read-only on the map — there's nothing to tap to switch them."
+          "Motion, temperature and air-quality sensors are read-only on the map — there's nothing to tap to switch them. A placed air-quality sensor whose room's air is past good draws a faint stream of bars rising through that room, coloured on the motion scale by how bad it is — blue just past good, through green, to magenta at hazardous."
         ]
       }
     ]
@@ -7477,12 +7477,26 @@ function _wireLightsBuild(ctx, isoDiv, o) {
   // multi-light edit needs). 500ms matches the row's own long-press-for-
   // controls elsewhere in this table.
   for (const rg of isoDiv.querySelectorAll("g.lroom[data-room]")) {
-    let lpTimer = null, longPressed = false;
+    let lpTimer = null, ringT = null, ring = null, longPressed = false;
+    const rrect = rg.querySelector("rect");
     rg.addEventListener("pointerdown", (ev) => {
       longPressed = false;
-      lpTimer = setTimeout(() => { longPressed = true; }, 500);
+      // The same ring a marker's own long press already shows (wireUseSurface
+      // / pressRing) — appears at PRESS_RING_MS, fills to HOLD_MS, gold once
+      // armed. Garry, 2026-09-15: "add the little animation where is it not
+      // used now" — pure visual, the longPressed timing below is untouched.
+      if (rrect) {
+        const rx = parseFloat(rrect.getAttribute("x")), ry = parseFloat(rrect.getAttribute("y"));
+        const rw2 = parseFloat(rrect.getAttribute("width")), rh2 = parseFloat(rrect.getAttribute("height"));
+        ringT = setTimeout(() => { ring = pressRing(svg, rx + rw2 / 2, ry + rh2 / 2, Math.max(14, rh2 * 0.9)); }, PRESS_RING_MS);
+      }
+      lpTimer = setTimeout(() => { longPressed = true; if (ring) ring.classList.add("armed"); }, HOLD_MS);
     });
-    const cancelTimer = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+    const cancelTimer = () => {
+      if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+      if (ringT) { clearTimeout(ringT); ringT = null; }
+      if (ring) { try { ring.remove(); } catch (_) {} ring = null; }
+    };
     rg.addEventListener("pointerup", cancelTimer);
     rg.addEventListener("pointerleave", cancelTimer);
     rg.addEventListener("pointercancel", cancelTimer);
@@ -7664,7 +7678,15 @@ function _wireLightsBuild(ctx, isoDiv, o) {
       // uses elsewhere in this table.
       let longPressed = false;
       let longPressCancelled = false;
-      const lpTimer = setTimeout(() => { longPressed = true; }, 500);
+      // The same ring wireUseSurface's own marker hold already shows —
+      // appears at PRESS_RING_MS, fills to HOLD_MS, gold once armed. Garry,
+      // 2026-09-15: "add the little animation where is it not used now" —
+      // purely visual, layered onto the SAME lpTimer/longPressed this
+      // already ran on, not a second timer with its own timing to drift.
+      let ring = null;
+      const ringT = setTimeout(() => { ring = pressRing(svg, originCx, originCy, 12); }, PRESS_RING_MS);
+      const lpTimer = setTimeout(() => { longPressed = true; if (ring) ring.classList.add("armed"); }, HOLD_MS);
+      const cancelRing = () => { clearTimeout(ringT); if (ring) { try { ring.remove(); } catch (_) {} ring = null; } };
       try { g.setPointerCapture(ev.pointerId); } catch (_) {}
       // Group drag: when the grabbed light is part of the multi-selection,
       // every selected PLACED light moves with it by the same delta — each
@@ -7691,6 +7713,7 @@ function _wireLightsBuild(ctx, isoDiv, o) {
         if (!longPressCancelled && Math.abs(dx) + Math.abs(dy) > 3) {
           longPressCancelled = true;
           clearTimeout(lpTimer);
+          cancelRing();
         }
         // Arm the drag (and the render freeze) only once this is genuinely a
         // drag. 8px, not 3: every hex is draggable now, so a twitch while
@@ -7724,6 +7747,7 @@ function _wireLightsBuild(ctx, isoDiv, o) {
         g.removeEventListener("pointerup", up);
         g.removeEventListener("pointercancel", up);
         clearTimeout(lpTimer);
+        cancelRing();
         try { g.releasePointerCapture(ev.pointerId); } catch (_) {}
         o.mapState._editDragging = false;
         if (!moved || e.type === "pointercancel") {
@@ -8190,13 +8214,13 @@ function _lightsTourSteps(paid){
       body: "Every light starts out clustered at the centre of its room. This is where you tell PadSpan exactly where each one really hangs — and, if you have a key, its shape, size, colour and effects too.",
       find: null },
     { title: "Place a light",
-      body: "Drag any light on the map to its real spot. Or click Place next to its row in the list below the map, then tap the map where it is.",
+      body: "Drag any light on the map to its real spot. Or click + Place next to its row in the list below the map, then tap the map where it is.",
       find: (wrap) => wrap.querySelector(".lv-stage") },
     { title: "Give it a shape",
       body: "Click a light — on the map or in the list — to select it. A panel opens underneath with Shape, size and rotation. Pick the glyph that matches the real fixture, or leave it on Auto for PadSpan's own guess.",
       find: (wrap) => _lightsTourFindTable(wrap) },
     { title: "Fans, motion, temperature — and WLED",
-      body: "The chips above the map isolate one kind of device at a time — Lights, Strips, Fans, Motion, Temps. A strip with effects (WLED or similar) gets its own colour and effect controls: hold it, on the map or in the sidebar, to open them.",
+      body: "The chips above the map isolate one kind of device at a time — Lights, Strips, Fans, Motion, Temps, Air. A strip with effects (WLED or similar) gets its own colour and effect controls: hold it, on the map or in the sidebar, to open them.",
       find: (wrap) => wrap.querySelector(".lv-layerbar") },
   ];
   if (paid) {
@@ -8492,7 +8516,7 @@ function _lightsTab(ctx, maps, active) {
     // is a temperature sensor.*.
     const domain = String(eid).split(".")[0];
     if (domain === "binary_sensor") { ctx.toast("Sensors are read-only"); return; }
-    if (domain === "sensor") { ctx.toast("Temperature sensors are read-only"); return; }
+    if (domain === "sensor") { ctx.toast("Temperature and air quality sensors are read-only"); return; }
     // The EFFECTIVE state, not the raw HA one (Garry, 2026-09-11: a second
     // tap inside the same optimistic window re-decided from state that
     // hadn't caught up yet, so it silently repeated the first command
@@ -9344,7 +9368,10 @@ function _lightsTab(ctx, maps, active) {
     }, `⎘ Apply look to ${selSet.size - 1} selected`));
 
     const on = l.state === "on";
-    insp.appendChild(el("button", {
+    // A read-only class (motion, door/window, temperature, humidity, air
+    // quality) has nothing to switch — the button only ever produced the
+    // read-only toast.
+    if (!(l.isMotion || l.isDoor || l.isTemp || l.isHumidity || l.isAir)) insp.appendChild(el("button", {
       class: `lv-onoff ${on ? "on" : "off"}`,
       onclick: () => toggle(l.entity_id),
     }, on ? "Turn Off" : "Turn On"));
