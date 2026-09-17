@@ -212,6 +212,139 @@ def test_the_code_label_is_never_rotated_or_stretched(tmp_path):
     assert out["textAfterTransformClose"] is True, "the label must sit outside the transformed group"
 
 
+# ── Floor group hit-testing (touch-interface rebuild, 2026-09-17) ──────────
+# Garry: "all the controls in atlas are layered on screen objects that are
+# visually not lining up with where the touch controls land... objects
+# underneith are constantly hijacking the ability to simply turn on a
+# light." Two of the root causes: the floorslab's own <g pointer-events=
+# "none"> was never closed after its own polygons — it stayed open through
+# the WHOLE floor's rooms/markers/badges, so a background floor's slab
+# silently absorbed taps meant for a marker sitting visually on top of it.
+# And a non-focused (ghosted) floor's markers kept pointer-events="all" on
+# every one of their own hit primitives, which — since an element's own
+# explicit pointer-events always overrides an ancestor's — could out-tap the
+# focused floor's real marker directly underneath a touch.
+
+def _strip_ns(tag: str) -> str:
+    return tag.split("}")[-1] if "}" in tag else tag
+
+
+def test_floorslab_group_contains_only_its_own_polygons(tmp_path):
+    """The floorslab group must close immediately after its own fill/border
+    polygons — never stay open to (accidentally) also wrap that floor's
+    rooms, markers or floor badge, which would let its pointer-events="none"
+    intent be defeated by whichever child happens to declare its own."""
+    import xml.etree.ElementTree as ET
+    out = _run_js(tmp_path, _harness(
+        "const svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS);"
+        "out.svg=svg;"
+    ))
+    root = ET.fromstring(out["svg"])
+    slabs = [el for el in root.iter() if el.get("data-role") == "floorslab"]
+    assert slabs, "expected at least one floorslab group in a multi-floor render"
+    for slab in slabs:
+        kids = [_strip_ns(c.tag) for c in list(slab)]
+        assert kids and all(k == "polygon" for k in kids), (
+            "a floorslab group must contain only its own polygons, found", kids)
+
+
+_GHOST_MODEL = {
+    "room_geometry_m": {
+        "Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 4], [0, 4]]},
+        "Loft":    {"type": "poly", "floor_id": "up",   "points_m": [[0, 0], [5, 0], [5, 5], [0, 5]]},
+    },
+    "light_positions_m": {
+        "light.main": {"x_m": 3.0, "y_m": 2.0, "floor_id": "main"},
+        "light.up":   {"x_m": 2.0, "y_m": 2.0, "floor_id": "up"},
+    },
+}
+_GHOST_LBE = {
+    "light.main": {"entity_id": "light.main", "state": "on", "code": "M01", "shape": "circle", "isWled": False},
+    "light.up":   {"entity_id": "light.up",   "state": "on", "code": "U01", "shape": "circle", "isWled": False},
+}
+
+
+def _base_hit_pe(svg: str, eid: str) -> str:
+    m = re.search(rf'<g class="lhex" data-eid="{re.escape(eid)}"[^>]*>.*?'
+                  r'<circle data-hit="1"[^>]*\spointer-events="([a-z]+)"', svg, re.S)
+    assert m, f"no BASE_HIT circle found for {eid!r}"
+    return m.group(1)
+
+
+def test_a_ghosted_floors_marker_loses_pointer_events(tmp_path):
+    """focusZ picks out level 0 (floor "main") — light.main's own hit
+    circle must stay pointer-events="all", but light.up, sitting on the
+    background (ghosted) floor "up", must drop to "none" so it can never
+    out-tap whatever the focused floor draws in the same screen space."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_GHOST_MODEL)};\nconst FLOORS={json.dumps(_FLOORS)};\n"
+        f"const LBE={json.dumps(_GHOST_LBE)};\nconst out={{}};\n"
+        "out.svg=M.buildIsoSVG(MODEL,{},new Set(),0,150,0,LBE,false,FLOORS);"
+        "console.log(JSON.stringify(out));"
+    ))
+    assert _base_hit_pe(out["svg"], "light.main") == "all", out["svg"]
+    assert _base_hit_pe(out["svg"], "light.up") == "none", out["svg"]
+
+
+def test_with_no_focused_floor_nothing_is_ghosted(tmp_path):
+    """focusZ=null (the builder's own default, every floor shown at once)
+    must not regress into ghosting everything — both floors' markers stay
+    fully tappable, unchanged from before this fix."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_GHOST_MODEL)};\nconst FLOORS={json.dumps(_FLOORS)};\n"
+        f"const LBE={json.dumps(_GHOST_LBE)};\nconst out={{}};\n"
+        "out.svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS);"
+        "console.log(JSON.stringify(out));"
+    ))
+    assert _base_hit_pe(out["svg"], "light.main") == "all", out["svg"]
+    assert _base_hit_pe(out["svg"], "light.up") == "all", out["svg"]
+
+
+def test_the_floor_badge_is_always_tappable(tmp_path):
+    """The floor badge (bottom-left legend chip that switches the focused
+    floor) is its own defense-in-depth pointer-events="all", independent of
+    the floorslab-close fix — it must stay tappable regardless of which
+    floor is currently focused, since it's the control that CHANGES focus."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_GHOST_MODEL)};\nconst FLOORS={json.dumps(_FLOORS)};\n"
+        f"const LBE={json.dumps(_GHOST_LBE)};\nconst out={{}};\n"
+        "out.svg=M.buildIsoSVG(MODEL,{},new Set(),0,150,0,LBE,false,FLOORS);"
+        "console.log(JSON.stringify(out));"
+    ))
+    badges = re.findall(r'<g class="lfloor" data-role="floor" data-z="\d+" style="cursor:pointer" pointer-events="([a-z]+)">', out["svg"])
+    assert len(badges) == 2, out["svg"]
+    assert all(pe == "all" for pe in badges), badges
+
+
+def test_a_perimeter_shapes_hit_rect_carries_pointer_events(tmp_path):
+    """The perimeter shape (a partition/pool/etc drawn as a footprint, not a
+    point icon) has its OWN separate hit-target rect, which — unlike every
+    other hit primitive in this file — used to carry no pointer-events
+    attribute at all. Pinned on the same ghosted-floor axis as the other hit
+    primitives: "all" on the focused floor, "none" on the ghosted one."""
+    lbe = {
+        "light.main": {**_GHOST_LBE["light.main"], "shape": "perimeter"},
+        "light.up":   {**_GHOST_LBE["light.up"], "shape": "perimeter"},
+    }
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_GHOST_MODEL)};\nconst FLOORS={json.dumps(_FLOORS)};\n"
+        f"const LBE={json.dumps(lbe)};\nconst out={{}};\n"
+        "out.svg=M.buildIsoSVG(MODEL,{},new Set(),0,150,0,LBE,false,FLOORS);"
+        "console.log(JSON.stringify(out));"
+    ))
+    def perimeter_pe(svg, eid):
+        m = re.search(rf'<g class="lhex" data-eid="{re.escape(eid)}"[^>]*>.*?'
+                      r'<rect data-hit="1"[^>]*\spointer-events="([a-z]+)"', svg, re.S)
+        assert m, f"no perimeter hit rect found for {eid!r}"
+        return m.group(1)
+    assert perimeter_pe(out["svg"], "light.main") == "all", out["svg"]
+    assert perimeter_pe(out["svg"], "light.up") == "none", out["svg"]
+
+
 def test_empty_fabric_points_at_the_fabric_not_at_uploading_a_photo(tmp_path):
     out = _run_js(tmp_path, _harness(
         "const svg=M.buildIsoSVG({},{},new Set(),null,150,0,{},false,[]);"
@@ -514,6 +647,76 @@ def test_without_hit_halo_nothing_changes(tmp_path):
         "console.log(JSON.stringify(out));"
     ))
     assert "lhalo" not in out["svg"], "no hitHalo opt means no halos at all, unchanged"
+
+
+def _chip_y(svg: str, code: str) -> float:
+    m = re.search(rf'<text[^>]*\sy="([\d.]+)"[^>]*>{re.escape(code)}</text>', svg)
+    assert m, f"no code chip text found for code {code!r}"
+    return float(m.group(1))
+
+
+def _halo_cy(svg: str, eid: str) -> float:
+    m = re.search(rf'<circle class="lhalo" data-eid="{re.escape(eid)}"[^>]*\scy="([\d.]+)"', svg)
+    assert m, f"no halo found for {eid!r}"
+    return float(m.group(1))
+
+
+def test_a_crowded_code_chip_pulls_in_toward_its_marker(tmp_path):
+    """Same problem the 2026-09-09 halo fix solved, never applied to the code
+    chip: at a dense zoom the chip's gap from its marker scales with sx/sy
+    and can overshoot into a close neighbour's own space. The chip's gap is
+    now capped at half the distance to the nearest other marker, same as the
+    halo — so a crowded marker's chip sits closer to its own marker (smaller
+    gap) than an isolated marker's chip does. hitHalo is enabled alongside
+    codeChip purely to get each marker's projected (hx,hy) for free from the
+    halo circle's own cx/cy, so the gap can be measured relative to each
+    marker rather than compared as raw, incomparable page-y positions."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_HALO_MODEL)};\nconst FLOORS={json.dumps(_FLOORS)};\n"
+        f"const LBE={json.dumps(_HALO_LBE)};\nconst out={{}};\n"
+        "out.svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,{codeChip:true,hideCodes:false,hitHalo:true});"
+        "console.log(JSON.stringify(out));"
+    ))
+    svg = out["svg"]
+    gap_a = _chip_y(svg, "A01") - _halo_cy(svg, "light.a")
+    gap_b = _chip_y(svg, "A02") - _halo_cy(svg, "light.b")
+    gap_lonely = _chip_y(svg, "A03") - _halo_cy(svg, "light.lonely")
+    assert gap_a < gap_lonely, ("a crowded marker's code-chip gap must be smaller than an isolated marker's", gap_a, gap_lonely)
+    assert gap_b < gap_lonely, (gap_b, gap_lonely)
+
+
+def test_a_code_chip_never_shrinks_past_a_minimum_gap(tmp_path):
+    """Mirrors the halo's own HEX_R floor: two markers placed absurdly close
+    (1 cm apart) must still each get a chip offset by at least HEX_R, never
+    collapsed onto the marker itself."""
+    model = {**_HALO_MODEL, "light_positions_m": {
+        **_HALO_MODEL["light_positions_m"],
+        "light.b": {"x_m": 5.01, "y_m": 5.0, "floor_id": "main"},
+    }}
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\nconst FLOORS={json.dumps(_FLOORS)};\n"
+        f"const LBE={json.dumps(_HALO_LBE)};\nconst out={{}};\n"
+        "const f=M.fabricFrame(MODEL,FLOORS,150,0);\n"
+        "out.hexR=M.markerRadiusPx(f.scale);\n"
+        # hitHalo alongside codeChip: the halo circle's own cx/cy is drawn
+        # at exactly the marker's projected (hx,hy), giving a precise
+        # baseline to measure the chip's gap against without duplicating
+        # the iso projection math here.
+        "out.svg=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,{codeChip:true,hideCodes:false,hitHalo:true});"
+        "console.log(JSON.stringify(out));"
+    ))
+    ya = _chip_y(out["svg"], "A01")
+    hex_r = out["hexR"]
+    radii = _halo_radii(out["svg"])
+    hy = _halo_cy(out["svg"], "light.a")
+    assert radii, "sanity: halo must still draw alongside the code chip"
+    assert ya - hy > hex_r, (
+        "the code chip's gap from its marker must never collapse below HEX_R, "
+        "even when the nearest-neighbour clamp is at its tightest",
+        ya, hy, hex_r,
+    )
 
 
 # ── Beacons ───────────────────────────────────────────────────────────────

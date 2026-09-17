@@ -176,6 +176,27 @@ class Node {
         n.attributes && name in n.attributes &&
         (val === undefined || String(n.attributes[name]) === val));
     }
+    // tag.class[attr] / tag.class[attr="value"]: maps.js's own marker
+    // queries (isoDiv.querySelectorAll("g.lhex[data-eid]")) use exactly this
+    // compound shape, which neither branch above matches — additive only,
+    // since nothing before this point ever matched a selector containing a
+    // literal "." followed by more selector text.
+    const tcAt = /^([a-zA-Z][\w-]*)\.([\w-]+)\[([\w-]+)(?:=["']?([^\]"']*)["']?)?\]$/.exec(s);
+    if (tcAt) {
+      const [, tag, cls, name, val] = tcAt;
+      return all.filter(n =>
+        n.localName === tag &&
+        n.classList?.contains?.(cls) &&
+        n.attributes && name in n.attributes &&
+        (val === undefined || String(n.attributes[name]) === val));
+    }
+    // tag.class, no bracket (e.g. the press-ring's own "circle.lpress") —
+    // same additive reasoning as tag.class[attr] just above.
+    const tc = /^([a-zA-Z][\w-]*)\.([\w-]+)$/.exec(s);
+    if (tc) {
+      const [, tag, cls] = tc;
+      return all.filter(n => n.localName === tag && n.classList?.contains?.(cls));
+    }
     return all.filter(n => n.localName === s);
   }
   closest(sel) {

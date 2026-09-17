@@ -1063,7 +1063,17 @@
 .lv-stage{overflow:auto;width:100%;padding:10px;border-radius:14px;
   background:radial-gradient(120% 90% at 50% 0%,#0b1a10 0%,#071008 55%,#040a05 100%);
   border:1px solid rgba(120,190,155,.14);
-  box-shadow:inset 0 0 44px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.03)}
+  box-shadow:inset 0 0 44px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.03);
+  /* -webkit-touch-callout, not touch-action: this map relies on the
+     browser's OWN native one-finger scroll to pan (wireStageTouch only
+     handles the 2-finger pinch-zoom case), so touch-action:none here would
+     break panning, not just long-press. -webkit-touch-callout doesn't
+     touch scroll gestures at all — it only suppresses WebKit/iOS's native
+     long-press context menu, which could otherwise race the app's own
+     500ms hold timer and pop up an unrelated menu on a touch that landed
+     off one of the specific elements already opted into touch-action:none
+     (2026-09-16 finding). */
+  -webkit-touch-callout:none}
 .lv-stage::-webkit-scrollbar{height:9px;width:9px}
 .lv-stage::-webkit-scrollbar-thumb{background:rgba(120,190,155,.25);border-radius:999px;border:2px solid #040a05}
 

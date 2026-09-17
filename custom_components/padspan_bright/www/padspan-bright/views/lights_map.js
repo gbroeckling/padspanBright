@@ -291,6 +291,17 @@ export function spreadInRoom(pts, n, insetM = 0.5){
 // Movement past SLOP BEFORE arming cancels the gesture and hands it to the
 // map (pan). Pure: the host feeds it events and acts on what comes back.
 export const HOLD_MS = 500, PRESS_RING_MS = 150, SLOP_PX = 8;
+// `t` throughout is a timestamp, not wall-clock time — callers must pass
+// e.timeStamp (down/up, from the real event the browser captured) or
+// performance.now() (tick, called from a setTimeout with no event of its
+// own); both share one epoch. Garry, 2026-09-16, live: "a single press...
+// options are constantly popping up" — Date.now() sampled INSIDE the
+// handler measures when the handler finally ran, not when the finger
+// actually lifted; a busy main thread (this map is a large live SVG) can
+// delay a queued pointerup handler well past the real release, inflating
+// the measured hold past HOLD_MS for what was, physically, a clean fast
+// tap. e.timeStamp is captured by the browser at the real event, immune to
+// that delay.
 export function createHoldTracker({ holdMs = HOLD_MS, slopPx = SLOP_PX, canDrag = false } = {}){
   let st = null;
   return {
@@ -579,11 +590,11 @@ export function wireUseSurface(isoDiv, api){
       if (e.button !== undefined && e.button !== 0 && e.pointerType === "mouse") return;
       e.stopPropagation();
       try { g.setPointerCapture(e.pointerId); } catch (_) {}
-      tracker.down(e.clientX, e.clientY, Date.now());
+      tracker.down(e.clientX, e.clientY, Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now());
       if (holdable) {
         ringT = setTimeout(() => { if (tracker.active) ring = ringAt(cx, cy, ringR); }, PRESS_RING_MS);
         armT = setTimeout(() => {
-          if (tracker.tick(Date.now()) === "arm") { if (ring) ring.classList.add("armed"); dragBri = null; }
+          if (tracker.tick(performance.now()) === "arm") { if (ring) ring.classList.add("armed"); dragBri = null; }
         }, HOLD_MS);
       }
     });
@@ -616,7 +627,7 @@ export function wireUseSurface(isoDiv, api){
     });
     const finish = (e) => {
       if (!tracker.active) return;
-      const r = e.type === "pointercancel" ? tracker.cancel() : tracker.up(Date.now());
+      const r = e.type === "pointercancel" ? tracker.cancel() : tracker.up(Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now());
       clearAll();
       try { g.releasePointerCapture(e.pointerId); } catch (_) {}
       // Motion has nothing to switch — holdable is false for it, so it can
@@ -2318,6 +2329,37 @@ export function buildLightsMapCard(hostIn){
     mapCard.appendChild(bar);
   }
 
+  // 2026-09-16 live finding: the sticky toolbar (host.stickyToolbar, above)
+  // is a SIBLING of isoDiv, not a child of it — position:sticky pins it to
+  // the top of whatever scrolls, which on this tab is the outer page, not
+  // isoDiv's own internal pan/zoom scroll. So scrolling the PAGE (not
+  // panning the map) can bring the map's markers up underneath the
+  // toolbar's own opaque backdrop — which exists specifically so scrolled
+  // content never shows through it (see its own CSS comment), so a marker
+  // there isn't just unreachable, it is genuinely hidden, not merely
+  // mis-hit. Live reproduction: 3 of 5 sampled markers near the top of the
+  // stage resolved to the toolbar itself at their own drawn centre.
+  // A spacer sized to the toolbar's REAL rendered height (ResizeObserver,
+  // not a guessed constant — the row wraps to a different number of lines
+  // depending on viewport width and which panels are open) reserves that
+  // space instead, so the map's own content never starts high enough to
+  // reach that band in the first place. Sidebar host (stickyToolbar unset)
+  // gets no spacer — it never had the overlap to begin with.
+  if (host.stickyToolbar) {
+    const spacer = el("div", { style: "flex:0 0 auto" });
+    mapCard.appendChild(spacer);
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(() => {
+        spacer.style.height = ctrlRow.getBoundingClientRect().height + "px";
+      });
+      ro.observe(ctrlRow);
+    } else {
+      // No ResizeObserver (very old WebView) — a one-shot measurement
+      // after layout settles beats no protection at all, even though it
+      // won't track a later reflow (a window resize, say).
+      setTimeout(() => { spacer.style.height = ctrlRow.getBoundingClientRect().height + "px"; }, 0);
+    }
+  }
   mapCard.appendChild(isoDiv);
   const legend = buildShapeLegend(el, Object.values(host.lightsByEid));
   if (legend) mapCard.appendChild(legend);
@@ -2463,6 +2505,10 @@ export function buildLightsTable(host, lights){
     // point at the same things.
     const dimmed = !classMatches(l, host.classFilter);
     const isSel = !!(selected && selected.has(l.entity_id));
+    // Captured from the code cell's own swatch icon below, so the row's
+    // long-press ring (see onRowLongPress wiring, further down) has an
+    // existing SVG to draw into instead of needing one of its own.
+    let codeSwatchSvg = null;
     const row = el("tr", { "data-eid": l.entity_id,
       class: isSel ? "lv-row-sel" : "",
       style: `cursor:pointer;opacity:${isHidden ? "0.45" : (dimmed ? "0.4" : "1")}` }, [
@@ -2499,6 +2545,7 @@ export function buildLightsTable(host, lights){
         svg.setAttribute("viewBox", "0 0 15 15");
         svg.setAttribute("style", "vertical-align:-2px;margin-right:5px");
         svg.innerHTML = shapeSvg(l.shape, 7.5, 7.5, 5.6, `fill="none" stroke="${swatch}" stroke-width="1.6"`);
+        codeSwatchSvg = svg;
         return [svg, el("span", { style: `font-family:monospace;font-weight:700;color:${swatch};font-size:12px` }, l.code)];
       })()),
       el("td", {}, l.friendly_name),
@@ -2717,16 +2764,35 @@ export function buildLightsTable(host, lights){
       if (row._lpFired) { row._lpFired = false; return; }
       host.onRowClick(l);
     });
-    // Optional long-press (500ms) — the sidebar hangs the effects popup on
+    // Optional long-press (HOLD_MS) — the sidebar hangs the effects popup on
     // it so the plain tap stays the light switch; a host that passes no
-    // handler (the Mapping tab) keeps plain clicks only.
+    // handler (the Mapping tab) keeps plain clicks only. 2026-09-17 finding:
+    // this was the one hold gesture in the app with no gold press-ring, no
+    // touch-action of its own and no pointer capture — every marker hold
+    // (wireUseSurface, the Atlas builder, the room-name long-press) already
+    // has all three, so this looked scattered next to them: the same
+    // "open effects" action gave a visual warning on the map and none at
+    // all in the list. Reuses the code cell's own swatch icon as the ring's
+    // canvas instead of adding a second SVG just for this.
     if (host.onRowLongPress) {
-      let lpTimer = null;
-      row.addEventListener("pointerdown", () => {
+      row.style.touchAction = "none";
+      let lpTimer = null, ringT = null, ring = null, capturedId = null;
+      row.addEventListener("pointerdown", (ev) => {
         row._lpFired = false;
-        lpTimer = setTimeout(() => { row._lpFired = true; host.onRowLongPress(l); }, 500);
+        try { row.setPointerCapture(ev.pointerId); capturedId = ev.pointerId; } catch (_) {}
+        if (codeSwatchSvg) ringT = setTimeout(() => { ring = pressRing(codeSwatchSvg, 7.5, 7.5, 5.6); }, PRESS_RING_MS);
+        lpTimer = setTimeout(() => {
+          row._lpFired = true;
+          if (ring) ring.classList.add("armed");
+          host.onRowLongPress(l);
+        }, HOLD_MS);
       });
-      const lpCancel = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+      const lpCancel = () => {
+        if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+        if (ringT) { clearTimeout(ringT); ringT = null; }
+        if (ring) { try { ring.remove(); } catch (_) {} ring = null; }
+        if (capturedId !== null) { try { row.releasePointerCapture(capturedId); } catch (_) {} capturedId = null; }
+      };
       row.addEventListener("pointerup", lpCancel);
       row.addEventListener("pointerleave", lpCancel);
       row.addEventListener("pointercancel", lpCancel);

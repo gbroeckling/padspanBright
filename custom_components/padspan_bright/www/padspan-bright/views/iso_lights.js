@@ -3319,6 +3319,20 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       s+=`<polygon points="${pts([TL,TR,BR,BL])}" data-role="slabtop" fill="#0f2017" fill-opacity="0.05" stroke="${lyrColor}" stroke-width="1" stroke-dasharray="7,7" opacity="0.28"/>`;
     }
     if(lidx!==1) s+=`<polygon points="${pts([TL,TR,BR,BL])}" fill="url(#flrpat_${lidx})" stroke="none"/>`;
+    // Closed HERE, right after the slab's own polygons, not at the end of
+    // the floor's whole render. It used to stay open through the entire
+    // room/marker loop below and the floor badge after it, so EVERYTHING
+    // for this floor silently inherited pointer-events:none — including
+    // the floor badge, whose own comment above claimed it "keeps its own
+    // tap" while actually sitting inside this exact group (2026-09-16 live
+    // finding: Garry, "objects underneath are constantly hijacking the
+    // ability to simply turn on a light"). Every element below that truly
+    // needs to be tappable already sets pointer-events="all" on itself
+    // (BASE_HIT, the room-name rect, the code chip, halos) and is
+    // unaffected by this; what changes is that nothing can silently END UP
+    // inert by being added here without its own explicit override, the way
+    // the floor badge did.
+    s+=`</g>`;
 
     // `extra` carries data-* attributes (floor z, whether it is placed) so the
     // Mapping → Lights tab's build tools can act on any hex directly; the
@@ -3355,7 +3369,10 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         `<text x="${hx.toFixed(1)}" y="${cy.toFixed(1)}" text-anchor="middle" dominant-baseline="middle" `+
         `font-family="ui-monospace,monospace" font-size="${fs.toFixed(1)}" font-weight="700" `+
         `letter-spacing="0.06em" fill="${tCol}" pointer-events="none">${escSVG(l.code)}</text>`;
-      return `<g data-role="code" style="cursor:pointer" pointer-events="all">`+rect+text+`</g>`;
+      // Same ghosted-floor check as BASE_HIT above, for the same reason:
+      // this element's own explicit pointer-events would otherwise win over
+      // any "none" set on an ancestor.
+      return `<g data-role="code" style="cursor:pointer" pointer-events="${l._ghostedFloor?"none":"all"}">`+rect+text+`</g>`;
     };
     // suppressGlyph (Garry, 2026-09-07: "why do you keep all the old non
     // morphed stuff showing... weird choice?"): when this fixture's
@@ -3366,7 +3383,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     // rotate/scale transform, via the same layer() the body used),
     // the code label/chip and the <g data-eid/cx/cy> wrapper all stay,
     // so click/drag/tap and identity are untouched.
-    const markerSvg=(l,hx,hy,entry,extra="",suppressGlyph=false)=>{
+    const markerSvg=(l,hx,hy,entry,extra="",suppressGlyph=false,nearestNeighborDist=Infinity)=>{
       // A motion sensor's icon lights for the SAME window its pulse
       // flashes (motionActive — state, or the shared hold window), never
       // the raw state alone: an alarm zone's hardware clears in ~5s and
@@ -3439,7 +3456,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         return `<g class="lhex" data-eid="${escSVG(l.entity_id)}" data-cx="${hx.toFixed(1)}" data-cy="${hy.toFixed(1)}"`+
           `${extra?" "+extra:""} ${gAttrs} style="cursor:pointer" opacity="${op}">`+
           `<rect data-hit="1" x="${n(hx-HW)}" y="${n(hy-HW)}" width="${n(HW*2)}" height="${n(HW*2)}" `+
-          `rx="${n(HW*0.42)}" fill="transparent" stroke="none"/>`+
+          `rx="${n(HW*0.42)}" fill="transparent" stroke="none" pointer-events="${l._ghostedFloor?"none":"all"}"/>`+
           pLbl+`</g>`;
       }
       // Physical size and rotation, in real units. width_cm/height_cm and
@@ -3493,7 +3510,16 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // as one solid clickable object (Garry, 2026-09-13: "the center of
       // the object is selectable and hard to discern... These need to line
       // up and be visually more functional").
-      const BASE_HIT=`<circle data-hit="1" fill="transparent" stroke="none" pointer-events="all" `+
+      // A ghosted (non-focused) floor's markers must be genuinely inert,
+      // not just dim — they overlap the focused floor's own markers in iso
+      // space (2026-09-16 comment at gpe's definition). pointer-events set
+      // HERE, on the element that actually does the hit-testing, because a
+      // "none" on the wrapping <g> alone cannot override this circle's own
+      // explicit declaration — child overrides win regardless of ancestor
+      // state, which is exactly the class of bug the floorslab fix above
+      // was for. l._ghostedFloor is set once, at the one place in the
+      // render that knows it (see the jobs.push sites).
+      const BASE_HIT=`<circle data-hit="1" fill="transparent" stroke="none" pointer-events="${l._ghostedFloor?"none":"all"}" `+
         `cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${HEX_R}"/>`;
 
       let body;
@@ -3555,7 +3581,15 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // drawn size — Math.max(sx,sy) is a safe over-estimate at any rotation
       // (same reasoning `sw` above already uses) — so a fixture given a real
       // width/height (the resize handles) doesn't swallow its own chip.
-      const chipGap=HEX_R*Math.max(1,sx,sy)*1.15;
+      // Same neighbour-distance clamp haloSvg got on 2026-09-09 (Garry:
+      // "some of the clickable lights also activate the light next to
+      // them") — the chip is a hit target too (pointer-events="all" in
+      // codeChipSvg) and was never given it, so a dense room could still
+      // let one marker's chip sit on top of a different marker's own
+      // glyph and win the tap there instead. Same floor (never smaller
+      // than the marker's own footprint) and same ceiling shape (never
+      // past halfway to the nearest neighbour) as the halo.
+      const chipGap=Math.max(HEX_R, Math.min(HEX_R*Math.max(1,sx,sy)*1.15, nearestNeighborDist/2));
       // Garry: "devices telling the temperature can also act like a motion
       // sensor, so rule is if they gave the temperature in the last hour
       // and they are placed on the map, a shape can be chosen for that
@@ -3625,7 +3659,11 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     const haloSvg=(l,hx,hy,maxR)=>dimmed(l) ? "" :
       `<circle class="lhalo" data-eid="${escSVG(l.entity_id)}" data-class="${lightClassOf(l)}" `+
       `cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${Math.max(HEX_R,Math.min(HALO_R,maxR)).toFixed(1)}" fill="transparent" stroke="none" `+
-      `pointer-events="all" style="cursor:pointer"/>`;
+      // Same ghosted-floor check as BASE_HIT/codeChipSvg — an enlarged hit
+      // target on a background floor's marker is the LAST thing that
+      // should stay live, since it is exactly the "invisible thing wins the
+      // tap" shape of bug this whole class of fix targets.
+      `pointer-events="${l._ghostedFloor?"none":"all"}" style="cursor:pointer"/>`;
     // Use-mode stand-in for a room's pile of unplaced devices: one chip that
     // says how many, lit if any is on, carrying every entity id so the host
     // can open the room's sheet from it. Nothing here pretends to be a
@@ -5588,6 +5626,14 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
           // aura (only the floor-wide aura pass over PLACED lights calls
           // automorphAuraSvg), so its glyph must never be suppressed —
           // hiding it here would leave nothing drawn at all.
+          // _ghostedFloor: set here, not derived downstream — a light is
+          // placed on exactly one floor, so this is the only point in the
+          // whole render where "is MY floor the focused one right now" is
+          // known for this light. markerSvg/haloSvg/codeChipSvg all read it
+          // to decide whether their own hit target is live (see the
+          // matching comment at BASE_HIT below for why gpe alone, on the
+          // wrapping <g>, was never enough).
+          l._ghostedFloor = !isFocused;
           jobs.push([l, ccx+dx, ccy+dy, null, `data-z="${z}"`, roomClip.get(r), fx, false]);
         });
       });
@@ -5901,6 +5947,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         }
         if(col||spillSegs) fx={col, spill:spillSegs};
       }
+      l._ghostedFloor = !isFocused;
       jobs.push([l, hx, hy, pl.lp, `data-z="${z}" data-placed="1"`, clip, fx, auraPainted]);
     }
 
@@ -6038,25 +6085,49 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     // screen distance to its nearest neighbour on this floor — never below
     // HEX_R, so a marker's own visible shape is always at least as tappable
     // as it looks, whatever a crowded neighbourhood does to the halo around it.
-    if(HALO) for(let i=0;i<jobs.length;i++){
-      const [l2,hx,hy]=jobs[i];
+    // Nearest same-floor neighbour, per job — computed once and shared by
+    // every hit-target primitive that needs to stay clear of a neighbour's
+    // own hit target, not just the halo. (2026-09-16: the code chip below
+    // never got this same clamp when the halo did on 2026-09-09, so a
+    // dense room's chip could still sit on top of a different marker's own
+    // glyph and outrank it — same class of bug, same fix.)
+    const nearestDist = jobs.map((job,i)=>{
+      const [,hx,hy]=job;
       let nearest=Infinity;
       for(let k=0;k<jobs.length;k++){
         if(k===i) continue;
         // A dimmed neighbour (an active class filter hiding it) draws no
-        // halo of its own — nothing there to overlap with, so it must not
-        // shrink a VISIBLE marker's tap target just for sitting nearby.
+        // halo/chip of its own — nothing there to overlap with, so it must
+        // not shrink a VISIBLE marker's tap target just for sitting nearby.
         if(dimmed(jobs[k][0])) continue;
         const d=Math.hypot(jobs[k][1]-hx, jobs[k][2]-hy);
         if(d<nearest) nearest=d;
       }
-      s+=haloSvg(l2,hx,hy,nearest/2);
+      return nearest;
+    });
+    // Halos go under EVERY marker on the floor (see haloSvg); then the
+    // markers; then the use-mode stack chips, which stand in for markers.
+    // A halo enlarges the tap target well past the glyph itself — good for
+    // one isolated marker, but two markers placed closer together than
+    // 2×HALO_R apart get OVERLAPPING invisible discs, so a tap that looks
+    // like it lands on marker B's own visible shape can still fall inside
+    // marker A's halo and fire A instead. Garry, 2026-09-09: "some of the
+    // clickable lights also activate the light next to them when the shape
+    // implies that should not happen." Each halo is capped at half the
+    // screen distance to its nearest neighbour on this floor — never below
+    // HEX_R, so a marker's own visible shape is always at least as tappable
+    // as it looks, whatever a crowded neighbourhood does to the halo around it.
+    if(HALO) for(let i=0;i<jobs.length;i++){
+      const [l2,hx,hy]=jobs[i];
+      s+=haloSvg(l2,hx,hy,nearestDist[i]/2);
     }
     // Explicit arguments, not a blind spread: the tuple's positions 5/6
     // are clip/fx (consumed by the glow/shade passes above, not by
     // markerSvg), and position 7 is the aura-painted flag — a spread would
     // silently hand markerSvg the clip id as its suppressGlyph parameter.
-    for(const j of jobs) s+=markerSvg(j[0], j[1], j[2], j[3], j[4], !!j[7]);
+    // The 8th argument is this marker's own nearestDist entry, for the code
+    // chip's matching clamp inside markerSvg.
+    jobs.forEach((j,i)=>{ s+=markerSvg(j[0], j[1], j[2], j[3], j[4], !!j[7], nearestDist[i]); });
     for(const st of stacks) s+=stackChipSvg(...st);
 
     // Floor level badge
@@ -6067,11 +6138,15 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     // everything on this storey, all off — hangs off it.
     const badgeX=Math.max(18, Math.min(W-18, Math.round(BL[0])));
     const badgeY=Math.round(BL[1]);
-    s+=`<g class="lfloor" data-role="floor" data-z="${z}" style="cursor:pointer">`;
+    // pointer-events="all" here is belt-and-suspenders, not the fix itself
+    // (the floorslab group this used to sit inside, above, is what actually
+    // made it inert) — every real hit-target primitive in this file sets
+    // its own override rather than trusting an ancestor, and this one
+    // should not be the exception now that its ancestor problem is fixed.
+    s+=`<g class="lfloor" data-role="floor" data-z="${z}" style="cursor:pointer" pointer-events="all">`;
     if(SHOW) s+=`<circle cx="${badgeX}" cy="${badgeY}" r="19" fill="none" stroke="${lyrColor}" stroke-width="1" opacity="0.3"/>`;
     s+=`<circle cx="${badgeX}" cy="${badgeY}" r="15" fill="${lyrColor}" opacity="0.95"/>`;
     s+=`<text x="${badgeX}" y="${badgeY+6}" text-anchor="middle" fill="#071008" font-size="14" font-weight="700" pointer-events="none">${lidx+1}</text>`;
-    s+=`</g>`;
     s+=`</g>`;
   }
 

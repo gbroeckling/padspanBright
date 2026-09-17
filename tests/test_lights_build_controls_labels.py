@@ -162,6 +162,61 @@ def test_sticky_control_row_is_opt_in_per_host(tmp_path):
     assert out["sticky"] is True, "host.stickyToolbar: true must add lv-toolbar-sticky"
 
 
+# ResizeObserver's real browser behaviour — firing once immediately on
+# observe(), delivering the initial size — is what the dom shim's own
+# no-op stub does not do, so these two tests install a minimal stand-in
+# that does, purely to prove the WIRING (which element is observed, what
+# its callback writes) rather than anything about layout math itself.
+_RESIZE_OBSERVER_OVERRIDE = (
+    "globalThis.__roObserved = [];\n"
+    "globalThis.ResizeObserver = class {\n"
+    "  constructor(cb) { this.cb = cb; }\n"
+    "  observe(el) { globalThis.__roObserved.push(el); this.cb([{ target: el }]); }\n"
+    "  unobserve() {} disconnect() {}\n"
+    "};\n"
+)
+
+
+def test_sticky_toolbar_gets_a_spacer_sized_to_its_real_height(tmp_path):
+    """2026-09-17 finding: ctrlRow and isoDiv are SIBLINGS under mapCard, and
+    isoDiv is .lv-stage — its OWN internally-scrollable box — so a sticky
+    ctrlRow (position:sticky pins to the nearest ANCESTOR scroll context,
+    not a sibling's own scroll) pins against the outer PAGE scroll and can
+    float over the map's markers instead of reserving room above them. A
+    spacer sibling, kept at the toolbar's live rendered height via
+    ResizeObserver (never a guessed constant — the row wraps differently by
+    viewport width and which panels are open), holds that space open."""
+    out = _run(_RESIZE_OBSERVER_OVERRIDE + _base_host("  stickyToolbar: true,\n") + (
+        "const ctrlRow = card.querySelector('.lv-toolbar');\n"
+        "const isoDiv = card.querySelector('.lv-stage');\n"
+        "const kids = [...card.children];\n"
+        "const spacer = kids.find(c => c.getAttribute && c.getAttribute('style') === 'flex:0 0 auto');\n"
+        "out.hasSpacer = !!spacer;\n"
+        "out.spacerBeforeIsoDiv = !!spacer && kids.indexOf(spacer) < kids.indexOf(isoDiv);\n"
+        "out.observedCtrlRow = globalThis.__roObserved.includes(ctrlRow);\n"
+        "out.spacerHeight = spacer ? spacer.style.height : null;\n"
+        "out.rectHeight = ctrlRow.getBoundingClientRect().height;\n"
+    ))
+    assert out["hasSpacer"] is True, "a sticky toolbar must get a spacer sibling"
+    assert out["spacerBeforeIsoDiv"] is True, "the spacer must sit above isoDiv, not below it"
+    assert out["observedCtrlRow"] is True, "the ResizeObserver must observe the real control row, not a guess"
+    assert out["spacerHeight"] == f'{out["rectHeight"]}px', (
+        "the spacer's height must track the control row's actual rendered height", out)
+
+
+def test_no_stray_spacer_when_the_toolbar_is_not_sticky(tmp_path):
+    """The sidebar host (lights_panel.js, stickyToolbar unset) never had the
+    sticky-overlap problem — it must get no spacer and no ResizeObserver at
+    all, not just an invisible/zero-height one."""
+    out = _run(_RESIZE_OBSERVER_OVERRIDE + _base_host("") + (
+        "const kids = [...card.children];\n"
+        "out.hasSpacer = kids.some(c => c.getAttribute && c.getAttribute('style') === 'flex:0 0 auto');\n"
+        "out.observedAnything = globalThis.__roObserved.length > 0;\n"
+    ))
+    assert out["hasSpacer"] is False, "a non-sticky host must get no spacer div at all"
+    assert out["observedAnything"] is False, "a non-sticky host must never even construct a ResizeObserver"
+
+
 def test_show_beacons_toggle_is_opt_in_and_off_by_default(tmp_path):
     """Garry, 2026-09-09: "Show beacons on lighting page should be
     selectable, and off by default." The button itself only exists when the
