@@ -43,11 +43,18 @@ _AUTOMORPH_STYLES = (
     "orbitring", "puzzle", "extrude", "shatter",
 )
 _SHOWCASE_THEMES = (
-    "classic", "cinematic_glass", "neo_hud", "editorial_minimalist",
+    # 2026-09-16: editorial_minimalist, elevated_blueprint and nightscape
+    # were removed as near-duplicates (a similarity pass over all 22 put
+    # each within 0.5 of a theme it added nothing to). A saved preset or a
+    # live setting still naming one falls back to "classic" through
+    # _normalize_showcase_theme, exactly as the sanitizer was built for.
+    # tests/test_showcase_registry_parity.py holds this tuple equal to the
+    # frontend's SHOWCASE_THEMES so the two can never drift silently again.
+    "classic", "cinematic_glass", "neo_hud",
     "ambient_premium", "dataviz_precision", "organic_bioluminescent",
-    "elevated_blueprint", "material_you", "neon_precision", "luxury_realestate",
+    "material_you", "neon_precision", "luxury_realestate",
     "wabi_sabi", "hygge", "aurora", "automotive_hud", "art_deco",
-    "swiss_style", "bauhaus", "nightscape", "holographic", "retro_futurism",
+    "swiss_style", "bauhaus", "holographic", "retro_futurism",
     "obsidian_noir",
 )
 

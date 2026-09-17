@@ -2183,7 +2183,12 @@ export function buildLightsMapCard(hostIn){
     const presetSel = document.createElement("select");
     presetSel.className = "lv-select";
     presetSel.title = "A saved combination of Theme, Automorph, the other Showcase controls, and the Floor / Spacing / L-R layout";
-    presetSel.appendChild(el("option", { value: "" }, presets.length ? "— Select a look —" : "No saved looks yet"));
+    // "▾" in the option text, because this select and the name box beside it
+    // are styled as the same dark pill (lv-select / lv-preset-name) and read
+    // as two typing fields — Garry, 2026-09-16: "you are asking for typing in
+    // two places, one works, other not". The one that "didn't" was this
+    // dropdown eating keystrokes. The chevron says which is which.
+    presetSel.appendChild(el("option", { value: "" }, presets.length ? "▾ Choose a saved look" : "▾ No saved looks yet"));
     for (const p of presets) presetSel.appendChild(el("option", { value: p.name }, p.name));
     presetBar.appendChild(presetSel);
 
@@ -2205,7 +2210,7 @@ export function buildLightsMapCard(hostIn){
       const nameInput = document.createElement("input");
       nameInput.type = "text";
       nameInput.className = "lv-preset-name";
-      nameInput.placeholder = "Name this look…";
+      nameInput.placeholder = "Type a name to save as…";
       nameInput.maxLength = 60;
       presetBar.appendChild(nameInput);
 
