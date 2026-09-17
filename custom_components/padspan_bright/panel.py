@@ -130,12 +130,12 @@ async def async_setup_panel(hass: HomeAssistant) -> None:
             hass=hass,
             webcomponent_name=LIGHTS_WEB_COMPONENT,
             frontend_url_path="padspan-bright-lights",
-            sidebar_title="Lights",
+            sidebar_title="Atlas",
             sidebar_icon="mdi:lightbulb-group",
             require_admin=False,
             module_url=f"{STATIC_URL}/padspan-bright/lights_panel.js?v={VERSION}&b={ASSET_ID}",
             config={
-                "title": "Lights",
+                "title": "Atlas",
                 "version": VERSION,
             },
         )

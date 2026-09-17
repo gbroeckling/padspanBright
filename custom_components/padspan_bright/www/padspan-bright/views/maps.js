@@ -103,7 +103,7 @@ export function render(ctx){
   // without a key, which left PadSpan Bright's free program with no map at all.
   const tabDefs = isBasic
     ? [["library","Library"],["upload","Upload"]]
-    : [["library","Library"],["upload","Upload"],["edit","Edit"],["stack","3D Stack"],["rooms","Rooms"],["lights","Lights"],["export","Export"],["help","Help"]];
+    : [["library","Library"],["upload","Upload"],["edit","Edit"],["stack","3D Stack"],["rooms","Rooms"],["lights","Atlas"],["export","Export"],["help","Help"]];
 
   // If current tab is not in basic tab list, reset to library
   if(isBasic && tab !== "library" && tab !== "upload"){
@@ -3768,8 +3768,8 @@ function _export(ctx, active, maps_list){
 
 const BRIGHT_PRO_MANUAL = [
   {
-    "heading": "Getting started: your licence and turning on the Lights panel",
-    "intro": "Bright Pro adds the tools for placing and styling fixtures on your map. Enter the licence key in Settings → Features. The separate Lights panel is turned on from the same page and does not require a Pro key.",
+    "heading": "Getting started: your licence and turning on the Atlas panel",
+    "intro": "Bright Pro adds the tools for placing and styling fixtures on your map. Enter the licence key in Settings → Features. The separate Atlas panel is turned on from the same page and does not require a Pro key.",
     "subsections": [
       {
         "heading": "What your licence unlocks",
@@ -3791,20 +3791,20 @@ const BRIGHT_PRO_MANUAL = [
         ]
       },
       {
-        "heading": "Turn on the everyday Lights panel",
+        "heading": "Turn on the everyday Atlas panel",
         "body": "",
         "steps": [
           "In Settings → Features, scroll down to the Mapped Light Control Goodie card, check Enable Mapped Light Control in sidebar, and click Save.",
-          "Restart Home Assistant. A separate Lights entry appears in your sidebar afterward — that's the one to use day to day, not the PadSpan Mapping tab."
+          "Restart Home Assistant. A separate Atlas entry appears in your sidebar afterward — that's the one to use day to day, not the PadSpan Mapping tab."
         ],
         "notes": [
-          "Unchecking the box, saving, and restarting again removes the Lights entry the same way."
+          "Unchecking the box, saving, and restarting again removes the Atlas entry the same way."
         ]
       }
     ]
   },
   {
-    "heading": "The Lights panel: everyday control",
+    "heading": "The Atlas panel: everyday control",
     "intro": "This is the panel you open day to day — a 3D map of your house, floor by floor, with every light, strip, fan, motion sensor and temperature sensor sitting where it really is. Use it to switch things on and off, dim, and see what's happening in each room. (The map is drawn and edited in a different tool; admins can jump there from this panel.)",
     "subsections": [
       {
@@ -3935,11 +3935,11 @@ const BRIGHT_PRO_MANUAL = [
   },
   {
     "heading": "Placing your lights",
-    "intro": "Open Mapping → Lights, then place each light, fan, motion sensor and temperature sensor where it is installed. Resize and rotate the fixtures that need it. The index below the map helps you find and queue them, or undo a change.",
+    "intro": "Open Mapping → Atlas, then place each light, fan, motion sensor and temperature sensor where it is installed. Resize and rotate the fixtures that need it. The index below the map helps you find and queue them, or undo a change.",
     "subsections": [
       {
         "heading": "Place a light",
-        "body": "Open Mapping → Lights. Every light starts out clustered at the centre of its room, waiting to be placed. There are two ways to move it to its real spot: drag it there directly, or queue it and tap the map.",
+        "body": "Open Mapping → Atlas. Every light starts out clustered at the centre of its room, waiting to be placed. There are two ways to move it to its real spot: drag it there directly, or queue it and tap the map.",
         "steps": [
           "To place one by dragging: click its marker on the map and drag it to where the fixture really sits, then let go.",
           "To place one by tapping: click + Place next to its row in the light index below the map — or click \"Queue all unplaced\" to queue every unplaced light in the house at once.",
@@ -8210,7 +8210,7 @@ function _wireTransformHandles(ctx, svg, g, eid, frame, o, toVB) {
 // different surface (padspan_bright_lights_coach_seen, lights_panel.js).
 function _lightsTourSteps(paid){
   const steps = [
-    { title: "Welcome to the Lights builder",
+    { title: "Welcome to the Atlas builder",
       body: "Every light starts out clustered at the centre of its room. This is where you tell PadSpan exactly where each one really hangs — and, if you have a key, its shape, size, colour and effects too.",
       find: null },
     { title: "Place a light",
@@ -8233,7 +8233,7 @@ function _lightsTourSteps(paid){
       find: null });
   }
   steps.push({ title: "You're set",
-    body: "Undo (Ctrl+Z) and Redo (Ctrl+Y) cover every edit before you save. Save Layout when you're happy — the separate Lights entry in your sidebar is what your household uses day to day, and it shows exactly what you just built here.",
+    body: "Undo (Ctrl+Z) and Redo (Ctrl+Y) cover every edit before you save. Save Layout when you're happy — the separate Atlas entry in your sidebar is what your household uses day to day, and it shows exactly what you just built here.",
     find: null });
   return steps;
 }
@@ -8416,7 +8416,7 @@ function _lightsTab(ctx, maps, active) {
   const preview = paid && !!mapState._lightsPreview;
   const head = el("div", { class: "card lv-mapcard", style: "margin-bottom:12px" }, [
     el("div", { class: "card-head", style: "display:flex;gap:10px;align-items:center;flex-wrap:wrap" }, [
-      el("div", { class: "lv-hero-title", style: "font-size:16px" }, "Lights"),
+      el("div", { class: "lv-hero-title", style: "font-size:16px" }, "Atlas"),
       // The mode, unmistakably: this tab EDITS the map the sidebar shows. A
       // map that both operates and moves devices is a mode error waiting to
       // happen, so the badge (and the drafting grid on the stage) say which
@@ -8425,8 +8425,8 @@ function _lightsTab(ctx, maps, active) {
         preview ? "Preview · as the sidebar" : "Editing")] : []),
       el("span", { class: "lv-hint" }, paid
         ? (preview
-          ? "Exactly what the Lights sidebar does with this map: tap switches, code or hold opens controls, room names open the room."
-          : "Builds the Lights sidebar's map — what you arrange here is exactly what the sidebar shows. Click a hex to select a light; drag it to where it really is. Shift-click or click a room name to select several. Can't find one on the map? Pick it in the list below — a ring flashes its spot, and the pink marker in the corner drags it into place.")
+          ? "Exactly what the Atlas sidebar does with this map: tap switches, code or hold opens controls, room names open the room."
+          : "Builds the Atlas sidebar's map — what you arrange here is exactly what the sidebar shows. Click a hex to select a light; drag it to where it really is. Shift-click or click a room name to select several. Can't find one on the map? Pick it in the list below — a ring flashes its spot, and the pink marker in the corner drags it into place.")
         : "Every light in the house, one marker each, in its room. Click a marker to switch it."),
       (() => {
         const b = el("button", { class: "btn inline", style: "font-size:11px;margin-left:auto" }, "🎓 Guide me");
@@ -8614,7 +8614,7 @@ function _lightsTab(ctx, maps, active) {
     el("span", { class: "lv-sep" }, ""),
     el("button", {
       class: "lv-tgl tone-green",
-      title: "See this map exactly as the Lights sidebar shows it, without leaving the builder",
+      title: "See this map exactly as the Atlas sidebar shows it, without leaving the builder",
       onclick: () => { mapState._lightsPreview = true; ctx.actions.renderRooms(); },
     }, "▶ Preview as sidebar"),
     el("span", { class: "lv-check", style: "margin-left:auto" }, [

@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.42";
-const BUILD_ID = "20260916T002107Z";
+const APP_VERSION = "0.38.43";
+const BUILD_ID = "20260917T010720Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -393,11 +393,11 @@ class PadSpanLightsApp extends HTMLElement {
     // The lv- vocabulary from styles.css (loaded in this shadow root), so the
     // sidebar and the Mapping tab wear the same face.
     root.appendChild(el("div",{class:"lv-hero"},[
-      el("div",{class:"lv-hero-title"},"Lights"),
+      el("div",{class:"lv-hero-title"},"Atlas"),
       el("span",{class:"lv-ver"},`v${APP_VERSION}`),
       el("span",{class:"lv-hint"},"Tap a light to switch it \u00b7 tap its code or hold for controls \u00b7 tap a room name for the whole room \u00b7 motion, temperature and air-quality tiles are read-only"),
       // Admin only: the pencil to the builder. Same map, the other tool.
-      ...(this._isAdmin() ? [el("button",{class:"lv-act",style:"margin-left:auto",title:"Open Mapping \u2192 Lights",
+      ...(this._isAdmin() ? [el("button",{class:"lv-act",style:"margin-left:auto",title:"Open Mapping \u2192 Atlas",
         onclick:()=>this._gotoBuilder(null)},"\u270e Edit map")] : []),
       el("button",{class:"lv-act",style:this._isAdmin()?"":"margin-left:auto",onclick:()=>{
         this._regStore.reg=null; this._boot().then(()=>this._render());
