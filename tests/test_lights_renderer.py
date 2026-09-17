@@ -3293,6 +3293,78 @@ def test_automorph_ring_at_half_percent_sits_strictly_between_icon_and_room(tmp_
         )
 
 
+# 2026-09-17: v1 (2026-09-07) only gave circle/bar/square a real outline —
+# every other choosable shape (pendant, sconce, chandelier, triangle,
+# diamond, line, lock, door) fell back to the plain hex, so no matter which
+# of the ~12 shapes a fixture was set to, Automorph morphed the SAME hex
+# outline every time (Garry: "looks like I have only one base shape choice
+# that I can play with"). These pin that each of the newly-covered shapes
+# now has its OWN outline, distinct from hex, and that the distinction
+# survives all the way through automorphRing's own morph — not just at t=0.
+_NEWLY_COVERED_SHAPES = ["line", "triangle", "diamond", "sconce", "pendant",
+                         "chandelier", "fan", "lock", "door"]
+
+
+def test_every_newly_covered_shape_has_its_own_outline_not_the_hex_fallback(tmp_path):
+    out = _run_js(tmp_path, (
+        "import { iconRingLocal } from './iso_lights.mjs';\n"
+        "const hex=JSON.stringify(iconRingLocal('hex', 10));\n"
+        f"const shapes={json.dumps(_NEWLY_COVERED_SHAPES)};\n"
+        "const rings=Object.fromEntries(shapes.map(s=>[s, iconRingLocal(s, 10)]));\n"
+        "const sameAsHex=Object.fromEntries(shapes.map(s=>[s, JSON.stringify(rings[s])===hex]));\n"
+        "console.log(JSON.stringify({sameAsHex}));\n"
+    ))
+    collapsed = [s for s, same in out["sameAsHex"].items() if same]
+    assert not collapsed, f"these shapes still collapse to the plain hex outline: {collapsed}"
+
+
+def test_every_newly_covered_shape_is_a_real_non_degenerate_ring(tmp_path):
+    """Each outline must actually enclose a real area — a degenerate ring
+    (all points collinear, or too few distinct points) would silently
+    collapse the morph to nothing, which is worse than the old hex
+    fallback, not better."""
+    out = _run_js(tmp_path, (
+        "import { iconRingLocal, alignRingStart } from './iso_lights.mjs';\n"
+        f"const shapes={json.dumps(_NEWLY_COVERED_SHAPES)};\n"
+        "const area=(pts)=>{let a=0;for(let i=0,j=pts.length-1;i<pts.length;j=i++)a+=pts[j][0]*pts[i][1]-pts[i][0]*pts[j][1];return Math.abs(a/2);};\n"
+        "const areas=Object.fromEntries(shapes.map(s=>[s, area(alignRingStart(iconRingLocal(s, 10)))]));\n"
+        "console.log(JSON.stringify({areas}));\n"
+    ))
+    for shape, a in out["areas"].items():
+        assert a > 1.0, f"{shape}'s outline encloses almost no area ({a}) — looks degenerate"
+
+
+def test_two_different_shapes_morph_into_different_rings_at_the_same_room(tmp_path):
+    """The actual end-to-end proof: pendant and sconce, morphed halfway
+    toward the identical room, must land on DIFFERENT points — the shape
+    choice now survives all the way through the morph, not just at t=0."""
+    out = _run_js(tmp_path, (
+        "import { iconRingLocal, automorphRing } from './iso_lights.mjs';\n"
+        "const room=[[0,0],[100,0],[100,100],[0,100]];\n"
+        "const pendant=automorphRing(iconRingLocal('pendant', 10), 50, 50, room, 0.5);\n"
+        "const sconce=automorphRing(iconRingLocal('sconce', 10), 50, 50, room, 0.5);\n"
+        "console.log(JSON.stringify({pendant, sconce, equal: JSON.stringify(pendant)===JSON.stringify(sconce)}));\n"
+    ))
+    assert not out["equal"], "pendant and sconce must not morph into the identical ring"
+
+
+@pytest.mark.parametrize("shape", _NEWLY_COVERED_SHAPES)
+def test_newly_covered_shapes_keep_the_rest_position_contract(tmp_path, shape):
+    """Same contract test_automorph_ring_at_zero_percent_is_the_icon_
+    completely_untouched already pins for hex — extended across every
+    newly-covered shape, since a shape only newly reachable here must not
+    have skipped the same t=0 exact-passthrough guarantee."""
+    out = _run_js(tmp_path, (
+        "import { iconRingLocal, automorphRing } from './iso_lights.mjs';\n"
+        f"const icon=iconRingLocal({json.dumps(shape)}, 10);\n"
+        "const room=[[0,0],[200,0],[200,200],[0,200]];\n"
+        "const ring=automorphRing(icon, 50, 60, room, 0);\n"
+        "const expect=icon.map(p=>[p[0]+50, p[1]+60]);\n"
+        "console.log(JSON.stringify({equal: JSON.stringify(ring)===JSON.stringify(expect)}));\n"
+    ))
+    assert out["equal"], f"{shape}: t=0 must exactly equal its own icon points, untouched"
+
+
 def test_best_rotational_match_recovers_a_cyclic_shift(tmp_path):
     """Ring correspondence must come from geometry, not from each ring's own
     'topmost point' guess: two copies of the SAME ring, one cyclically

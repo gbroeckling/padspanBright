@@ -932,11 +932,23 @@ export function alignRingStart(pts){
 }
 
 // A small icon's own outline, LOCAL space centred on (0,0), at the same
-// radius shapeSvg's own glyphs use — v1 covers only the simple, roughly
-// convex families the design doc scopes for a first pass (circle, bar,
-// square); every other kind (fan, pendant, lock, hex itself, ...) falls
-// back to the plain hexagon every unstyled fixture already draws as, so an
-// unrecognised shape still morphs into something rather than nothing.
+// radius shapeSvg's own glyphs use. Every shape that draws as a single
+// convex-ish primitive there (circle, bar, square, triangle, diamond,
+// sconce, line) gets its own outline here, ported straight from shapeSvg's
+// own geometry so a fixture keeps its real silhouette through the morph
+// instead of losing it the instant Automorph turns on (Garry, 2026-09-17:
+// "you took theme and style and did something completely different...
+// looks like I have only one base shape choice that I can play with" — v1
+// shipped 2026-09-07 covering only circle/bar/square, so the other nine
+// choosable shapes all fell back to this same hex regardless of which one
+// was actually picked). A COMPOUND glyph (pendant's rod+shade, chandelier/
+// fan's hub+arms, lock's shackle+body) keeps only its single dominant mass
+// as one ring — automorphRing needs one simple, non-self-intersecting
+// outline to morph, not the full multi-piece drawing shapeDetailSvg adds on
+// top. Only the true sensor readouts (motion/temp/humidity/air) and the
+// fan DOMAIN class stay on hex, matched by the render's own gate on
+// isMotion/isFan/isTemp/isAir/isHumidity a few hundred lines down — they
+// never reach this function's output at all.
 export function iconRingLocal(shape, r){
   const HW=r*0.866;
   if(shape==="circle"){
@@ -947,6 +959,48 @@ export function iconRingLocal(shape, r){
   if(shape==="bar" || shape==="square"){
     const h=shape==="bar" ? r*0.55 : HW;
     return [[-HW,-h],[HW,-h],[HW,h],[-HW,h]];
+  }
+  // A run of light — slimmer than bar, same body shapeSvg's own "line"
+  // case draws (the end-cap flares are lost in this simplification, same
+  // trade-off every compound glyph below makes).
+  if(shape==="line"){
+    const h=r*0.17;
+    return [[-HW,-h],[HW,-h],[HW,h],[-HW,h]];
+  }
+  if(shape==="triangle") return [[0,-r],[HW,r*0.62],[-HW,r*0.62]];
+  if(shape==="diamond") return [[0,-r],[HW,0],[0,r],[-HW,0]];
+  // The half-round wall-sconce dome, flat edge down — shapeSvg's own
+  // arcPts(cx,base,HW,HW*1.3,180,360,14) with the fixture at the origin.
+  if(shape==="sconce") return arcPts(0, HW*0.5, HW, HW*1.3, 180, 360, 14);
+  // The shade's own dome — the fixture's dominant visual mass. The thin
+  // drop rod above it is lost in this simplification.
+  if(shape==="pendant") return arcPts(0, r*0.24, HW, HW*0.8, 0, 360, AUTOMORPH_N);
+  // The same alternating-radius star shapeSvg draws for chandelier (16
+  // points, sharp); fan gets the same technique at 8 points — a blunter,
+  // squarer pinwheel next to chandelier's star, distinct from diamond's
+  // plain 4-point outline. Real fan.* domain entities never reach this
+  // function (excluded a few hundred lines down); this only helps a
+  // light.* fixture that happened to derive or get overridden to "fan".
+  if(shape==="chandelier" || shape==="fan"){
+    const spokes = shape==="chandelier" ? 16 : 8;
+    const pts=[];
+    for(let k=0;k<spokes;k++){
+      const a=(k*(360/spokes)-90)*Math.PI/180, rr=(k%2) ? HW*0.44 : HW;
+      pts.push([rr*Math.cos(a), rr*Math.sin(a)]);
+    }
+    return pts;
+  }
+  // The lock's body — its shackle is lost in this simplification, same
+  // trade-off pendant's drop rod makes.
+  if(shape==="lock"){
+    const bodyW=HW*1.3, bodyH=HW*0.9, top=HW*0.15;
+    return [[-bodyW/2,top],[bodyW/2,top],[bodyW/2,top+bodyH],[-bodyW/2,top+bodyH]];
+  }
+  // The door leaf, portrait-proportioned like shapeSvg's own — its handle
+  // dot is lost in this simplification.
+  if(shape==="door"){
+    const bodyW=HW*0.9, bodyH=r*1.5;
+    return [[-bodyW/2,-bodyH/2],[bodyW/2,-bodyH/2],[bodyW/2,bodyH/2],[-bodyW/2,bodyH/2]];
   }
   const pts=[];
   for(let k=0;k<6;k++){ const a=(90+k*60)*Math.PI/180; pts.push([r*Math.cos(a), r*Math.sin(a)]); }
