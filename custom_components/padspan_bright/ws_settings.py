@@ -37,10 +37,15 @@ _LOGGER = logging.getLogger(__name__)
 # theme key persist forever in someone's saved presets), so a new style or
 # theme only ever needs adding in ONE Python-side place.
 _AUTOMORPH_STYLES = (
-    "glow", "blueprint", "nebula", "circuit", "contour", "facet",
-    "sumie", "stainedglass", "constellation", "halo", "pulse",
-    "spikecrown", "scallop", "bloomflower", "geode", "honeycomb",
-    "orbitring", "puzzle", "extrude", "shatter",
+    # 2026-09-17: circuit, contour, facet, sumie, stainedglass,
+    # constellation, pulse, orbitring, puzzle and shatter removed as
+    # near-duplicates of each other and of glow — see AUTOMORPH_STYLE_LABELS
+    # in iso_lights.js for why. A saved preset or live setting still naming
+    # one falls back to "glow" through _normalize_automorph_style below,
+    # exactly as the sanitizer was built for.
+    "glow", "blueprint", "nebula", "halo", "spikecrown", "scallop",
+    "bloomflower", "geode", "honeycomb", "extrude",
+    "shardburst", "origami", "inkbleed", "rosette", "lensflare", "mycelium",
 )
 _SHOWCASE_THEMES = (
     # 2026-09-16: editorial_minimalist, elevated_blueprint and nightscape

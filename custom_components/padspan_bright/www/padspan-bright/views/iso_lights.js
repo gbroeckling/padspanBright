@@ -694,13 +694,22 @@ export const SHOWCASE_THEME_NAMES = Object.keys(SHOWCASE_THEMES);
 // AUTOMORPH_STYLE silently falling back to "glow" and no error anywhere:
 // exactly what happened here while building the 9 shape styles below,
 // caught only by comparing rendered output against the expected shapes.
+// 2026-09-17: circuit, contour, facet, sumie, stainedglass, constellation,
+// pulse, orbitring, puzzle and shatter cut on Garry's word — a side-by-side
+// grid of every style at once showed they all read as "a soft blob with a
+// different border decoration", the same silhouette every time, only the
+// linework changed. Replaced with six genuinely different SILHOUETTES —
+// each one reshapes the actual ring geometry (like spikecrown/scallop
+// already did) rather than decorating the same shared outline, so the
+// difference survives at real map-marker scale, not just in a full-screen
+// close-up.
 export const AUTOMORPH_STYLE_LABELS = {
-  glow: "Glow", blueprint: "Blueprint", nebula: "Nebula", circuit: "Circuit",
-  contour: "Contour", facet: "Facet", sumie: "Ink Wash", stainedglass: "Stained Glass",
-  constellation: "Constellation", halo: "Halo", pulse: "Pulse",
-  spikecrown: "Spike Crown", scallop: "Scalloped Wave", bloomflower: "Bloom",
-  geode: "Geode Cluster", honeycomb: "Honeycomb", orbitring: "Orbit Rings",
-  puzzle: "Puzzle Piece", extrude: "Block Extrude", shatter: "Shatter",
+  glow: "Glow", blueprint: "Blueprint", nebula: "Nebula",
+  halo: "Halo", spikecrown: "Spike Crown", scallop: "Scalloped Wave",
+  bloomflower: "Bloom", geode: "Geode Cluster", honeycomb: "Honeycomb",
+  extrude: "Block Extrude",
+  shardburst: "Shard Burst", origami: "Origami Fold", inkbleed: "Ink Bleed",
+  rosette: "Rosette", lensflare: "Lens Flare", mycelium: "Mycelium",
 };
 export const AUTOMORPH_STYLE_NAMES = Object.keys(AUTOMORPH_STYLE_LABELS);
 
@@ -4142,251 +4151,6 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
           `<path d="${d}" fill="${duo}" fill-opacity="${opac((on?0.26:0.17)+0.45*t+weightOffPct*0.004)}" `+
           `stroke="none" mask="url(#psautomorphmask)" pointer-events="none"/>`), edge:""};
       }
-      // Five more exploratory treatments (Garry, 2026-09-09: "dig around
-      // hard for 5 more candidates... look at what other options are out
-      // there in the artistic world") — same ring/d/on/t/ink/duo contract
-      // as blueprint/nebula above, nothing new required of the geometry.
-      if(AUTOMORPH_STYLE==="circuit"){
-        // State reads as electrical continuity, not brightness: off is a
-        // broken dashed trace with hollow via pads (unpowered bare
-        // copper); on closes into one solid trace with filled diamond
-        // pads (current has continuity). No wash, no blur — pure ink,
-        // `duo` reserved only for the on-state pad fill so state never
-        // reads as a hue swap.
-        const traceOp = on ? (0.70+0.30*t) : (0.45+0.25*t);
-        const traceWidth = on ? 2.2 : 1.8;
-        const traceDash = on ? "none" : "3 5";
-        const mainTrace = `<path d="${d}" fill="none" stroke="${ink}" stroke-width="${swid(traceWidth)}" stroke-linejoin="miter" stroke-linecap="square" stroke-dasharray="${traceDash}" opacity="${opac(traceOp)}" pointer-events="none"/>`;
-
-        const viaCount = Math.max(3, Math.round(3+4*t));
-        const step = Math.max(1, Math.floor(ring.length/viaCount));
-        const markerOp = on ? (0.55+0.35*t) : (0.35+0.25*t);
-        const stubLen = 5+3*t;
-        const padSize = (on ? 3.4 : 2.6)+1.2*t;
-
-        let vias = "";
-        for(let i=0;i<ring.length;i+=step){
-          const vx = ring[i][0], vy = ring[i][1];
-          const horiz = Math.floor(i/step)%2===0;
-          const dir = (i%4<2) ? 1 : -1;
-          const sx = horiz ? dir*stubLen : 0;
-          const sy = horiz ? 0 : dir*stubLen;
-          const pad = on
-            ? `<rect x="${vx-padSize/2}" y="${vy-padSize/2}" width="${padSize}" height="${padSize}" transform="rotate(45 ${vx} ${vy})" fill="${duo}" pointer-events="none"/>`
-            : `<rect x="${vx-padSize/2}" y="${vy-padSize/2}" width="${padSize}" height="${padSize}" fill="none" stroke="${ink}" stroke-width="${swid(0.75)}" pointer-events="none"/>`;
-          vias += `<g opacity="${opac(markerOp)}" pointer-events="none"><line x1="${vx}" y1="${vy}" x2="${vx+sx}" y2="${vy+sy}" stroke="${ink}" stroke-width="${swid(on?1:0.75)}" stroke-linecap="square" pointer-events="none"/>${pad}</g>`;
-        }
-
-        return {glow: "", edge: clipWrap(`<g pointer-events="none">${mainTrace}${vias}</g>`)};
-      }
-      if(AUTOMORPH_STYLE==="contour"){
-        // Topographic contour bands: several nested copies of the ring,
-        // each scaled toward the fixture's own anchor (hx,hy) instead of
-        // one outline — real contour lines are surveyed polylines, not
-        // Bezier curves, so straight segments between ring's own sampled
-        // vertices is the correct craft, not a shortcut. Bands fade with
-        // distance from the anchor and alternate bold/thin ("index"
-        // contours), the material/intensity split this style carries
-        // instead of a hex swap.
-        const bandAt=(f)=>{
-          let bp="";
-          for(let i=0;i<ring.length;i++){
-            const vx=ring[i][0], vy=ring[i][1];
-            bp+=(i===0?"M":"L")+(hx+(vx-hx)*f).toFixed(1)+","+(hy+(vy-hy)*f).toFixed(1)+" ";
-          }
-          return bp+"Z";
-        };
-        const fracs=on ? [0.34,0.52,0.70,0.86,1] : [0.40,0.62,0.84,1];
-        const stateMul=on ? 1 : 0.8;
-        const bandCount=fracs.length;
-        let edge="";
-        for(let i=0;i<bandCount;i++){
-          const frac=fracs[i];
-          const distFade=1-0.55*(i/(bandCount-1));
-          const isIndex=(i%2===0);
-          const raw=(0.55+0.30*t)*distFade*stateMul*(isIndex?1:0.6);
-          const sw=swid((isIndex?1.6:1.0)+(isIndex?0.5:0.3)*t);
-          const path=(frac===1) ? d : bandAt(frac);
-          edge+=`<path d="${path}" fill="none" stroke="${ink}" stroke-opacity="${opac(raw)}" `+
-            `stroke-width="${sw}" stroke-linejoin="round" pointer-events="none"/>`;
-        }
-        return {glow:"", edge: clipWrap(edge)};
-      }
-      if(AUTOMORPH_STYLE==="facet"){
-        // A fan of flat triangular wedges from the fixture's own anchor to
-        // every ring vertex, each lightened toward white or darkened
-        // toward near-black by how much it faces the shared upper-left
-        // light — a low-poly paper-sculpture read, hard edges only, zero
-        // gradient softness inside any one facet.
-        const n = ring.length;
-        const baseHex = on ? AUTOMORPH_BASE_ON : AUTOMORPH_BASE_OFF;
-        const baseR = parseInt(baseHex.slice(1,3),16), baseG = parseInt(baseHex.slice(3,5),16), baseB = parseInt(baseHex.slice(5,7),16);
-        const WHITE = [255,255,255], NEARBLACK = [12,12,12];
-        const mixRgb = (c,to,amt) => [0,1,2].map(i => Math.round(c[i] + (to[i]-c[i])*amt));
-        const LX = -0.7071, LY = -0.7071;
-        const CONTRAST = on ? 0.50 : 0.22;
-        const fillOp = (0.50 + 0.35*t) * (on ? 1.1 : 0.85);
-
-        const facets = ring.map((p,i) => {
-          const q = ring[(i+1) % n];
-          let fdx = (p[0]+q[0])/2 - hx, fdy = (p[1]+q[1])/2 - hy;
-          const len = Math.hypot(fdx,fdy) || 1;
-          fdx /= len; fdy /= len;
-          const facing = fdx*LX + fdy*LY;
-          const blend = facing * CONTRAST;
-          const rgb = blend >= 0
-            ? mixRgb([baseR,baseG,baseB], WHITE, Math.min(1, blend))
-            : mixRgb([baseR,baseG,baseB], NEARBLACK, Math.min(1, -blend));
-          return `<path d="M${hx},${hy} L${p[0]},${p[1]} L${q[0]},${q[1]} Z" fill="rgb(${rgb[0]},${rgb[1]},${rgb[2]})" fill-opacity="${opac(fillOp)}" pointer-events="none"/>`;
-        }).join("");
-
-        const spokeOp = 0.25 + 0.35*t;
-        const spokes = ring.map(p =>
-          `<line x1="${hx}" y1="${hy}" x2="${p[0]}" y2="${p[1]}" stroke="${ink}" stroke-width="${swid(0.6)}" stroke-opacity="${opac(spokeOp)}" pointer-events="none"/>`
-        ).join("");
-
-        const rimOp = 0.25 + 0.35*t;
-        const rim = `<path d="${d}" fill="none" stroke="url(#psglossrim)" stroke-width="${swid(on ? 1.1 : 0.8)}" stroke-opacity="${opac(rimOp)}" pointer-events="none"/>`;
-
-        return {glow: clipWrap(facets), edge: spokes + rim};
-      }
-      if(AUTOMORPH_STYLE==="sumie"){
-        // Ink-wash brush stroke: a wide, soft, blurred bleed along the
-        // ring (ink soaking into paper) under a crisp but irregular
-        // dry-brush dash on top — never a regular machine rhythm — plus a
-        // couple of soft pooling blots where a real brush would linger.
-        // Flat and matte throughout; no bevel, no cast shadow.
-        const smul = on ? 1 : 0.6;
-
-        const bleedW = swid((on?7:5)+3*t);
-        const bleedOp = opac((0.35+0.30*t)*smul);
-        const bleedStroke = `<path d="${d}" fill="none" stroke="${on?AUTOMORPH_BASE_ON:AUTOMORPH_BASE_OFF}" stroke-width="${bleedW}" stroke-linecap="round" stroke-linejoin="round" transform="translate(0.6,0.4)" opacity="${bleedOp}" pointer-events="none"/>`;
-
-        const rawIdx = [0, Math.floor(ring.length/3), Math.floor(2*ring.length/3)];
-        const blotIdx = rawIdx.filter((v,i,a)=> ring[v] && a.indexOf(v)===i);
-        const blotR = ((1.1+1.2*t)*(on?1.1:0.85)).toFixed(2);
-        const blotOp = opac((0.30+0.20*t)*smul);
-        const blots = blotIdx.map(i=>{
-          const p = ring[i];
-          return `<circle cx="${p[0]}" cy="${p[1]}" r="${blotR}" fill="${duo}" opacity="${blotOp}" pointer-events="none"/>`;
-        }).join('');
-
-        const glow = clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${bleedStroke}${blots}</g>`);
-
-        const dash = on ? "14,1.5,9,1,17,2,6,1.5" : "5,3,2,4,7,5,3,3.5,6,4";
-        const crispW = swid((on?1.6:1.1)+0.5*t);
-        const crispOp = opac((0.65+0.30*t)*smul);
-        const edge = `<path d="${d}" fill="none" stroke="${ink}" stroke-width="${crispW}" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="${dash}" opacity="${crispOp}" pointer-events="none"/>`;
-
-        return {glow, edge};
-      }
-      if(AUTOMORPH_STYLE==="stainedglass"){
-        // The ring fan-cut from the fixture's own anchor into uneven
-        // wedge panes, each a flat solid-toned cell at its own opacity
-        // (hand-cut glass), with heavy dead-flat near-black leading along
-        // every pane boundary and the outer frame. On vs off is the
-        // panes' and the backlight wash's own opacity roughly doubling —
-        // more luminous, as if backlit — the leading itself never changes.
-        const n = ring.length;
-        if(n < 3) return {glow: "", edge: ""};
-
-        const LEAD = "#0a0a0c";
-        const paneCount = 5 + (Math.abs(Math.round(hx + hy)) % 3);
-        const seed = hx * 0.7 + hy * 1.3;
-        const rnd = (i) => { const x = Math.sin(seed + i * 12.9898) * 43758.5453; return x - Math.floor(x); };
-
-        const cutIdx = [];
-        for(let k = 0; k < paneCount; k++){
-          const spacing = n / paneCount;
-          const jitter = (rnd(k) - 0.5) * spacing * 0.7;
-          const raw = Math.round(k * spacing + jitter);
-          cutIdx.push(((raw % n) + n) % n);
-        }
-        const cuts = [...new Set(cutIdx)].sort((a, b) => a - b);
-        const m = cuts.length;
-        if(m < 3) return {glow: "", edge: ""};
-
-        const baseTone = on ? AUTOMORPH_BASE_ON : AUTOMORPH_BASE_OFF;
-        const paneMax = on ? 0.60 : 0.30;
-        const washMax = (on ? 0.45 : 0.25) * (1 + weightOffPct / 100);
-        const floor = 0.45 + 0.55 * t;
-
-        let panes = "";
-        let spokes = "";
-        for(let k = 0; k < m; k++){
-          const i0 = cuts[k];
-          const i1 = cuts[(k + 1) % m];
-          let pts = `${hx},${hy} `;
-          let idx = i0;
-          let guard = 0;
-          while(guard <= n){
-            pts += `${ring[idx][0]},${ring[idx][1]} `;
-            if(idx === i1) break;
-            idx = (idx + 1) % n;
-            guard++;
-          }
-          const variance = 0.7 + 0.6 * rnd(k * 7 + 3);
-          const paneOp = paneMax * floor * variance;
-          panes += `<path d="M ${pts.trim()} Z" fill="${baseTone}" fill-opacity="${opac(paneOp)}" pointer-events="none"/>`;
-          spokes += `<line x1="${hx}" y1="${hy}" x2="${ring[i0][0]}" y2="${ring[i0][1]}" stroke="${LEAD}" stroke-width="${swid(1.2)}" stroke-opacity="${opac(0.85)}" stroke-linecap="round" pointer-events="none"/>`;
-        }
-
-        const wash = `<path d="${d}" fill="${duo}" fill-opacity="${opac(washMax * floor)}" mask="url(#psautomorphmask)" pointer-events="none"/>`;
-        const glowMarkup = clipWrap(wash + panes);
-
-        const outerLead = `<path d="${d}" fill="none" stroke="${LEAD}" stroke-width="${swid(1.8)}" stroke-opacity="${opac(0.90)}" pointer-events="none"/>`;
-        const edgeMarkup = outerLead + spokes;
-
-        return {glow: glowMarkup, edge: edgeMarkup};
-      }
-      if(AUTOMORPH_STYLE==="constellation"){
-        // A sparse star-chart: every ring vertex becomes a tiny star (a
-        // soft duotone halo plus a crisp core dot), joined by faint
-        // straight vertex-to-vertex chords — literal polygon edges, never
-        // the smoothed ring path — with one or two even fainter spokes
-        // reaching back to the fixture's own anchor. No fill, wash or
-        // dashing anywhere; the interior stays empty, a chart rather than
-        // a rendering. On is bigger/brighter/denser; off shrinks to faint
-        // pinpricks with the spokes almost gone.
-        const n = ring.length;
-
-        const coreR   = (on ? 2.2 : 1.5) + (on ? 1.2 : 0.8) * t;
-        const haloR   = (on ? 4.5 : 3.2) + (on ? 2.0 : 1.2) * t;
-        const coreOp  = opac(on ? 0.75 : 0.40);
-        const haloOp  = opac(on ? 0.45 : 0.22);
-        const chordW  = swid(on ? 0.9 : 0.6);
-        const chordOp = opac((on ? 0.45 : 0.22) * (0.55 + 0.45 * t));
-        const spokeW  = swid(on ? 0.7 : 0.5);
-        const spokeOp = opac((on ? 0.30 : 0.15) * (0.3 + 0.7 * t));
-
-        let chords = "";
-        for(let i = 0; i < n; i++){
-          const [cx1, cy1] = ring[i];
-          const [cx2, cy2] = ring[(i + 1) % n];
-          chords += `<line x1="${cx1}" y1="${cy1}" x2="${cx2}" y2="${cy2}" stroke="${ink}" stroke-width="${chordW}" opacity="${chordOp}" pointer-events="none"/>`;
-        }
-
-        let spokes = "";
-        for(const i of [0, Math.floor(n / 2)]){
-          const [sx, sy] = ring[i];
-          spokes += `<line x1="${hx}" y1="${hy}" x2="${sx}" y2="${sy}" stroke="${ink}" stroke-width="${spokeW}" opacity="${spokeOp}" pointer-events="none"/>`;
-        }
-
-        let halos = "";
-        for(let i = 0; i < n; i++){
-          const [hpx, hpy] = ring[i];
-          halos += `<circle cx="${hpx}" cy="${hpy}" r="${haloR}" fill="${duo}" opacity="${haloOp}" pointer-events="none"/>`;
-        }
-        const glow = clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${halos}</g>`);
-
-        let cores = "";
-        for(let i = 0; i < n; i++){
-          const [rpx, rpy] = ring[i];
-          cores += `<circle cx="${rpx}" cy="${rpy}" r="${coreR}" fill="${ink}" opacity="${coreOp}" pointer-events="none"/>`;
-        }
-
-        return {glow, edge: chords + spokes + cores};
-      }
       // Halo and Pulse (Garry, 2026-09-10: the first 8 candidates read as
       // "way too subtle" even after the opacity fix above, plus "add some
       // more ideas") — same ring/d/on/t/ink/duo contract as every style
@@ -4408,31 +4172,6 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         const edge = clipWrap(`<path d="${d}" fill="none" stroke="${ink}" stroke-width="${ringW}" `+
           `stroke-opacity="${opac(ringOp)}" stroke-linejoin="round" pointer-events="none"/>`);
         return {glow, edge};
-      }
-      if(AUTOMORPH_STYLE==="pulse"){
-        // A solid base ring with a wave of pulse-dots travelling around
-        // it — dot size follows a sine wave keyed to position around the
-        // ring (three lobes) and phase-shifted by `t`, so it reads as
-        // energy moving along the silhouette rather than uniform beading
-        // (constellation's language). Deliberately stays ON the ring
-        // itself, never scaled past it: a fixture whose ring already
-        // fills most of its room has nowhere to expand into once clipped
-        // to the room boundary — an earlier "ripples expanding outward"
-        // version vanished completely in exactly that common case.
-        const n = ring.length;
-        const base = `<path d="${d}" fill="none" stroke="${ink}" stroke-width="${swid(on?2.2:1.5)}" `+
-          `stroke-opacity="${opac(on?0.80:0.50)}" stroke-linejoin="round" pointer-events="none"/>`;
-        const phase = t * Math.PI * 2;
-        let dots = "";
-        for(let i=0;i<n;i+=2){
-          const wave = (Math.sin((i/n)*Math.PI*2*3 + phase) + 1) / 2;
-          const r = (on?1.4:0.9) + (on?3.2:2.0)*wave;
-          const op = (on?0.35:0.20) + (on?0.50:0.30)*wave;
-          const [px,py] = ring[i];
-          dots += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${r.toFixed(2)}" fill="${duo}" `+
-            `opacity="${opac(op)}" pointer-events="none"/>`;
-        }
-        return {glow: clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${dots}</g>`), edge: clipWrap(base)};
       }
       if(AUTOMORPH_STYLE==="spikecrown"){
         // Genuine crown/star silhouette: walk ring's own vertices in order
@@ -4841,135 +4580,6 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
 
         return {glow:"", edge: clipWrap(`<g pointer-events="none">${rim}${cells}</g>`)};
       }
-      // ORBIT RINGS — atomic/orbital-model look: instead of tracing ring's
-      // own polygon (or a scaled copy of it, which is what "contour" does),
-      // this reads ring's OWN bounding extent around the fixture's anchor
-      // and draws 2-3 true concentric ellipses sized as fractions of that
-      // extent, each tilted by a different deterministic angle so they
-      // read as a Bohr-model / orbital diagram rather than stacked flat
-      // rings. A handful of "electron" dots ride specific ellipses at an
-      // angle that advances with t — the same static-phase trick pulse
-      // uses to fake motion from a single frozen render — plus a bright
-      // "nucleus" dot at hx,hy itself. Off collapses to 2 tight, dim
-      // orbits with faint electrons and a dark nucleus; on opens to 3 full
-      // orbits with brighter, faster-advancing electrons and a lit core.
-      if(AUTOMORPH_STYLE==="orbitring"){
-        const seed = hx * 0.7 + hy * 1.3;
-        const rnd = (i) => { const x = Math.sin(seed + i * 12.9898) * 43758.5453; return x - Math.floor(x); };
-
-        let maxDx = 4, maxDy = 4;
-        for(const [px,py] of ring){
-          maxDx = Math.max(maxDx, Math.abs(px - hx));
-          maxDy = Math.max(maxDy, Math.abs(py - hy));
-        }
-
-        const fracs = on ? [0.46, 0.70, 0.95] : [0.55, 0.88];
-        const phase = t * Math.PI * 2;
-
-        let orbits = "", satEdge = "", satGlow = "";
-        for(let i=0;i<fracs.length;i++){
-          const frac = fracs[i];
-          const rx = maxDx * frac, ry = maxDy * frac;
-          const rotDeg = (rnd(i*2+1) - 0.5) * 110 + i * 30;
-          const rotRad = rotDeg * Math.PI / 180;
-          const orbitOp = opac((on ? 0.55 : 0.26) + 0.20*t - i*0.05);
-          const orbitW = swid((on ? 1.5 : 1.0) - i*0.15);
-          orbits += `<ellipse cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" rx="${rx.toFixed(1)}" ry="${ry.toFixed(1)}" `+
-            `fill="none" stroke="${ink}" stroke-width="${orbitW}" stroke-opacity="${orbitOp}" `+
-            `transform="rotate(${rotDeg.toFixed(1)} ${hx.toFixed(1)} ${hy.toFixed(1)})" pointer-events="none"/>`;
-
-          // Satellite phase advances faster on outer orbits (like real
-          // orbital periods scaling with radius, just inverted for a
-          // livelier read at a glance) — angle is phase (from t) plus a
-          // per-orbit hashed offset so they never all line up.
-          const ang = phase * (1 + i*0.35) + rnd(i*5+2) * Math.PI * 2;
-          const ex = rx * Math.cos(ang), ey = ry * Math.sin(ang);
-          const sx = hx + ex * Math.cos(rotRad) - ey * Math.sin(rotRad);
-          const sy = hy + ex * Math.sin(rotRad) + ey * Math.cos(rotRad);
-          const satR = (on ? 2.0 : 1.3) + 0.5*t;
-          const satOp = opac((on ? 0.85 : 0.45) + 0.15*t);
-          satEdge += `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${satR.toFixed(2)}" fill="${duo}" `+
-            `stroke="${ink}" stroke-width="${swid(0.4)}" opacity="${satOp}" pointer-events="none"/>`;
-          satGlow += `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${(satR*2.2).toFixed(2)}" fill="${duo}" `+
-            `opacity="${opac(on ? 0.30 : 0.14)}" pointer-events="none"/>`;
-        }
-
-        const nucleusR = (on ? 3.0 : 1.6) + 0.6*t;
-        const nucleus = `<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${nucleusR.toFixed(2)}" fill="${ink}" `+
-          `opacity="${opac(on ? 0.90 : 0.42)}" pointer-events="none"/>`;
-        const nucleusGlow = `<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${(nucleusR*2.4).toFixed(2)}" fill="${duo}" `+
-          `opacity="${opac(on ? 0.38 : 0.16)}" pointer-events="none"/>`;
-
-        const glow = clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${nucleusGlow}${satGlow}</g>`);
-        const edge = clipWrap(`<g pointer-events="none">${orbits}${satEdge}${nucleus}</g>`);
-        return {glow, edge};
-      }
-      // "puzzle" — every other style paints the SAME smooth ring; this one
-      // is the one candidate that reshapes the boundary itself. Each edge
-      // of `ring` gets a single cubic-bezier knob riding its own outward
-      // normal — bulging past the edge (a tab) or cut into it (a blank),
-      // the classic jigsaw motif, alternating tab/blank by edge parity. A
-      // strict parity alternation reads as a toothed gear, so a seeded hash
-      // flips ~1 edge in 5 against that base rhythm — just enough
-      // irregularity to read as hand-fitted puzzle pieces instead of a
-      // machined cog. Bump depth is a FRACTION of each edge's own length
-      // (not a fixed px), so the knuckles stay proportionate whether `ring`
-      // is a tight 24-point icon or a dense 64-point room trace, and grow
-      // with on/t exactly like every other style's presence: barely-there
-      // nicks off, deep interlocking knuckles on. The gloss arc on each
-      // tab's crown only appears lit — nothing to catch light on a blank.
-      if(AUTOMORPH_STYLE==="puzzle"){
-        const seed = hx * 0.7 + hy * 1.3;
-        const rnd = (i) => { const x = Math.sin(seed + i * 12.9898) * 43758.5453; return x - Math.floor(x); };
-        const n = ring.length;
-        let ccx=0, ccy=0;
-        for(const p of ring){ ccx+=p[0]; ccy+=p[1]; }
-        ccx/=n; ccy/=n;
-        const depthFrac = on ? (0.11+0.20*t) : (0.04+0.08*t);
-        const hlOn = on && t>0.03;
-        let pd="", hl="";
-        for(let i=0;i<n;i++){
-          const p=ring[i], q=ring[(i+1)%n];
-          if(i===0) pd+="M"+p[0].toFixed(1)+","+p[1].toFixed(1)+" ";
-          const ex=q[0]-p[0], ey=q[1]-p[1], len=Math.hypot(ex,ey);
-          if(len<1){ pd+="L"+q[0].toFixed(1)+","+q[1].toFixed(1)+" "; continue; }
-          const tx=ex/len, ty=ey/len;
-          let nx=-ty, ny=tx;
-          const midx=(p[0]+q[0])/2, midy=(p[1]+q[1])/2;
-          if(nx*(ccx-midx)+ny*(ccy-midy) > 0){ nx=-nx; ny=-ny; }
-          const outward=(i%2===0)!==(rnd(i*2.7)>0.8);
-          const dir=outward?1:-1;
-          const depth=len*depthFrac;
-          const m1x=p[0]+tx*len*0.30, m1y=p[1]+ty*len*0.30;
-          const m2x=p[0]+tx*len*0.70, m2y=p[1]+ty*len*0.70;
-          const c1x=m1x+nx*dir*depth*1.33, c1y=m1y+ny*dir*depth*1.33;
-          const c2x=m2x+nx*dir*depth*1.33, c2y=m2y+ny*dir*depth*1.33;
-          pd+="L"+m1x.toFixed(1)+","+m1y.toFixed(1)+" C"+c1x.toFixed(1)+","+c1y.toFixed(1)+" "+
-              c2x.toFixed(1)+","+c2y.toFixed(1)+" "+m2x.toFixed(1)+","+m2y.toFixed(1)+" "+
-              "L"+q[0].toFixed(1)+","+q[1].toFixed(1)+" ";
-          if(hlOn && outward){
-            const apx=midx+nx*dir*depth, apy=midy+ny*dir*depth;
-            const g1x=apx-tx*len*0.09, g1y=apy-ty*len*0.09;
-            const g2x=apx+tx*len*0.09, g2y=apy+ty*len*0.09;
-            hl+=`<path d="M${g1x.toFixed(1)},${g1y.toFixed(1)} Q${apx.toFixed(1)},${apy.toFixed(1)} `+
-              `${g2x.toFixed(1)},${g2y.toFixed(1)}" fill="none" stroke="${duo}" stroke-width="${swid(1.1)}" `+
-              `stroke-opacity="${opac(0.40*t)}" stroke-linecap="round" pointer-events="none"/>`;
-          }
-        }
-        pd+="Z";
-        const lineOp=opac((on?0.55:0.34)+0.35*t);
-        const lineW=swid((on?2.0:1.3)+0.9*t);
-        const fillOp=opac((on?0.16:0.07)+0.16*t);
-        const glowOp=opac((on?0.16:0.08)+0.14*t);
-        const glowW=swid((on?7:5)+3*t);
-        const glow=clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">`+
-          `<path d="${pd}" fill="none" stroke="${duo}" stroke-width="${glowW}" `+
-          `stroke-opacity="${glowOp}" stroke-linejoin="round" pointer-events="none"/></g>`);
-        const edge=clipWrap(
-          `<path d="${pd}" fill="${duo}" fill-opacity="${fillOp}" stroke="${ink}" `+
-          `stroke-opacity="${lineOp}" stroke-width="${lineW}" stroke-linejoin="round" pointer-events="none"/>`+hl);
-        return {glow, edge};
-      }
       // BLOCK EXTRUDE — the ring read as a solid raised plinth instead of a
       // flat outline: the same silhouette drawn twice (top face at its own
       // position, a darker base face pushed down-and-right, opposite the
@@ -5043,107 +4653,195 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
 
         return {glow, edge: clipWrap(baseFace + sideWalls + topFace)};
       }
-      if(AUTOMORPH_STYLE==="shatter"){
-        // Cracked-ice fracture web: a handful of interior seed points are
-        // scattered around the ring's OWN centroid (not hx/hy -- that's
-        // what the fan styles radiate from), each snapped by a straight
-        // "crack" to its nearest ring-boundary vertex (one seed also gets
-        // a second-nearest crack), plus a short seed-to-seed chain. Seed
-        // positions come from the seeded sine-hash, so the chain (drawn in
-        // index order) already crosses itself irregularly -- exactly the
-        // messy, non-radial look real ice fractures have, without needing
-        // a real Voronoi/mesh solve. Segment count is deliberately capped
-        // (seedCount 3-4 -> 6-8 total lines) so it stays a few sharp
-        // fracture lines rather than a dense web. A couple of the
-        // resulting seed/vertex triangles get a near-invisible flat tint
-        // as an optional "broken shard" hint. On lets the primary cracks
-        // catch a soft duo glow (bright/thin/sharp); off drops the glow
-        // entirely and dims to dull hairlines -- no hue ever changes.
-        const n = ring.length;
-        if(n < 3) return {glow: "", edge: ""};
-
-        const seed = hx * 0.7 + hy * 1.3;
-        const rnd = (i) => { const x = Math.sin(seed + i * 12.9898) * 43758.5453; return x - Math.floor(x); };
-
-        let ccx = 0, ccy = 0;
-        for(const [vx, vy] of ring){ ccx += vx; ccy += vy; }
-        ccx /= n; ccy /= n;
-        let maxR = 0;
-        for(const [vx, vy] of ring){
-          const dx = vx - ccx, dy = vy - ccy;
-          const r = Math.sqrt(dx * dx + dy * dy);
-          if(r > maxR) maxR = r;
+      // Six replacements for the 2026-09-17 cut (circuit, contour, facet,
+      // sumie, stainedglass, constellation, pulse, orbitring, puzzle,
+      // shatter — see AUTOMORPH_STYLE_LABELS's own comment for why): each
+      // one reshapes the actual silhouette or composition, the same
+      // discipline spikecrown/scallop/geode/honeycomb/extrude already
+      // follow, rather than decorating the shared morphed ring with
+      // different linework — a side-by-side comparison of the cut styles
+      // showed that difference vanishes at real map-marker scale, while a
+      // genuinely different SHAPE survives it.
+      if(AUTOMORPH_STYLE==="shardburst"){
+        // Several separate filled fragments scattered around the fixture
+        // — never one continuous bounded ring, unlike every style above.
+        // State is shard count, reach and brightness: off is a few small
+        // slivers close to the fixture; on is more, bigger, brighter
+        // shards reaching toward the ring itself.
+        const n=ring.length;
+        if(n<3) return {glow:"", edge:""};
+        const shardCount = on ? 6+Math.round(2*t) : 4;
+        const step = Math.max(1, Math.floor(n/shardCount));
+        const widthSteps = Math.max(1, Math.round(step*(on?0.16:0.10)));
+        const reach = on ? (0.55+0.45*t) : (0.30+0.20*t);
+        const fillOp = opac((on?0.30:0.16)+0.22*t);
+        const edgeOp = opac((on?0.55:0.30)+0.25*t);
+        let shards="", edges="";
+        for(let k=0;k<shardCount;k++){
+          const i=(k*step)%n, j=(i+widthSteps)%n;
+          const [ax,ay]=ring[i], [bx,by]=ring[j];
+          const mx=hx+(ax-hx)*reach, my=hy+(ay-hy)*reach;
+          const nx=hx+(bx-hx)*reach, ny=hy+(by-hy)*reach;
+          const hxs=hx.toFixed(1), hys=hy.toFixed(1);
+          const mxs=mx.toFixed(1), mys=my.toFixed(1), nxs=nx.toFixed(1), nys=ny.toFixed(1);
+          shards+=`<path d="M${hxs},${hys} L${mxs},${mys} L${nxs},${nys} Z" fill="${duo}" fill-opacity="${fillOp}" pointer-events="none"/>`;
+          edges+=`<path d="M${hxs},${hys} L${mxs},${mys} M${hxs},${hys} L${nxs},${nys} M${mxs},${mys} L${nxs},${nys}" `+
+            `fill="none" stroke="${ink}" stroke-width="${swid(on?1.1:0.8)}" stroke-opacity="${edgeOp}" stroke-linecap="round" pointer-events="none"/>`;
         }
-
-        const seedCount = 3 + (rnd(0) < 0.5 ? 0 : 1); // 3 or 4 interior seeds
-        const pts = [];
-        for(let i = 0; i < seedCount; i++){
-          const ang = rnd(i * 2 + 1) * Math.PI * 2;
-          const frac = 0.12 + rnd(i * 2 + 2) * 0.50; // stay well inside the ring's rough extent
-          pts.push([ccx + Math.cos(ang) * maxR * frac, ccy + Math.sin(ang) * maxR * frac]);
+        return {glow: clipWrap(shards), edge: clipWrap(edges)};
+      }
+      if(AUTOMORPH_STYLE==="origami"){
+        // A handful of large flat-colour panels fan-cut from the fixture's
+        // own anchor — never many small facets (a different, cut style's
+        // job) — alternating light/dark flat tones with no gradient
+        // anywhere, so it reads as folded paper under flat light rather
+        // than a lit surface. State is panel count and tone contrast.
+        const n=ring.length;
+        if(n<3) return {glow:"", edge:""};
+        const panelCount = on ? 6 : 4;
+        const step=Math.max(1, Math.floor(n/panelCount));
+        const baseHex = on ? AUTOMORPH_BASE_ON : AUTOMORPH_BASE_OFF;
+        const baseR=parseInt(baseHex.slice(1,3),16), baseG=parseInt(baseHex.slice(3,5),16), baseB=parseInt(baseHex.slice(5,7),16);
+        const mixTo=(amt,to)=>[baseR,baseG,baseB].map((c,ci)=>Math.round(c+(to[ci]-c)*amt));
+        const foldOp=opac(0.55+0.30*t);
+        const fillOp=opac((on?0.30:0.16)+0.20*t);
+        let panels="", folds="";
+        for(let k=0;k<panelCount;k++){
+          const i=(k*step)%n, j=((k+1)*step)%n;
+          const rgb = (k%2===0) ? mixTo(0.45+0.15*t,[255,255,255]) : mixTo(0.45+0.15*t,[8,8,8]);
+          const p0=`${ring[i][0].toFixed(1)},${ring[i][1].toFixed(1)}`, p1=`${ring[j][0].toFixed(1)},${ring[j][1].toFixed(1)}`;
+          panels+=`<path d="M${hx.toFixed(1)},${hy.toFixed(1)} L${p0} L${p1} Z" fill="rgb(${rgb[0]},${rgb[1]},${rgb[2]})" fill-opacity="${fillOp}" pointer-events="none"/>`;
+          folds+=`<line x1="${hx.toFixed(1)}" y1="${hy.toFixed(1)}" x2="${ring[i][0].toFixed(1)}" y2="${ring[i][1].toFixed(1)}" stroke="${ink}" stroke-width="${swid(0.9)}" stroke-opacity="${foldOp}" pointer-events="none"/>`;
         }
-        const nearestOf = pts.map(([px, py]) => {
-          let bi = 0, bd = Infinity, si = 0, sd = Infinity;
-          for(let j = 0; j < n; j++){
-            const dx = ring[j][0] - px, dy = ring[j][1] - py;
-            const dd = dx * dx + dy * dy;
-            if(dd < bd){ si = bi; sd = bd; bi = j; bd = dd; }
-            else if(dd < sd){ si = j; sd = dd; }
-          }
-          return [bi, si];
+        const rim=`<path d="${d}" fill="none" stroke="${ink}" stroke-width="${swid(on?1.2:0.8)}" stroke-opacity="${opac((on?0.5:0.3)+0.2*t)}" pointer-events="none"/>`;
+        return {glow: clipWrap(panels), edge: clipWrap(folds+rim)};
+      }
+      if(AUTOMORPH_STYLE==="inkbleed"){
+        // An irregular, asymmetric bleed — the ring pushed outward by a
+        // sum of deterministic sine waves at different frequencies from
+        // the fixture's own seeded position, unlike every other style's
+        // smooth or evenly-symmetric silhouette. Reads as ink dropped in
+        // water: off barely spreads; on reaches further and rougher.
+        const n=ring.length;
+        if(n<3) return {glow:"", edge:""};
+        const seed=hx*0.7+hy*1.3;
+        const amt = on ? (0.22+0.18*t) : (0.08+0.06*t);
+        let bcx=0, bcy=0;
+        for(const [px,py] of ring){ bcx+=px; bcy+=py; }
+        bcx/=n; bcy/=n;
+        const bled=ring.map(([px,py],i)=>{
+          const ang=i/n*Math.PI*2;
+          const wob=Math.sin(ang*3+seed)*0.6+Math.sin(ang*7+seed*1.7)*0.3+Math.sin(ang*13+seed*2.3)*0.15;
+          const f=1+amt*wob;
+          return [bcx+(px-bcx)*f, bcy+(py-bcy)*f];
         });
-        const extraIdx = Math.floor(rnd(9) * seedCount); // the one seed that gets a 2nd vertex crack
-
-        const crackOp = opac((on ? 0.62 : 0.28) + 0.30 * t);
-        const crackW  = swid((on ? 0.85 : 0.60) + 0.35 * t);
-        const chainOp = opac((on ? 0.42 : 0.18) + 0.22 * t);
-        const chainW  = swid((on ? 0.65 : 0.50) + 0.25 * t);
-        const shardBase = on ? 0.05 : 0.02;
-        const shardT    = on ? 0.10 : 0.05;
-
-        let cracks = "";
-        let fills = "";
-        for(let i = 0; i < seedCount; i++){
-          const [sx, sy] = pts[i];
-          const [ni, si] = nearestOf[i];
-          const v1 = ring[ni];
-          cracks += `<line x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${v1[0].toFixed(1)}" y2="${v1[1].toFixed(1)}" `+
-            `stroke="${ink}" stroke-width="${crackW}" stroke-opacity="${crackOp}" stroke-linecap="round" pointer-events="none"/>`;
-          if(i === extraIdx){
-            const v2 = ring[si];
-            cracks += `<line x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${v2[0].toFixed(1)}" y2="${v2[1].toFixed(1)}" `+
-              `stroke="${ink}" stroke-width="${crackW}" stroke-opacity="${crackOp}" stroke-linecap="round" pointer-events="none"/>`;
-            const shardOp = opac(shardBase + shardT * t);
-            fills += `<path d="M ${sx.toFixed(1)},${sy.toFixed(1)} L ${v1[0].toFixed(1)},${v1[1].toFixed(1)} L ${v2[0].toFixed(1)},${v2[1].toFixed(1)} Z" `+
-              `fill="${ink}" fill-opacity="${shardOp}" pointer-events="none"/>`;
+        let bd="";
+        for(let i=0;i<n;i++) bd += (i===0?"M":"L")+bled[i][0].toFixed(1)+","+bled[i][1].toFixed(1)+" ";
+        bd+="Z";
+        const fillOp=opac((on?0.24:0.13)+0.20*t);
+        const edgeOp=opac((on?0.55:0.30)+0.25*t);
+        const wash=`<path d="${bd}" fill="${duo}" fill-opacity="${fillOp}" pointer-events="none"/>`;
+        const edge=`<path d="${bd}" fill="none" stroke="${ink}" stroke-width="${swid(on?1.3:0.9)}" stroke-opacity="${edgeOp}" stroke-linejoin="round" pointer-events="none"/>`;
+        return {glow: clipWrap(`<g filter="url(#psaurasoft)">${wash}</g>`), edge: clipWrap(edge)};
+      }
+      if(AUTOMORPH_STYLE==="rosette"){
+        // A symmetric ring of overlapping lens-shaped petals — a mandala
+        // motif, never an organic or angular silhouette. Petal count and
+        // reach carry state: off is a tight, few-petalled bud; on is a
+        // fuller, wider-spread bloom.
+        let maxR=20;
+        for(const [px,py] of ring) maxR=Math.max(maxR, Math.hypot(px-hx,py-hy));
+        const petalCount = on ? 8 : 6;
+        const reach = maxR*(on?(0.55+0.30*t):(0.30+0.15*t));
+        const petalW = reach*(on?0.42:0.32);
+        const fillOp=opac((on?0.20:0.11)+0.16*t);
+        const strokeOp=opac((on?0.55:0.30)+0.25*t);
+        const petalD=(ang)=>{
+          const tipx=hx+reach*Math.cos(ang), tipy=hy+reach*Math.sin(ang);
+          const px=-Math.sin(ang), py=Math.cos(ang);
+          const c1x=hx+petalW*px+reach*0.5*Math.cos(ang), c1y=hy+petalW*py+reach*0.5*Math.sin(ang);
+          const c2x=hx-petalW*px+reach*0.5*Math.cos(ang), c2y=hy-petalW*py+reach*0.5*Math.sin(ang);
+          return `M${hx.toFixed(1)},${hy.toFixed(1)} Q${c1x.toFixed(1)},${c1y.toFixed(1)} ${tipx.toFixed(1)},${tipy.toFixed(1)} `+
+            `Q${c2x.toFixed(1)},${c2y.toFixed(1)} ${hx.toFixed(1)},${hy.toFixed(1)} Z`;
+        };
+        let petals="", outlines="";
+        for(let k=0;k<petalCount;k++){
+          const ang=(k/petalCount)*Math.PI*2 - Math.PI/2;
+          const pd=petalD(ang);
+          petals+=`<path d="${pd}" fill="${duo}" fill-opacity="${fillOp}" pointer-events="none"/>`;
+          outlines+=`<path d="${pd}" fill="none" stroke="${ink}" stroke-width="${swid(on?1.0:0.7)}" stroke-opacity="${strokeOp}" pointer-events="none"/>`;
+        }
+        return {glow: clipWrap(petals), edge: clipWrap(outlines)};
+      }
+      if(AUTOMORPH_STYLE==="lensflare"){
+        // A receding chain of translucent discs along one axis away from
+        // the fixture — a photographic lens-flare/bokeh trail, never a
+        // bounded shape wrapped around the fixture at all. Off is a
+        // short, faint trail; on reaches further with more, brighter
+        // discs. The axis is the fixture's own seeded angle, not "toward
+        // the ring's centroid" — a fixture sitting near its room's own
+        // centre (a common case: one fixture, one room) put that centroid
+        // right on top of hx,hy, collapsing the whole chain to a single
+        // point indistinguishable from a plain blob.
+        const n=ring.length;
+        let maxR=20;
+        for(const [px,py] of ring) maxR=Math.max(maxR, Math.hypot(px-hx,py-hy));
+        const seed=hx*0.7+hy*1.3;
+        const ang=seed*0.6180339887; // golden-angle-ish scatter, deterministic per fixture
+        const ux=Math.cos(ang), uy=Math.sin(ang);
+        const discCount = on ? 5+Math.round(2*t) : 3;
+        const reachMul = on ? (0.55+0.35*t) : (0.30+0.20*t);
+        let discs="";
+        for(let k=1;k<=discCount;k++){
+          const frac=k/(discCount+1);
+          const px=hx+ux*maxR*frac*reachMul, py=hy+uy*maxR*frac*reachMul;
+          const r=(on?3.5:2.2)*(1-frac*0.4)+1.5*t;
+          const op=opac((on?0.30:0.16)*(1-frac*0.5)+0.10*t);
+          discs+=`<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${r.toFixed(2)}" fill="${duo}" fill-opacity="${op}" pointer-events="none"/>`;
+        }
+        const coreOp=opac((on?0.55:0.30)+0.25*t);
+        const core=`<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${swid(on?3:2)}" fill="${ink}" fill-opacity="${coreOp}" pointer-events="none"/>`;
+        return {glow: clipWrap(`<g filter="url(#psaurasoft)">${discs}</g>`), edge: clipWrap(core)};
+      }
+      if(AUTOMORPH_STYLE==="mycelium"){
+        // A branching filament network reaching from the fixture toward
+        // several points around the ring — no fill, no bounded shape at
+        // all, unlike every style above it. Off is a few short, thin,
+        // unbranched threads; on is more, longer threads that fork
+        // partway out — the one channel the lit state gets that off never
+        // does, rather than a hue swap.
+        const n=ring.length;
+        if(n<3) return {glow:"", edge:""};
+        const branchCount = on ? 6+Math.round(2*t) : 4;
+        const step=Math.max(1, Math.floor(n/branchCount));
+        const reach = on ? (0.75+0.25*t) : (0.40+0.20*t);
+        const strokeOpRaw=(on?0.50:0.28)+0.25*t;
+        const strokeOp=opac(strokeOpRaw);
+        // Wider than a first pass tried (0.65-0.9px): at real map-marker
+        // scale a sub-1px thread reads as nothing at all, not as "thin" —
+        // this is the one style whose whole language is line-thinness, so
+        // it has to spend its opacity/weight budget on staying visible
+        // ahead of style flavour.
+        const w=swid(on?1.6:1.1);
+        let lines="";
+        for(let k=0;k<branchCount;k++){
+          const i=(k*step)%n;
+          const [rx,ry]=ring[i];
+          const endx=hx+(rx-hx)*reach, endy=hy+(ry-hy)*reach;
+          const midx=hx+(rx-hx)*reach*0.55, midy=hy+(ry-hy)*reach*0.55;
+          lines+=`<line x1="${hx.toFixed(1)}" y1="${hy.toFixed(1)}" x2="${midx.toFixed(1)}" y2="${midy.toFixed(1)}" `+
+            `stroke="${ink}" stroke-width="${w}" stroke-opacity="${strokeOp}" stroke-linecap="round" pointer-events="none"/>`;
+          lines+=`<line x1="${midx.toFixed(1)}" y1="${midy.toFixed(1)}" x2="${endx.toFixed(1)}" y2="${endy.toFixed(1)}" `+
+            `stroke="${ink}" stroke-width="${swid(on?1.2:0.85)}" stroke-opacity="${strokeOp}" stroke-linecap="round" pointer-events="none"/>`;
+          if(on){
+            const perpX=-(ry-hy), perpY=(rx-hx);
+            const plen=Math.hypot(perpX,perpY)||1;
+            const forkx=midx+(perpX/plen)*8*(k%2?1:-1), forky=midy+(perpY/plen)*8*(k%2?1:-1);
+            lines+=`<line x1="${midx.toFixed(1)}" y1="${midy.toFixed(1)}" x2="${forkx.toFixed(1)}" y2="${forky.toFixed(1)}" `+
+              `stroke="${ink}" stroke-width="${swid(0.9)}" stroke-opacity="${opac(strokeOpRaw*0.7)}" stroke-linecap="round" pointer-events="none"/>`;
           }
         }
-        for(let i = 0; i < seedCount - 1; i++){
-          const [ax, ay] = pts[i];
-          const [bx, by] = pts[i + 1];
-          cracks += `<line x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" x2="${bx.toFixed(1)}" y2="${by.toFixed(1)}" `+
-            `stroke="${ink}" stroke-width="${chainW}" stroke-opacity="${chainOp}" stroke-linecap="round" pointer-events="none"/>`;
-          if(i === 0){
-            const v1 = ring[nearestOf[0][0]];
-            const shardOp = opac(shardBase * 0.7 + shardT * 0.7 * t);
-            fills += `<path d="M ${ax.toFixed(1)},${ay.toFixed(1)} L ${bx.toFixed(1)},${by.toFixed(1)} L ${v1[0].toFixed(1)},${v1[1].toFixed(1)} Z" `+
-              `fill="${ink}" fill-opacity="${shardOp}" pointer-events="none"/>`;
-          }
-        }
-
-        let glow = "";
-        if(on){
-          let glints = "";
-          for(let i = 0; i < seedCount; i++){
-            const [sx, sy] = pts[i];
-            const v1 = ring[nearestOf[i][0]];
-            glints += `<line x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${v1[0].toFixed(1)}" y2="${v1[1].toFixed(1)}" `+
-              `stroke="${duo}" stroke-width="${swid(2.2 + 1.2 * t)}" stroke-opacity="${opac(0.22 + 0.18 * t)}" stroke-linecap="round" pointer-events="none"/>`;
-          }
-          glow = clipWrap(`<g filter="url(#psaurasoft)" pointer-events="none">${glints}</g>`);
-        }
-
-        return {glow, edge: clipWrap(fills + cracks)};
+        return {glow: "", edge: clipWrap(lines)};
       }
       // "glow" (default): a material stack, every layer the SAME path `d`
       // — no second geometry anywhere, so hardness/wobble/cell shape stay

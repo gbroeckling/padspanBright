@@ -3662,14 +3662,21 @@ def test_automorph_style_dropdown_switches_the_rendered_treatment(tmp_path):
 # ── More style candidates ────────────────────────────────────────────────────
 # Garry, 2026-09-09: "dig around hard for 5 more candidates that will add to
 # the realm of attractive options" — circuit, contour, facet, sumie,
-# stainedglass, constellation. Same contract as glow/blueprint/nebula above:
-# each paints the SAME morphed ring/`d`, no new geometry, on/off is a material
-# split rather than a hex swap. (Engrave and Woven from that batch, plus
+# stainedglass, constellation. (Engrave and Woven from that batch, plus
 # Chevron from a later one, were all cut on Garry's word, 2026-09-10: "all
 # misses.")
+#
+# 2026-09-17: circuit, contour, facet, sumie, stainedglass, constellation,
+# pulse, orbitring, puzzle and shatter were themselves cut — a side-by-side
+# grid of every style showed they all read as "a soft blob with a different
+# border decoration", the same silhouette every time. Replaced with six
+# styles that each reshape the actual ring geometry instead (the same
+# discipline spikecrown/scallop/geode/honeycomb/extrude already follow), so
+# the difference survives at real map-marker scale. halo (the one style from
+# the cut batch that earns its keep — deliberately the boldest, most
+# legible-at-a-glance treatment) stays in this same coverage set.
 
-_NEW_STYLES = ("circuit", "contour", "facet", "sumie", "stainedglass",
-               "constellation", "halo", "pulse")
+_NEW_STYLES = ("halo", "shardburst", "origami", "inkbleed", "rosette", "lensflare", "mycelium")
 
 
 def _render_style(tmp_path, style, *, state="on"):
@@ -3710,6 +3717,40 @@ def test_every_new_style_differs_between_on_and_off(tmp_path):
         on = _render_style(tmp_path, style, state="on")
         off = _render_style(tmp_path, style, state="off")
         assert on != off, f"{style} must render differently on vs off"
+
+
+def test_lensflare_still_spreads_when_the_fixture_sits_at_its_rooms_own_centre(tmp_path):
+    """Live-verification finding, 2026-09-17: the first cut derived the
+    flare's direction from "the fixture's offset from the morphed ring's
+    own centroid" — for a fixture placed near the middle of a roughly
+    symmetric room (a common case: one fixture, one room) that centroid
+    sits right on top of the fixture itself, collapsing the whole disc
+    chain to a single point indistinguishable from a plain blob. Pinned
+    directly against exactly that geometry: a square room with the fixture
+    dead-centre."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Square": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]}},
+        "light_positions_m": {"light.lamp": {"x_m": 3, "y_m": 3, "floor_id": "main"}},
+    }
+    lbe = {"light.lamp": {"entity_id": "light.lamp", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None}}
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\nconst LBE={json.dumps(lbe)};\nconst FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:50, automorphStyle:'lensflare'}});\n"
+        "const discs=[...svg.matchAll(/<circle cx=\"([\\d.]+)\" cy=\"([\\d.]+)\" r=\"[\\d.]+\" fill=\"url\\(#psautomorphduo/g)]"
+        ".map(m=>[parseFloat(m[1]), parseFloat(m[2])]);\n"
+        "console.log(JSON.stringify({discs}));\n"
+    ))
+    discs = out["discs"]
+    assert len(discs) >= 3, f"expected several flare discs, got {discs}"
+    spread = max(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5 for a in discs for b in discs)
+    assert spread > 5, (
+        "the flare discs collapsed to (near) a single point for a centred fixture — "
+        "the exact regression this test guards against", discs,
+    )
 
 
 def test_automorph_subtlety_thins_opacity_and_stroke_without_ever_reaching_zero(tmp_path):
