@@ -3446,7 +3446,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     // rotate/scale transform, via the same layer() the body used),
     // the code label/chip and the <g data-eid/cx/cy> wrapper all stay,
     // so click/drag/tap and identity are untouched.
-    const markerSvg=(l,hx,hy,entry,extra="",suppressGlyph=false,nearestNeighborDist=Infinity)=>{
+    const markerSvg=(l,hx,hy,entry,extra="",suppressGlyph=false,nearestNeighborDist=Infinity,auraHitD=null)=>{
       // A motion sensor's icon lights for the SAME window its pulse
       // flashes (motionActive — state, or the shared hold window), never
       // the raw state alone: an alarm zone's hardware clears in ~5s and
@@ -3595,20 +3595,33 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         // invisible (the same deliberate choice perimeter's own hit rect
         // makes below).
         //
-        // Bounded to a plain marker's own footprint (hx,hy,HEX_R) — NOT
-        // layer()'s real size/rotation — on purpose. This used to be
-        // layer(...), the fixture's own real (possibly large, rotated)
-        // silhouette, same as its visible glyph would have used. That is
-        // correct for a VISIBLE glyph (the click target should match what
-        // is drawn), but here nothing is drawn at all: a real-size fixture
-        // (a valance, a stretched strip) left an invisible hit-shape far
-        // bigger than any marker, silently overlapping whichever OTHER
-        // fixtures' markers happened to sit inside that footprint and
-        // stealing their clicks — confirmed live (Garry, 2026-09-11: "I am
-        // clearly clicking inside the boundary of the right light, and
-        // outside the bounds of the light that actually responds").
-        body=`<circle data-hit="1" fill="transparent" stroke="none" pointer-events="all" `+
-          `cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${HEX_R}"/>`;
+        // Sized to the aura's OWN morphed outline (auraHitD, the SAME `d`
+        // path automorphAuraSvg's own style branch just painted from —
+        // see its own comment for how this reaches here) when Automorph
+        // actually painted one, falling back to a plain marker's own
+        // footprint (hx,hy,HEX_R) otherwise. Between 2026-09-11 and
+        // 2026-09-17 this was ALWAYS the small HEX_R circle regardless of
+        // how large or elaborate the aura painted — a real fix for a real
+        // bug (a fixture's real, possibly large, physical footprint stealing
+        // a NEIGHBOUR's clicks — Garry, 2026-09-11: "I am clearly clicking
+        // inside the boundary of the right light, and outside the bounds
+        // of the light that actually responds") — but it traded that bug
+        // for a new one: the visible shape and the clickable area stopped
+        // matching AT ALL once an aura replaced the glyph (Garry,
+        // 2026-09-17: "the shape shown on the screen is still not the
+        // clickable area for the device"). auraHitD escapes both: it is
+        // never the fixture's own raw physical size (the 2026-09-11 bug),
+        // it is the aura's morphed ring — which is already built from the
+        // SAME non-overlapping per-fixture cell partition
+        // (buildRoomFixtureCells) the aura's own fill respects, so it
+        // cannot reach into a neighbour's own cell any more than the
+        // visible aura itself can.
+        const auraHitPath=typeof auraHitD==="string" && auraHitD
+          ? `<path data-hit="1" fill="transparent" stroke="none" `+
+            `pointer-events="${l._ghostedFloor?"none":"all"}" d="${auraHitD}"/>`
+          : null;
+        body=auraHitPath || `<circle data-hit="1" fill="transparent" stroke="none" `+
+          `pointer-events="${l._ghostedFloor?"none":"all"}" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${HEX_R}"/>`;
       } else if(SHOW){
         // Bloom hugging the silhouette (a stroke, so it follows any shape),
         // then the body, then the fixture's own detail, then a single
@@ -4008,7 +4021,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     // any marker, so one light's glow can never wash over another's
     // glyph") — per-fixture interleaving was the one draw order that
     // convention exists to forbid.
-    const automorphAuraSvg=(l,hx,hy,room,z,cellPtsM,entry)=>{
+    const automorphAuraSvg=(l,hx,hy,room,z,cellPtsM,entry,hitOut)=>{
       // Defensive twin of the exclusion in the partition-grouping pass
       // above — motion/fan/temp never get a cell there any more, but this
       // function must refuse to aura them even if ever called directly.
@@ -4040,6 +4053,22 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // position, the aura's true anchor.
       const morphed=automorphRing(iconLocal, hx, hy, roomPx, AUTOMORPH_PCT/100);
       const {ring, d}=automorphInkedRing(morphed, hx, hy, hardCapPx);
+      // Handed back to the caller via this side-channel (not the return
+      // value) so every one of the twenty style branches below — each with
+      // its own return {glow, edge} — stays untouched: the caller needs
+      // the same `d` every style already paints from, not a per-style
+      // copy, to size the fixture's own CLICK TARGET to what got drawn
+      // (Garry, 2026-09-17: "the shape shown on the screen is still not
+      // the clickable area for the device" — with the glyph suppressed in
+      // favour of the aura, the click target had stayed a small fixed
+      // circle at the fixture's own anchor regardless of how large the
+      // aura actually painted, since 2026-09-11). This `d` already
+      // respects the same non-overlapping per-fixture cell partition the
+      // aura's own fill does, so using it as the hit target cannot
+      // reintroduce the 2026-09-11 bug (a real-size footprint stealing a
+      // neighbour's clicks) that made the click target a fixed small
+      // circle in the first place.
+      if(hitOut) hitOut.d=d;
       const on=l.isMotion ? motionActive(l) : (l.isLock ? l.state==="locked" : l.state==="on");
       // Neutral, colourless shading (Garry, 2026-09-07: "all these colors
       // now are doing the exact opposite of keeping the visuals clean and
@@ -5623,9 +5652,13 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         const cellsInRoom=room && roomFixtureCells.get(room);
         const cellPtsM=cellsInRoom && cellsInRoom.get(pl.eid);
         const [hx,hy]=iso(pl.x, pl.y, z);
-        const tiers=automorphAuraSvg(l, hx, hy, room, z, cellPtsM, pl.lp);
+        const hitOut={};
+        const tiers=automorphAuraSvg(l, hx, hy, room, z, cellPtsM, pl.lp, hitOut);
         if(!tiers) continue;
-        auraByEid.set(pl.eid, true);
+        // The `d` path every style branch actually painted from — the
+        // fixture's real click target once its glyph is suppressed below,
+        // not just a "did an aura paint" flag.
+        auraByEid.set(pl.eid, hitOut.d || true);
         auraGlow+=tiers.glow; auraEdge+=tiers.edge;
       }
       // Unplaced perimeter lights (room via HA area only, no placement
@@ -5679,7 +5712,8 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // value, is still what may suppress the old glyph: a hallway fixture
       // outside every room polygon gets no aura, so hiding its glyph too
       // would leave nothing drawn there at all.
-      const auraPainted=!!auraByEid.get(pl.eid);
+      const auraHitD=auraByEid.get(pl.eid);
+      const auraPainted=!!auraHitD;
       let clip, fx;
       if(SHOW){
         clip=room?roomClip.get(room):undefined;
@@ -5700,7 +5734,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         if(col||spillSegs) fx={col, spill:spillSegs};
       }
       l._ghostedFloor = !isFocused;
-      jobs.push([l, hx, hy, pl.lp, `data-z="${z}" data-placed="1"`, clip, fx, auraPainted]);
+      jobs.push([l, hx, hy, pl.lp, `data-z="${z}" data-placed="1"`, clip, fx, auraPainted, auraHitD]);
     }
 
     if(SHOW){
@@ -5879,7 +5913,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     // silently hand markerSvg the clip id as its suppressGlyph parameter.
     // The 8th argument is this marker's own nearestDist entry, for the code
     // chip's matching clamp inside markerSvg.
-    jobs.forEach((j,i)=>{ s+=markerSvg(j[0], j[1], j[2], j[3], j[4], !!j[7], nearestDist[i]); });
+    jobs.forEach((j,i)=>{ s+=markerSvg(j[0], j[1], j[2], j[3], j[4], !!j[7], nearestDist[i], j[8]); });
     for(const st of stacks) s+=stackChipSvg(...st);
 
     // Floor level badge

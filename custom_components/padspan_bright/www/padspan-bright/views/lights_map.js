@@ -1700,6 +1700,22 @@ export function buildLightsMapCard(hostIn){
   // map from side to side, because the SVG was pinned to its natural size.
   const isoDiv = document.createElement("div");
   isoDiv.className = "lv-stage";
+  // Pan position, mirrored into view (the same persistent object zoom
+  // already lives on) so it survives a full rebuild of this card, not just
+  // an in-place rebuildISO() — the whole card (this isoDiv included) is
+  // recreated FRESH on every poll-triggered re-render, and a fresh div
+  // starts at scrollLeft/scrollTop 0 regardless of where the user had
+  // panned to (2026-09-17 finding: this raced against a pinch-zoom just
+  // finishing — the touch-action fix stopped the browser's own pinch from
+  // fighting the app's, but a poll landing right after a real pinch could
+  // still rebuild the card and silently reset the pan a second later,
+  // reading as the exact same "placement auto-corrects" symptom through a
+  // completely different mechanism). Restored once below, after the
+  // initial rebuildISO() gives the stage something to scroll.
+  isoDiv.addEventListener("scroll", () => {
+    view.scrollLeft = isoDiv.scrollLeft;
+    view.scrollTop = isoDiv.scrollTop;
+  });
 
   // Semantic zoom (use surface): the codes leave the drawing below 100% and
   // come back above it, so a zoom change across that line is a rebuild, not
@@ -2364,6 +2380,14 @@ export function buildLightsMapCard(hostIn){
   const legend = buildShapeLegend(el, Object.values(host.lightsByEid));
   if (legend) mapCard.appendChild(legend);
   rebuildISO();
+  // Restore the pan position a previous rebuild of this same card saved
+  // (see the scroll listener above) — skipped on the very first-ever
+  // mount, where there is nothing to restore yet and 0,0 is already
+  // correct. Real browsers clamp an out-of-range scrollLeft/scrollTop to
+  // the content's own current bounds, so this is safe even if the drawing
+  // shrank since the value was saved.
+  if (view.scrollLeft !== undefined) isoDiv.scrollLeft = view.scrollLeft;
+  if (view.scrollTop !== undefined) isoDiv.scrollTop = view.scrollTop;
   return mapCard;
 }
 

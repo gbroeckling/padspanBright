@@ -162,6 +162,52 @@ def test_sticky_control_row_is_opt_in_per_host(tmp_path):
     assert out["sticky"] is True, "host.stickyToolbar: true must add lv-toolbar-sticky"
 
 
+def test_pan_position_survives_a_full_rebuild_of_the_card(tmp_path):
+    """2026-09-17 finding, live: buildLightsMapCard creates a BRAND NEW
+    isoDiv every time it's called — every poll-triggered re-render of the
+    Atlas tab rebuilds the whole card from scratch, not just an in-place
+    rebuildISO(). A fresh div starts at scrollLeft/scrollTop 0 regardless
+    of where the user had just pinched-and-panned to, which reads as
+    "the system auto-adjusts the placement" — the touch-action fix (styles.css)
+    stopped the BROWSER's own pinch-zoom from fighting the app's, but did
+    nothing about a poll landing right after a real pinch finished and
+    silently resetting the pan a moment later. view (the same persistent
+    object zoom already lives on) now carries the pan position across
+    rebuilds too."""
+    out = _run(_EL_JS + (
+        f"const MODEL={json.dumps(_MODEL)};\n"
+        "const view = { floorGap: 150, horizGap: 0, focusIdx: 0, zoom: 1 };\n"
+        "const host = {\n"
+        "  el, floors: MODEL.floors, model: MODEL, tier: 'pro', byRoom: {}, lightsByEid: {}, lightsLoading: false,\n"
+        "  hiddenEids: new Set(), view,\n"
+        "  saveView: async () => {}, callWS: async () => ({}), toast: () => {},\n"
+        "  onHexesBuilt: () => {}, onRowClick: () => {}, onToggleHidden: () => {}, afterAssign: () => {},\n"
+        "};\n"
+        "const card1 = LM.buildLightsMapCard(host);\n"
+        "const stage1 = card1.querySelector('.lv-stage');\n"
+        "stage1.scrollLeft = 123; stage1.scrollTop = 45;\n"
+        "stage1.dispatchEvent({ type: 'scroll' });\n"
+        "const card2 = LM.buildLightsMapCard(host);\n"
+        "const stage2 = card2.querySelector('.lv-stage');\n"
+        "out.sameNode = stage1 === stage2;\n"
+        "out.scrollLeft = stage2.scrollLeft;\n"
+        "out.scrollTop = stage2.scrollTop;\n"
+    ))
+    assert out["sameNode"] is False, "the rebuild must produce a genuinely fresh stage element, not reuse the old one"
+    assert out["scrollLeft"] == 123 and out["scrollTop"] == 45, (
+        "a fresh isoDiv from a card rebuild must restore the pan position the previous one had", out)
+
+
+def test_pan_position_defaults_to_zero_on_the_very_first_mount(tmp_path):
+    """No prior scroll to restore yet — must not throw, and must leave the
+    stage at its natural 0,0 start."""
+    out = _run(_base_host("") + (
+        "const stage = card.querySelector('.lv-stage');\n"
+        "out.scrollLeft = stage.scrollLeft; out.scrollTop = stage.scrollTop;\n"
+    ))
+    assert out["scrollLeft"] == 0 and out["scrollTop"] == 0, out
+
+
 # ResizeObserver's real browser behaviour — firing once immediately on
 # observe(), delivering the initial size — is what the dom shim's own
 # no-op stub does not do, so these two tests install a minimal stand-in

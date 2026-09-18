@@ -64,14 +64,33 @@ def test_movement_cancel_guard_checks_armed_not_timer_truthiness():
 
 
 def test_lv_stage_suppresses_the_native_long_press_menu_but_keeps_one_finger_pan():
-    """-webkit-touch-callout, never touch-action:none, on .lv-stage — the map
+    """-webkit-touch-callout on .lv-stage, never touch-action:none — the map
     relies on the browser's OWN native one-finger scroll to pan (wireStageTouch
-    only implements 2-finger pinch-zoom), so touch-action:none here would
+    only implements 2-finger pinch-zoom itself), so touch-action:none here would
     silently break panning, not just long-press."""
     m = re.search(r"\.lv-stage\{([^}]*)\}", _CSS, re.S)
     assert m, "no .lv-stage rule found"
     rule = m.group(1)
-    declarations = re.sub(r"/\*.*?\*/", "", rule, flags=re.S)
-    assert "-webkit-touch-callout:none" in declarations.replace("\n", "").replace(" ", ""), rule
-    assert "touch-action" not in declarations, \
-        "touch-action on .lv-stage would break native one-finger pan — regression"
+    declarations = re.sub(r"/\*.*?\*/", "", rule, flags=re.S).replace("\n", "").replace(" ", "")
+    assert "-webkit-touch-callout:none" in declarations, rule
+    assert "touch-action:none" not in declarations, \
+        "touch-action:none on .lv-stage would break native one-finger pan — regression"
+
+
+def test_lv_stage_excludes_native_pinch_zoom_but_keeps_native_pan():
+    """2026-09-17 finding: leaving touch-action entirely unset (the original
+    fix) let the browser's OWN native two-finger pinch-zoom compete with
+    wireStageTouch's own JS pinch handling for the same gesture — on a real
+    touchscreen the OS/browser zoom quietly won, changing the whole page's
+    zoom and resizing the stage out from under wherever the app had just
+    scrolled it (Garry: "the system autoadjusts the placement... I think
+    the zoom is the one built into windows"). touch-action:pan-x pan-y
+    keeps native panning (what the fix above still needs) while excluding
+    the browser's own pinch-zoom recognition specifically, leaving
+    wireStageTouch as the only thing that can change zoom here."""
+    m = re.search(r"\.lv-stage\{([^}]*)\}", _CSS, re.S)
+    assert m, "no .lv-stage rule found"
+    rule = m.group(1)
+    declarations = re.sub(r"/\*.*?\*/", "", rule, flags=re.S).replace("\n", "").replace(" ", "")
+    assert "touch-action:pan-xpan-y" in declarations, (
+        "must explicitly exclude native pinch-zoom while keeping native pan", rule)

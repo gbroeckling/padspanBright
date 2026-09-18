@@ -4560,15 +4560,25 @@ def test_automorph_suppresses_the_glyph_only_where_an_aura_really_painted(tmp_pa
     )
 
 
-def test_suppressed_glyphs_hit_target_stays_marker_sized_not_the_fixtures_real_size(tmp_path):
+def test_suppressed_glyphs_hit_target_is_the_auras_own_shape_not_the_fixtures_raw_size(tmp_path):
     """Garry, 2026-09-11, live: "I am clearly clicking inside the boundary
     of the right light, and outside the bounds of the light that actually
     responds." Root cause: a suppressed (aura-replaced) fixture kept an
     invisible hit target at its own REAL size/rotation — a 4m valance drew
     an invisible click-catching silhouette metres wide, silently overlapping
     and stealing clicks from any other marker that happened to sit inside
-    that footprint. The hit target must now be a plain HEX_R circle
-    regardless of how large or rotated the fixture's own real size is."""
+    that footprint. Fixed (2026-09-11 → 2026-09-17) by pinning the hit
+    target to a plain HEX_R circle regardless of the fixture's real size —
+    which then traded that bug for a new one: "the shape shown on the
+    screen is still not the clickable area for the device" (2026-09-17),
+    since the visible aura had grown to the room's own scale while the
+    click target stayed the tiny original circle. auraHitD (the SAME `d`
+    path automorphAuraSvg's own style branch painted the visible aura
+    from) now sizes the hit target instead: it can never be the fixture's
+    own raw, unclamped physical footprint (the 2026-09-11 bug — that path
+    is never even computed from width_cm/height_cm/rotation), and it
+    already reflects whatever the aura actually painted (the 2026-09-17
+    fix), because it IS that same path."""
     NOW = 1_000_000_000_000
     model = {
         "room_geometry_m": {"Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 8], [0, 8]]}},
@@ -4591,18 +4601,57 @@ def test_suppressed_glyphs_hit_target_stays_marker_sized_not_the_fixtures_real_s
         "const startIdx=svg.indexOf('data-eid=\"light.valance\"');\n"
         "const body=startIdx>=0 ? svg.slice(startIdx, svg.indexOf('</g>', startIdx)) : '';\n"
         "const hitCircle=/<circle data-hit=\"1\" fill=\"transparent\"[^>]*r=\"([0-9.]+)\"/.exec(body);\n"
+        "const hitPath=/<path data-hit=\"1\" fill=\"transparent\"[^>]* d=\"([^\"]+)\"/.exec(body);\n"
         "const hasRotatedGroup=/<g transform=\"[^\"]*rotate\\(35/.test(body);\n"
-        "console.log(JSON.stringify({found:startIdx>=0, hitR: hitCircle?Number(hitCircle[1]):null, hasRotatedGroup}));\n"
+        "console.log(JSON.stringify({found:startIdx>=0, hasHitCircle: !!hitCircle, hasHitPath: !!hitPath, hasRotatedGroup}));\n"
     ))
     assert out["found"], out
-    assert out["hitR"] is not None, "the suppressed glyph must still keep a plain circular hit target"
-    assert out["hitR"] < 30, (
-        "the hit target must stay a plain marker's own radius, not the fixture's real "
-        "400cm-wide, rotated footprint", out
-    )
+    assert out["hasHitPath"], "the suppressed glyph's hit target must be the aura's own path, not a plain circle"
+    assert not out["hasHitCircle"], (
+        "a fallback circular hit target means the aura's own geometry never reached here", out)
     assert not out["hasRotatedGroup"], (
-        "the suppressed hit target must not inherit the fixture's own rotation/scale transform", out
+        "the hit target is already in absolute coordinates (the aura's own morphed ring) — "
+        "it must never ALSO inherit the fixture's own rotation/scale transform on top of that", out
     )
+
+
+def test_suppressed_glyph_hit_targets_stay_disjoint_for_two_crowded_fixtures(tmp_path):
+    """The actual neighbour-safety property the 2026-09-11 fix protected,
+    re-proven against the new (larger, aura-shaped) hit target: two
+    fixtures 20cm apart — closer together than either one's own aura
+    would reach unclamped — must still end up with two DIFFERENT hit
+    paths, each built from its own non-overlapping cell
+    (buildRoomFixtureCells), not one fixture's aura silently swallowing
+    the other's click target."""
+    NOW = 1_000_000_000_000
+    model = {
+        "room_geometry_m": {"Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [10, 0], [10, 10], [0, 10]]}},
+        "light_positions_m": {
+            "light.a": {"x_m": 5.0, "y_m": 5.0, "floor_id": "main"},
+            "light.b": {"x_m": 5.2, "y_m": 5.0, "floor_id": "main"},
+        },
+    }
+    lbe = {
+        "light.a": {"entity_id": "light.a", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.b": {"entity_id": "light.b", "state": "on", "code": "A02", "shape": "circle", "isMotion": False, "last_changed": None},
+    }
+    floors = [{"id": "main", "name": "Main", "level": 0}]
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LBE={json.dumps(lbe)};\n"
+        f"const FLOORS={json.dumps(floors)};\n"
+        f"const svg=M.buildIsoSVG(MODEL,{{}},new Set(),null,150,0,LBE,false,FLOORS,"
+        f"{{nowMs:{NOW}, automorph:true, automorphRoomPct:80, automorphStyle:'glow'}});\n"
+        "const grab=(eid)=>{const g=new RegExp('<g class=\"lhex\" data-eid=\"'+eid+'\"[^>]*>([\\\\s\\\\S]*?)</g>').exec(svg); return g?g[1]:null;};\n"
+        "const hitD=(b)=>{const m=/<path data-hit=\"1\" fill=\"transparent\"[^>]* d=\"([^\"]+)\"/.exec(b||''); return m?m[1]:null;};\n"
+        "const a=grab('light\\\\.a'), b=grab('light\\\\.b');\n"
+        "console.log(JSON.stringify({dA: hitD(a), dB: hitD(b)}));\n"
+    ))
+    assert out["dA"] and out["dB"], (
+        "both crowded fixtures must still get an aura-shaped hit path", out)
+    assert out["dA"] != out["dB"], (
+        "two neighbouring fixtures' hit targets must stay distinct, not one path for both", out)
 
 
 def test_automorph_never_auras_or_suppresses_motion_fan_or_temp_markers(tmp_path):
