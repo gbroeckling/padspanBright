@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.52";
-const RELEASE_BUILD_ID = "20260918T212045Z";
+const APP_VERSION = "0.38.53";
+const RELEASE_BUILD_ID = "20260918T212822Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -596,6 +596,16 @@ class PadSpanHaApp extends HTMLElement {
             <button class="btn inline" id="toggleSide">Toggle</button>
           </div>
 
+          <!-- Flood alarm latches (flood_latch.py) — always visible off to
+               the side, whichever tab is open, not buried in a device row.
+               Hidden entirely when nothing is latched. -->
+          <div id="emergencyBanner" class="emergency-banner hidden">
+            <div class="emergency-banner-head" id="emergencyBannerHead">
+              <span>🚨</span><span id="emergencyBannerCount">0 active</span>
+            </div>
+            <div id="emergencyBannerList"></div>
+          </div>
+
           <div style="margin-top:12px;margin-bottom:8px" class="muted" id="navLabel">Menu</div>
           <div class="nav" id="nav"></div>
         </aside>
@@ -607,6 +617,7 @@ class PadSpanHaApp extends HTMLElement {
             <span class="mobile-topbar-title" id="mobileTitle">Overview</span>
             <button class="mobile-topbar-pill" id="mobileDataPill">Sample</button>
             <button class="mobile-topbar-pill" id="mobileModePill">Advanced</button>
+            <button class="mobile-topbar-pill hidden" id="mobileEmergencyPill" style="background:#7f1d1d;border-color:#dc2626;color:#fecaca">🚨 0</button>
           </div>
           <div class="row desktop-topbar" style="margin-bottom:10px;align-items:center">
             <span class="pill" id="cloudBadge">Cloud disabled</span>
@@ -1725,6 +1736,7 @@ class PadSpanHaApp extends HTMLElement {
     this.$("#scanBadge").textContent = `Scan: ${scan}s`;
     this.$("#statusBadge").textContent = `Status: ${st}`;
     this.$("#cloudBadge").textContent = "Cloud disabled";
+    this._updateEmergencyBanner();
 
     const b = this.$("#dataModeToggle");
     if(b) b.textContent = (this.state.dataMode === "live") ? "Live" : "Sample";
@@ -1734,6 +1746,74 @@ class PadSpanHaApp extends HTMLElement {
       cb.textContent = mode === "basic" ? "Basic" : mode === "advanced" ? "Advanced" : "Dev";
       cb.style.outline = mode === "basic" ? "2px solid rgba(94,234,212,.6)"
                        : mode === "development" ? "2px solid rgba(239,83,80,.5)" : "";
+    }
+  }
+
+  /** Flood alarm latches (flood_latch.py), off to the side regardless of the
+   *  active tab (Garry, 2026-09-19: "Is there something like an emergency
+   *  resets button off to the side?") — not buried in whichever room/table
+   *  row the sensor happens to appear in. Hidden entirely when nothing is
+   *  latched; expires_at math mirrors flood_latch.py's is_active() and
+   *  views/iso_lights.js's floodLatchActive(), same window, same rule. */
+  _updateEmergencyBanner(){
+    const latches = this.state.settings?.flood_latches || {};
+    const nowS = Date.now() / 1000;
+    const active = Object.entries(latches).filter(([, rec]) =>
+      rec && typeof rec.expires_at === "number" && nowS < rec.expires_at);
+
+    const banner = this.$("#emergencyBanner");
+    const countEl = this.$("#emergencyBannerCount");
+    const listEl = this.$("#emergencyBannerList");
+    const mobilePill = this.$("#mobileEmergencyPill");
+    if(!banner || !countEl || !listEl) return;
+
+    if(!active.length){
+      banner.classList.add("hidden");
+      if(mobilePill) mobilePill.classList.add("hidden");
+      return;
+    }
+    banner.classList.remove("hidden");
+    countEl.textContent = `${active.length} active`;
+    if(mobilePill){ mobilePill.classList.remove("hidden"); mobilePill.textContent = `🚨 ${active.length}`; }
+
+    listEl.className = "emergency-banner-list";
+    listEl.innerHTML = "";
+    for(const [eid] of active){
+      const name = this._hass?.states?.[eid]?.attributes?.friendly_name || eid;
+      const row = document.createElement("div");
+      row.className = "emergency-banner-row";
+      const nameEl = document.createElement("span");
+      nameEl.className = "name"; nameEl.title = name; nameEl.textContent = name;
+      row.appendChild(nameEl);
+      const wrap = document.createElement("span");
+      // Two-click confirm — the same "Reset -> Yes/No" pattern the Manage
+      // tab's Untag button already uses, so a stray tap can't dismiss a
+      // real alarm.
+      const makeResetBtn = () => {
+        const b = document.createElement("button");
+        b.className = "btn tiny"; b.textContent = "Reset";
+        b.addEventListener("click", (e) => {
+          e.stopPropagation();
+          wrap.innerHTML = "";
+          const yes = document.createElement("button");
+          yes.className = "btn tiny"; yes.style.cssText = "background:#7f1d1d;border-color:#dc2626;color:#fecaca";
+          yes.textContent = "Yes";
+          const no = document.createElement("button");
+          no.className = "btn tiny"; no.textContent = "No";
+          yes.addEventListener("click", async (e2) => {
+            e2.stopPropagation();
+            wrap.innerHTML = "";
+            try { await this._callWS({ type: "padspan_bright/flood_reset", entity_id: eid }); await this._loadSettings(); }
+            catch(err){ console.warn("flood reset failed", err); wrap.appendChild(makeResetBtn()); }
+          });
+          no.addEventListener("click", (e2) => { e2.stopPropagation(); wrap.innerHTML = ""; wrap.appendChild(makeResetBtn()); });
+          wrap.appendChild(yes); wrap.appendChild(no);
+        });
+        return b;
+      };
+      wrap.appendChild(makeResetBtn());
+      row.appendChild(wrap);
+      listEl.appendChild(row);
     }
   }
 

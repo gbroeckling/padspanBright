@@ -17,6 +17,16 @@
 .mono{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#0c1a0e;border:1px solid var(--line);border-radius:12px;padding:12px;overflow:auto}
 .hidden{display:none}
 .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+/* Flood alarm latches, sidebar (panel.js #emergencyBanner) — always visible
+   off to the side regardless of the active tab, hidden entirely when
+   nothing is latched. Deliberately louder than .pill: this is an alarm,
+   not a status readout. */
+.emergency-banner{margin-top:12px;padding:8px 10px;border-radius:10px;background:rgba(127,29,29,.35);border:1px solid #dc2626}
+.emergency-banner-head{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:#fecaca;cursor:pointer}
+.emergency-banner-list{margin-top:6px;display:flex;flex-direction:column;gap:4px}
+.emergency-banner-row{display:flex;align-items:center;gap:6px;font-size:11px;color:#fecaca}
+.emergency-banner-row .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.emergency-banner-row .btn{padding:2px 7px;font-size:10px;min-height:0;width:auto}
 .pill{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #2d4a38;font-size:11px;margin-right:6px;margin-bottom:6px}
 .item{display:flex;gap:8px;align-items:center;padding:6px;border-radius:8px}
 .roomdot{width:10px;height:10px;border-radius:999px;display:inline-block;flex:0 0 10px;box-shadow:0 0 0 2px rgba(255,255,255,.08)}
