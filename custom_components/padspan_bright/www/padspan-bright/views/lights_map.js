@@ -141,7 +141,7 @@ export function effectiveState(eid, reported, now = Date.now()){
 // ── Device classes on the map ────────────────────────────────────────────────
 // The layer chips: the map keeps every class in view and DIMS the others,
 // because a fan's place on the ceiling is context for the light beside it.
-export const LIGHT_CLASSES = [["all","All"],["light","Lights"],["strip","Strips"],["fan","Fans"],["motion","Motion"],["temp","Temps"],["humidity","Humidity"],["air","Air"],["lock","Locks"],["door","Doors/Windows"],["flood","Flood"]];
+export const LIGHT_CLASSES = [["all","All"],["light","Lights"],["strip","Strips"],["fan","Fans"],["motion","Motion"],["temp","Temps"],["humidity","Humidity"],["air","Air"],["lock","Locks"],["door","Doors/Windows"],["flood","Emergency"]];
 
 // Automorph's style dropdown vocabulary — derived from AUTOMORPH_STYLE_LABELS
 // itself (iso_lights.js) rather than a hand-copied list. A style added there
@@ -779,7 +779,7 @@ export function openRoomSheet(api, lights, room, onlyEids){
   if (agg.fansTotal) parts.push(`Fans ${agg.fansOn}/${agg.fansTotal}`);
   if (agg.motionTotal) parts.push(agg.motionActive ? `Motion ×${agg.motionActive}` : "Motion clear");
   if (agg.airTotal) parts.push(`Air ${airQualityWord(agg.airWorst)}`);
-  if (agg.floodActive) parts.push(`⚠ Flood ×${agg.floodActive}`);
+  if (agg.floodActive) parts.push(`⚠ Emergency ×${agg.floodActive}`);
   const actions = [];
   if (lightEids.length) {
     actions.push({ label: "All lights off", run: () => api.setMany(lightEids, false) });
@@ -804,7 +804,7 @@ export function openFloorSheet(api, lights, model, z){
   if (agg.motionActive) parts.push(`Motion ×${agg.motionActive}`);
   // Like motion: only worth a word on the floor line when something is up.
   if (agg.airTotal && agg.airWorst > 0) parts.push(`Air ${airQualityWord(agg.airWorst)}`);
-  if (agg.floodActive) parts.push(`⚠ Flood ×${agg.floodActive}`);
+  if (agg.floodActive) parts.push(`⚠ Emergency ×${agg.floodActive}`);
   const actions = [];
   if (agg.lightEids.length) {
     actions.push({ label: "All lights off", run: () => api.setMany(agg.lightEids, false) });
@@ -2639,7 +2639,7 @@ export function buildLightsTable(host, lights){
         : l.isDoor
         ? el("span", { class: `lv-state ${on ? "on" : "off"}` }, on ? "OPEN" : "CLOSED")
         : l.isFlood
-        ? el("span", { class: `lv-state ${on ? "on" : "off"}`, title: "Flood — read-only" }, on ? "WET" : "DRY")
+        ? el("span", { class: `lv-state ${on ? "on" : "off"}`, title: "Emergency (flood) — read-only" }, on ? "WET" : "DRY")
         : el("span", { class: `lv-state ${on ? "on" : "off"}` }, on ? "ON" : "OFF")),
       // Its own column, next to State (Garry, 2026-09-07: "we still need
       // another option next to state... a reassign to another device type

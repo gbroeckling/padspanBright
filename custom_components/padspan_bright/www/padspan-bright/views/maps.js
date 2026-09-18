@@ -9420,9 +9420,9 @@ function _lightsTab(ctx, maps, active) {
 
     const on = l.state === "on";
     // A read-only class (motion, door/window, temperature, humidity, air
-    // quality) has nothing to switch — the button only ever produced the
-    // read-only toast.
-    if (!(l.isMotion || l.isDoor || l.isTemp || l.isHumidity || l.isAir)) insp.appendChild(el("button", {
+    // quality, flood) has nothing to switch — the button only ever produced
+    // the read-only toast.
+    if (!(l.isMotion || l.isDoor || l.isTemp || l.isHumidity || l.isAir || l.isFlood)) insp.appendChild(el("button", {
       class: `lv-onoff ${on ? "on" : "off"}`,
       onclick: () => toggle(l.entity_id),
     }, on ? "Turn Off" : "Turn On"));

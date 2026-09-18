@@ -363,7 +363,7 @@ export const LIGHT_SHAPES = [
   ["airquality", "Air quality sensor"],
   ["lock",      "Door lock"],
   ["door",      "Door/window sensor"],
-  ["flood",     "Flood/leak sensor"],
+  ["flood",     "Emergency (flood) sensor"],
 ];
 
 // "perimeter" is drawn once, structurally differently from every shape
