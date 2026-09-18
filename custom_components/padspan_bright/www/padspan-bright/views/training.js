@@ -1229,6 +1229,319 @@ function _svg2dMode() {
 </svg>`;
 }
 
+function _svgAtlasOverview() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<style>
+@keyframes markerPop{0%{transform:scale(0);opacity:0}100%{transform:scale(1);opacity:1}}
+.m1{animation:markerPop 0.4s ease-out 0.2s both}
+.m2{animation:markerPop 0.4s ease-out 0.6s both}
+.m3{animation:markerPop 0.4s ease-out 1.0s both}
+</style>
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">Atlas — every device on the real floor plan</text>
+<g transform="skewX(-15) translate(80,50)">
+<rect width="200" height="130" rx="4" fill="#52b78812" stroke="#52b788" stroke-width="1"/>
+<line x1="0" y1="65" x2="200" y2="65" stroke="#1b3526" stroke-width="1"/>
+<line x1="100" y1="0" x2="100" y2="130" stroke="#1b3526" stroke-width="1"/>
+<text x="50" y="35" text-anchor="middle" fill="#4a6052" font-size="9" font-family="system-ui">Bedroom</text>
+<text x="150" y="35" text-anchor="middle" fill="#4a6052" font-size="9" font-family="system-ui">Bath</text>
+<text x="100" y="100" text-anchor="middle" fill="#4a6052" font-size="9" font-family="system-ui">Hallway</text>
+<g class="m1" transform="translate(55,25)"><circle r="7" fill="#fbbf2440" stroke="#fbbf24" stroke-width="1.5"/><circle r="2.5" fill="#fbbf24"/></g>
+<g class="m2" transform="translate(150,95)"><rect x="-7" y="-7" width="14" height="14" rx="3" fill="#60a5fa40" stroke="#60a5fa" stroke-width="1.5"/></g>
+<g class="m3" transform="translate(120,20)"><circle r="7" fill="#f8717140" stroke="#f87171" stroke-width="1.5"/><path d="M-2.5,-1 L2.5,-1 M0,-1 L0,3" stroke="#f87171" stroke-width="1.2"/></g>
+</g>
+<text x="200" y="200" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="system-ui">Lights, sensors, locks and doors — one map, real positions</text>
+</svg>`;
+}
+
+function _svgAtlasEditions() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">One key unlocks the same Atlas on either download</text>
+<rect x="20" y="28" width="165" height="160" rx="8" fill="#0a150e" stroke="#1b3526" stroke-width="1.5"/>
+<text x="102" y="48" text-anchor="middle" fill="#94a3b8" font-size="10" font-weight="600" font-family="system-ui">Free</text>
+<circle cx="60" cy="75" r="6" fill="#52b78840" stroke="#52b788" stroke-width="1.5"/>
+<text x="76" y="79" fill="#94a3b8" font-size="9" font-family="system-ui">One marker per light</text>
+<text x="102" y="130" text-anchor="middle" fill="#64748b" font-size="9" font-family="system-ui">Floors, rooms,</text>
+<text x="102" y="144" text-anchor="middle" fill="#64748b" font-size="9" font-family="system-ui">tap-to-toggle.</text>
+<text x="102" y="168" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">No key required</text>
+<rect x="215" y="28" width="165" height="160" rx="8" fill="#0a150e" stroke="#52b788" stroke-width="2"/>
+<text x="297" y="48" text-anchor="middle" fill="#52b788" font-size="10" font-weight="600" font-family="system-ui">Pro / Bright Pro</text>
+<text x="297" y="70" text-anchor="middle" fill="#52b788" font-size="9" font-family="system-ui">Real placement</text>
+<text x="297" y="86" text-anchor="middle" fill="#52b788" font-size="9" font-family="system-ui">Sensors, locks, doors</text>
+<text x="297" y="102" text-anchor="middle" fill="#52b788" font-size="9" font-family="system-ui">Automorph + Showcase</text>
+<rect x="255" y="112" width="84" height="22" rx="11" fill="#1b3526" stroke="#52b788" stroke-width="1"/>
+<text x="297" y="127" text-anchor="middle" fill="#a7f3d0" font-size="9" font-family="system-ui">pro / bright key</text>
+<text x="297" y="168" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">3-month free trial, no card</text>
+</svg>`;
+}
+
+function _svgAtlasNav() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<style>
+@keyframes navGlow{0%,100%{opacity:0.6}50%{opacity:1}}
+.navSel{animation:navGlow 2s ease-in-out infinite}
+</style>
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">Two ways to open Atlas</text>
+<rect x="16" y="28" width="130" height="176" rx="6" fill="#0a150e" stroke="#1b3526" stroke-width="1"/>
+<text x="30" y="46" fill="#4a6052" font-size="9" font-weight="600" font-family="system-ui">MAPPING</text>
+<text x="30" y="66" fill="#64748b" font-size="9" font-family="system-ui">Rooms</text>
+<text x="30" y="84" fill="#64748b" font-size="9" font-family="system-ui">Scanners</text>
+<rect class="navSel" x="24" y="94" width="112" height="20" rx="4" fill="#1b3526" stroke="#52b788" stroke-width="1"/>
+<text x="30" y="108" fill="#a7f3d0" font-size="9" font-weight="600" font-family="system-ui">Atlas</text>
+<text x="30" y="128" fill="#64748b" font-size="9" font-family="system-ui">Barriers</text>
+<rect x="170" y="28" width="212" height="176" rx="6" fill="#050e08" stroke="#1b3526" stroke-width="1"/>
+<text x="184" y="46" fill="#4a6052" font-size="9" font-weight="600" font-family="system-ui">SIDEBAR</text>
+<text x="184" y="68" fill="#64748b" font-size="9" font-family="system-ui">Overview · Objects · Maps</text>
+<rect x="178" y="80" width="196" height="22" rx="4" fill="#1b3526" stroke="#52b788" stroke-width="1"/>
+<text x="188" y="95" fill="#a7f3d0" font-size="9" font-weight="600" font-family="system-ui">🗺️ Atlas (standalone panel)</text>
+<text x="184" y="126" fill="#64748b" font-size="9" font-family="system-ui">Settings → turn on the Atlas</text>
+<text x="184" y="140" fill="#64748b" font-size="9" font-family="system-ui">sidebar panel for a lighter view</text>
+<text x="184" y="154" fill="#64748b" font-size="9" font-family="system-ui">without the rest of Mapping.</text>
+</svg>`;
+}
+
+function _svgAtlasPlace() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<style>
+@keyframes dragPin{0%{transform:translate(40px,40px)}100%{transform:translate(190px,110px)}}
+.pin{animation:dragPin 2.4s ease-in-out infinite}
+@keyframes pinPulse{0%,100%{r:9;opacity:0.9}50%{r:13;opacity:0.4}}
+.pinRing{animation:pinPulse 2.4s ease-in-out infinite}
+</style>
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">Drag the pin, or queue it and tap the map</text>
+<rect x="16" y="28" width="240" height="176" rx="6" fill="#0a1a0f" stroke="#1b3526" stroke-width="1"/>
+<rect x="30" y="42" width="100" height="70" rx="3" fill="#1b3526" opacity="0.2" stroke="#253e2e"/>
+<text x="80" y="80" text-anchor="middle" fill="#4a6052" font-size="9" font-family="system-ui">Living Room</text>
+<g class="pin">
+  <circle class="pinRing" cx="0" cy="0" r="9" fill="none" stroke="#fbbf24" stroke-width="1.5"/>
+  <circle cx="0" cy="0" r="5" fill="#0d2318" stroke="#fbbf24" stroke-width="2"/>
+</g>
+<rect x="270" y="28" width="112" height="176" rx="6" fill="#050e08" stroke="#1b3526" stroke-width="1"/>
+<text x="282" y="48" fill="#52b788" font-size="10" font-weight="600" font-family="system-ui">Hallway Light</text>
+<rect x="282" y="60" width="90" height="20" rx="10" fill="#1b3526" stroke="#52b788" stroke-width="1"/>
+<text x="327" y="74" text-anchor="middle" fill="#a7f3d0" font-size="9" font-family="system-ui">+ Place</text>
+<text x="282" y="100" fill="#4a6052" font-size="8" font-family="system-ui">or, once queued:</text>
+<rect x="282" y="108" width="90" height="20" rx="10" fill="#0d2318" stroke="#4a6052" stroke-width="1"/>
+<text x="327" y="122" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="system-ui">◎ Queued</text>
+<text x="282" y="150" fill="#64748b" font-size="8" font-family="system-ui">Tap the map where</text>
+<text x="282" y="162" fill="#64748b" font-size="8" font-family="system-ui">it really sits.</text>
+</svg>`;
+}
+
+function _svgAtlasShape() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">Real shape, size and rotation — not a generic dot</text>
+<rect x="16" y="28" width="368" height="46" rx="6" fill="#0a150e" stroke="#1b3526" stroke-width="1"/>
+<g transform="translate(48,51)"><rect x="-10" y="-14" width="20" height="24" rx="3" fill="#1b3526" stroke="#94a3b8" stroke-width="1"/><text y="30" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">Pendant</text></g>
+<g transform="translate(120,51)"><ellipse rx="12" ry="7" fill="#1b3526" stroke="#94a3b8" stroke-width="1"/><text y="30" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">Sconce</text></g>
+<g transform="translate(192,51)"><rect x="-16" y="-4" width="32" height="8" rx="4" fill="#52b78840" stroke="#52b788" stroke-width="1.5"/><text y="30" text-anchor="middle" fill="#52b788" font-size="7" font-family="system-ui">Strip ✓</text></g>
+<g transform="translate(264,51)"><polygon points="0,-12 10,8 -10,8" fill="#1b3526" stroke="#94a3b8" stroke-width="1"/><text y="30" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">Chandelier</text></g>
+<g transform="translate(336,51) rotate(30)"><rect x="-14" y="-3" width="28" height="6" rx="3" fill="#1b3526" stroke="#94a3b8" stroke-width="1"/></g>
+<text x="336" y="75" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">30°</text>
+<rect x="16" y="90" width="368" height="98" rx="6" fill="#050e08" stroke="#1b3526" stroke-width="1"/>
+<text x="30" y="110" fill="#4a6052" font-size="9" font-family="system-ui">Width</text>
+<rect x="30" y="116" width="70" height="20" rx="4" fill="#071008" stroke="#1b3526"/><text x="65" y="130" text-anchor="middle" fill="#cbd5e1" font-size="9" font-family="system-ui">80 cm</text>
+<text x="120" y="110" fill="#4a6052" font-size="9" font-family="system-ui">Length</text>
+<rect x="120" y="116" width="70" height="20" rx="4" fill="#071008" stroke="#1b3526"/><text x="155" y="130" text-anchor="middle" fill="#cbd5e1" font-size="9" font-family="system-ui">12 cm</text>
+<text x="210" y="110" fill="#4a6052" font-size="9" font-family="system-ui">Rotation</text>
+<rect x="210" y="116" width="70" height="20" rx="4" fill="#071008" stroke="#1b3526"/><text x="245" y="130" text-anchor="middle" fill="#cbd5e1" font-size="9" font-family="system-ui">30°</text>
+<text x="30" y="164" fill="#64748b" font-size="8" font-family="system-ui">Centimetres, not a generic dot — the same real size the</text>
+<text x="30" y="178" fill="#64748b" font-size="8" font-family="system-ui">fixture actually is, at the angle it's actually mounted.</text>
+</svg>`;
+}
+
+function _svgAtlasSensors() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<style>
+@keyframes motionFlash{0%{opacity:1}20%{opacity:1}100%{opacity:0.15}}
+.mFlash{animation:motionFlash 3s ease-out infinite}
+</style>
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">Live readings tint the marker itself</text>
+<rect x="16" y="30" width="115" height="160" rx="6" fill="#0a150e" stroke="#f87171" stroke-width="1.5"/>
+<text x="73" y="50" text-anchor="middle" fill="#f87171" font-size="10" font-weight="600" font-family="system-ui">Temperature</text>
+<circle cx="73" cy="80" r="14" fill="#f8717130" stroke="#f87171" stroke-width="2"/>
+<text x="73" y="84" text-anchor="middle" fill="#f87171" font-size="10" font-weight="700" font-family="system-ui">22°</text>
+<text x="73" y="112" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">blue &lt;20°</text>
+<text x="73" y="124" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">red ≥20°</text>
+<text x="73" y="136" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">orange &gt;34°</text>
+<rect x="143" y="30" width="115" height="160" rx="6" fill="#0a150e" stroke="#60a5fa" stroke-width="1.5"/>
+<text x="200" y="50" text-anchor="middle" fill="#60a5fa" font-size="10" font-weight="600" font-family="system-ui">Humidity</text>
+<circle cx="200" cy="80" r="14" fill="#60a5fa30" stroke="#60a5fa" stroke-width="2"/>
+<text x="200" y="84" text-anchor="middle" fill="#60a5fa" font-size="10" font-weight="700" font-family="system-ui">47%</text>
+<text x="200" y="118" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">digits when placed</text>
+<text x="200" y="130" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">and reported this hour</text>
+<rect x="270" y="30" width="115" height="160" rx="6" fill="#0a150e" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="327" y="50" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="600" font-family="system-ui">Motion</text>
+<circle class="mFlash" cx="327" cy="80" r="14" fill="#fbbf2430" stroke="#fbbf24" stroke-width="2"/>
+<text x="327" y="118" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">short flash, then a</text>
+<text x="327" y="130" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">graded fade — the same</text>
+<text x="327" y="142" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">on a 5s PIR or a 20min</text>
+<text x="327" y="154" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">radar hold</text>
+</svg>`;
+}
+
+function _svgAtlasOutdoor() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">Outdoor gear places beside the room, not off the map</text>
+<g transform="skewX(-15) translate(90,50)">
+<rect width="200" height="120" rx="4" fill="#52b78812" stroke="#52b788" stroke-width="1"/>
+<text x="100" y="65" text-anchor="middle" fill="#4a6052" font-size="9" font-family="system-ui">Kitchen</text>
+</g>
+<g transform="translate(300,150)">
+<rect x="-24" y="-14" width="48" height="28" rx="4" fill="#0a1a0f" stroke="#1b3526" stroke-width="1"/>
+<text y="4" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">Outside</text>
+</g>
+<line x1="255" y1="135" x2="292" y2="145" stroke="#43a047" stroke-width="1" stroke-dasharray="3,2"/>
+<circle cx="292" cy="148" r="6" fill="#43a04740" stroke="#43a047" stroke-width="1.5"/>
+<text x="292" y="180" text-anchor="middle" fill="#43a047" font-size="8" font-family="system-ui">Driveway camera</text>
+<text x="200" y="200" text-anchor="middle" fill="#64748b" font-size="8" font-family="system-ui">Drop the pin on any real floor plate, right beside the room it sits outside of</text>
+</svg>`;
+}
+
+function _svgAtlasHoverHud() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<style>
+@keyframes hudPulse{0%,100%{opacity:0.85}50%{opacity:1}}
+.hud{animation:hudPulse 2s ease-in-out infinite}
+</style>
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">Three markers, one spot — the hover HUD sorts it out</text>
+<g transform="translate(120,120)">
+<circle r="10" fill="#fbbf2440" stroke="#fbbf24" stroke-width="1.5"/>
+<circle cx="6" cy="-6" r="10" fill="#60a5fa40" stroke="#60a5fa" stroke-width="1.5"/>
+<circle cx="-6" cy="6" r="10" fill="#f8717140" stroke="#f87171" stroke-width="1.5"/>
+</g>
+<rect class="hud" x="20" y="26" width="200" height="80" rx="6" fill="#050e08" stroke="#52b788" stroke-width="1.5"/>
+<text x="32" y="44" fill="#52b788" font-size="9" font-weight="600" font-family="system-ui">Under cursor:</text>
+<text x="32" y="60" fill="#fbbf24" font-size="9" font-family="system-ui">● Hallway Light</text>
+<text x="32" y="75" fill="#60a5fa" font-size="9" font-family="system-ui">■ Temp Sensor</text>
+<text x="32" y="90" fill="#f87171" font-size="9" font-family="system-ui">● Front Lock</text>
+<text x="200" y="150" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="system-ui">Alt+click cycles the stack directly</text>
+<text x="200" y="170" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">A held tap shows a gold ring filling in before it selects</text>
+</svg>`;
+}
+
+function _svgAtlasDoor() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<style>
+@keyframes doorSwing{0%,100%{opacity:1}50%{opacity:0.3}}
+.doorState{animation:doorSwing 2.5s ease-in-out infinite}
+</style>
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">A wall becomes a real RF barrier</text>
+<rect x="16" y="30" width="220" height="160" rx="6" fill="#0a1a0f" stroke="#1b3526" stroke-width="1"/>
+<line x1="30" y1="110" x2="110" y2="110" stroke="#94a3b8" stroke-width="4"/>
+<line x1="140" y1="110" x2="222" y2="110" stroke="#94a3b8" stroke-width="4"/>
+<rect class="doorState" x="112" y="88" width="26" height="44" rx="2" fill="#52b78830" stroke="#52b788" stroke-width="1.5"/>
+<text x="125" y="150" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">marked on the wall list,</text>
+<text x="125" y="163" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">or drawn from the Atlas map</text>
+<rect x="252" y="30" width="132" height="160" rx="6" fill="#050e08" stroke="#1b3526" stroke-width="1"/>
+<text x="264" y="50" fill="#4a6052" font-size="9" font-family="system-ui">Material</text>
+<rect x="264" y="56" width="108" height="20" rx="4" fill="#071008" stroke="#1b3526"/>
+<text x="270" y="70" fill="#cbd5e1" font-size="9" font-family="system-ui">Steel ▾</text>
+<text x="264" y="96" fill="#4a6052" font-size="8" font-family="system-ui">Blocks harder than</text>
+<text x="264" y="108" fill="#4a6052" font-size="8" font-family="system-ui">hollow-core</text>
+<rect x="264" y="122" width="60" height="16" rx="8" fill="#0d2318" stroke="#52b788" stroke-width="1"/>
+<text x="294" y="134" text-anchor="middle" fill="#a7f3d0" font-size="8" font-family="system-ui">Closed</text>
+</svg>`;
+}
+
+function _svgAtlasInvert() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">A backwards sensor? Flip it, don't fight it</text>
+<rect x="20" y="34" width="360" height="34" rx="4" fill="#0a150e" stroke="#1b3526" stroke-width="1"/>
+<text x="34" y="55" fill="#cbd5e1" font-size="10" font-family="system-ui">Upper Garage Car Door</text>
+<rect x="250" y="42" width="52" height="18" rx="9" fill="#1b3526" stroke="#52b788" stroke-width="1"/>
+<text x="276" y="55" text-anchor="middle" fill="#a7f3d0" font-size="8" font-family="system-ui">Invert</text>
+<rect x="310" y="42" width="52" height="18" rx="9" fill="#0d0d0d" stroke="#4a6052" stroke-width="1"/>
+<text x="336" y="55" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="system-ui">Delete</text>
+<rect x="60" y="90" width="130" height="80" rx="6" fill="#150505" stroke="#7f1d1d" stroke-width="1"/>
+<text x="125" y="112" text-anchor="middle" fill="#f87171" font-size="9" font-weight="600" font-family="system-ui">Without Invert</text>
+<text x="125" y="134" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="system-ui">state:on read as</text>
+<text x="125" y="148" text-anchor="middle" fill="#f87171" font-size="9" font-family="system-ui">Open (wrong)</text>
+<rect x="210" y="90" width="130" height="80" rx="6" fill="#0a1a0f" stroke="#52b788" stroke-width="1.5"/>
+<text x="275" y="112" text-anchor="middle" fill="#52b788" font-size="9" font-weight="600" font-family="system-ui">With Invert</text>
+<text x="275" y="134" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="system-ui">state:on read as</text>
+<text x="275" y="148" text-anchor="middle" fill="#52b788" font-size="9" font-family="system-ui">Closed (correct)</text>
+<text x="200" y="196" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">Fixes the reading — no change to the sensor itself</text>
+</svg>`;
+}
+
+function _svgAtlasLock() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<style>
+@keyframes lockToggle{0%,45%{transform:translateY(0)}50%,95%{transform:translateY(-4px)}100%{transform:translateY(0)}}
+.shackle{animation:lockToggle 3s ease-in-out infinite}
+</style>
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">Locks placed and tapped like anything else on Atlas</text>
+<g transform="translate(160,100)">
+<rect x="-22" y="-4" width="44" height="34" rx="4" fill="#1b3526" stroke="#52b788" stroke-width="1.5"/>
+<path class="shackle" d="M-12,-4 v-10 a12,12 0 0 1 24,0 v10" fill="none" stroke="#52b788" stroke-width="3"/>
+<circle cx="0" cy="14" r="3" fill="#071008"/>
+</g>
+<rect x="230" y="72" width="140" height="56" rx="6" fill="#0a150e" stroke="#1b3526" stroke-width="1"/>
+<text x="244" y="92" fill="#52b788" font-size="9" font-weight="600" font-family="system-ui">Front Door Lock</text>
+<text x="244" y="110" fill="#94a3b8" font-size="9" font-family="system-ui">Tap to lock / unlock</text>
+<text x="244" y="122" fill="#4a6052" font-size="7" font-family="system-ui">state shown live on the map</text>
+</svg>`;
+}
+
+function _svgAutomorph() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<style>
+@keyframes auraGrow{0%{r:8;opacity:0.7}100%{r:70;opacity:0.05}}
+.aura1{animation:auraGrow 2.4s ease-out infinite}
+.aura2{animation:auraGrow 2.4s ease-out 0.8s infinite}
+</style>
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">Automorph grows a soft aura into the room</text>
+<rect x="60" y="40" width="280" height="140" rx="6" fill="#0a1a0f" stroke="#1b3526" stroke-width="1"/>
+<circle class="aura1" cx="200" cy="110" r="8" fill="#52b788"/>
+<circle class="aura2" cx="200" cy="110" r="8" fill="#52b788"/>
+<circle cx="200" cy="110" r="6" fill="#0d2318" stroke="#52b788" stroke-width="2"/>
+<text x="200" y="200" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">A rendering layer over the fixture's real position — placement never moves</text>
+</svg>`;
+}
+
+function _svgAutomorphStyles() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">A growing, curated set of styles</text>
+<g transform="translate(60,70)"><circle r="18" fill="#52b78830" stroke="#52b788" stroke-width="1.5"/><text y="34" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">Glow</text></g>
+<g transform="translate(140,70)"><rect x="-16" y="-16" width="32" height="32" fill="none" stroke="#60a5fa" stroke-width="1" stroke-dasharray="2,2"/><text y="34" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">Blueprint</text></g>
+<g transform="translate(220,70)"><circle r="16" fill="#a78bfa20" stroke="#a78bfa" stroke-width="1.5"/><circle r="8" fill="#a78bfa30" stroke="#a78bfa" stroke-width="1"/><text y="34" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">Nebula</text></g>
+<g transform="translate(300,70)"><circle r="17" fill="none" stroke="#fbbf24" stroke-width="2"/><text y="34" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">Halo</text></g>
+<g transform="translate(360,70)"><path d="M0,-16 4,-4 16,0 4,4 0,16 -4,4 -16,0 -4,-4 Z" fill="#f8717130" stroke="#f87171" stroke-width="1"/><text y="34" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">Bloom</text></g>
+<text x="200" y="140" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="system-ui">Pruned whenever two styles read the same at real marker size</text>
+<text x="200" y="160" text-anchor="middle" fill="#4a6052" font-size="8" font-family="system-ui">— the current list lives in the Automorph picker itself</text>
+</svg>`;
+}
+
+function _svgShowcase() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">19 curated themes for the whole map</text>
+<rect x="30" y="34" width="80" height="60" rx="4" fill="#0d0d0d" stroke="#94a3b8" stroke-width="1"/><text x="70" y="106" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">Neo HUD</text>
+<rect x="130" y="34" width="80" height="60" rx="4" fill="#f8fafc" stroke="#b8860b" stroke-width="1"/><text x="170" y="106" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">Real-Estate</text>
+<rect x="230" y="34" width="80" height="60" rx="4" fill="#0a2a1a" stroke="#22d3ee" stroke-width="1"/><text x="270" y="106" text-anchor="middle" fill="#4a6052" font-size="7" font-family="system-ui">Bioluminescent</text>
+<rect x="330" y="34" width="45" height="60" rx="4" fill="#2a0a2a" stroke="#e879f9" stroke-width="1"/>
+<rect x="30" y="120" width="345" height="52" rx="6" fill="#0a150e" stroke="#52b788" stroke-width="1.5"/>
+<text x="46" y="140" fill="#52b788" font-size="9" font-weight="600" font-family="system-ui">Presentation → Showcase</text>
+<text x="46" y="158" fill="#94a3b8" font-size="8" font-family="system-ui">Colour, room edges, glow and light-pools all change together</text>
+</svg>`;
+}
+
+function _svgPresets() {
+  return `<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" width="100%" style="max-height:200px;background:#071008;border-radius:8px;display:block">
+<text x="200" y="16" text-anchor="middle" fill="#52b788" font-size="11" font-weight="600" font-family="system-ui">Save a whole look, load it back later</text>
+<rect x="20" y="34" width="180" height="24" rx="4" fill="#0a150e" stroke="#1b3526" stroke-width="1"/>
+<text x="30" y="50" fill="#cbd5e1" font-size="9" font-family="system-ui">▾ Select a look</text>
+<rect x="210" y="34" width="170" height="24" rx="4" fill="#0a150e" stroke="#1b3526" stroke-width="1"/>
+<text x="220" y="50" fill="#cbd5e1" font-size="9" font-family="system-ui">"Evening, downstairs"</text>
+<rect x="20" y="76" width="360" height="106" rx="6" fill="#050e08" stroke="#1b3526" stroke-width="1"/>
+<text x="34" y="96" fill="#4a6052" font-size="9" font-family="system-ui">Evening, downstairs</text>
+<rect x="300" y="86" width="64" height="18" rx="9" fill="#1b3526" stroke="#52b788" stroke-width="1"/><text x="332" y="98" text-anchor="middle" fill="#a7f3d0" font-size="8" font-family="system-ui">Apply</text>
+<text x="34" y="122" fill="#4a6052" font-size="9" font-family="system-ui">Bright morning, whole house</text>
+<rect x="300" y="112" width="64" height="18" rx="9" fill="#1b3526" stroke="#52b788" stroke-width="1"/><text x="332" y="124" text-anchor="middle" fill="#a7f3d0" font-size="8" font-family="system-ui">Apply</text>
+<text x="34" y="160" fill="#64748b" font-size="8" font-family="system-ui">Theme + Automorph style, and optionally floor/spacing/</text>
+<text x="34" y="172" fill="#64748b" font-size="8" font-family="system-ui">layout — an older preset never moves your camera</text>
+</svg>`;
+}
+
 // ─── Walkthrough Definitions ──────────────────────────────────────────────────
 
 const WALKTHROUGHS = [
@@ -1385,6 +1698,53 @@ const WALKTHROUGHS = [
       { title: "Factory Reset",                         text: "When you need a completely fresh start, use Factory Reset in Settings → Manage tab. This erases all PadSpan persistent data — settings, calibration, objects, maps, model, alerts, movement history, and backups. BLE radio data is kept intact so scanners continue working. You must type 'FACTORY RESET' to confirm (admin only). Restart HA afterwards. Use this when troubleshooting persistent issues or starting a clean setup from scratch.", svg: _svgFactoryReset },
     ],
   },
+  {
+    id: "atlas_intro",
+    title: "Atlas: Your Device Map",
+    icon: "🗺️",
+    summary: "Meet Atlas — the isometric map for lights, fans, sensors, locks and doors. What's free, what needs a key, and how to get there.",
+    steps: [
+      { title: "What Atlas Is",                          text: "Atlas is one isometric map of every floor, drawn the way an electrician draws a lighting plan, for placing and controlling real devices — lights, fans, locks, motion/temperature/humidity/air-quality sensors, doors and windows — at their real position. It used to be called 'Lights'; it outgrew that name once everything beyond lighting joined it.", svg: _svgAtlasOverview },
+      { title: "Free vs. Pro",                           text: "A free install gets floors, rooms and one marker per light — tap the marker (or its sidebar row) to toggle it. A PadSpan Pro or PadSpan Bright Pro key unlocks the rest: real placement, shapes, every sensor class, doors/locks as RF barriers, Automorph and Showcase.", svg: _svgAtlasEditions },
+      { title: "Getting There",                          text: "Open Mapping → Atlas for the full builder, or turn on the standalone Atlas sidebar panel in Settings for a lighter view without the rest of Mapping.", svg: _svgAtlasNav },
+    ],
+  },
+  {
+    id: "atlas_placement",
+    title: "Placing Fixtures on Atlas",
+    icon: "📍",
+    summary: "Drag lights, fans, locks and sensors onto the map at their real position, shape and size.",
+    steps: [
+      { title: "Drag or Queue-and-Tap",                  text: "Either drag the pulsing pin straight onto the floor plate, or tap + Place to queue the device and then tap the map where it belongs. Both land the device on whichever real floor plate you actually dropped it on.", svg: _svgAtlasPlace },
+      { title: "Real Shape, Size and Angle",             text: "Set shape from the inspector — pendant, sconce, strip, chandelier and more — plus size and rotation in real centimetres, not a generic dot. This works the same way for lights, fans, locks and every sensor class.", svg: _svgAtlasShape },
+      { title: "Live Sensor Readings",                   text: "A live temperature reading tints its marker and digits — blue under 20°, red at 20° and up, bright orange over 34°. Humidity shows as a live percentage. Motion normalizes across hardware: a PIR that self-clears in 5 seconds and a radar sensor that holds 'on' for 20 minutes both draw the same way — a short flash, then a graded fade the longer it's been quiet.", svg: _svgAtlasSensors },
+      { title: "Outdoor Gear",                           text: "Anything whose HA area is on an Outside floor — a shed, the garden, the driveway — doesn't have its own floor to draw on. Drop its pin, or queue it and tap the map, on any real floor plate right where it sits outside the room it lives beside.", svg: _svgAtlasOutdoor },
+      { title: "Finding a Device Under Another",         text: "Hover the cursor (or hold a touch) over a crowded spot and the hover HUD, pinned at the top-left of the map, names everything stacked there as clickable rows. Alt+click cycles through the stack directly. A plain tap always switches a device; a genuine hold, or Shift/Alt, selects it for editing instead.", svg: _svgAtlasHoverHud },
+    ],
+  },
+  {
+    id: "atlas_barriers",
+    title: "Doors, Windows & Locks",
+    icon: "🚪",
+    summary: "Mark real barriers on the map — doors and windows that block signal, locks you can tap from the plan.",
+    steps: [
+      { title: "Mark a Door or Window",                  text: "Mark a door or window on a wall from the Rooms tab's wall list, or draw one directly from the Atlas map, and it becomes a real RF barrier, not just a picture. Set its material — a steel door blocks harder than a hollow-core one — and its live open/closed state draws on the map from the linked sensor.", svg: _svgAtlasDoor },
+      { title: "Invert for a Backwards Sensor",          text: "Some door/vibration sensors report state:on as closed, not open. If a door on the map seems to show the wrong state, check the Invert toggle next to Delete in the wall list — it flips the reading without touching the sensor itself.", svg: _svgAtlasInvert },
+      { title: "Locks on the Map",                       text: "Locks placed on Atlas behave like any other fixture — tap to lock or unlock, with the held state shown live.", svg: _svgAtlasLock },
+    ],
+  },
+  {
+    id: "atlas_style",
+    title: "Automorph & Showcase",
+    icon: "✨",
+    summary: "Give the map a look — a soft aura around each fixture, and 19 curated visual themes for the whole plan.",
+    steps: [
+      { title: "Automorph Grows an Aura",                text: "Automorph grows a soft aura from a fixture out into its room. It's a rendering layer on top of the fixture's real, already-placed position — turning it on or off never moves anything.", svg: _svgAutomorph },
+      { title: "Pick a Style",                           text: "Automorph's style list keeps growing, and gets pruned whenever two styles turn out to look the same at real marker size — ten near-duplicates were retired for six genuinely distinct ones as of a recent pass. Glow, Blueprint, Nebula, Halo and Bloom have stuck around; open the Automorph picker in-app for the current full list.", svg: _svgAutomorphStyles },
+      { title: "Showcase Themes",                        text: "Showcase is 19 curated visual themes for the whole map — colour, room edges, glow and light-pool style all change together, from a plain white-marble-and-brass 'real estate' look to an edgeless bioluminescent one with no room outlines at all. Pick one from the toolbar under Presentation.", svg: _svgShowcase },
+      { title: "Save a Look",                            text: "The presets bar saves a whole look — Showcase theme, Automorph style, and optionally floor/spacing/layout — under a name, and loads it back with Apply. A preset saved before layout was included never moves your camera when applied.", svg: _svgPresets },
+    ],
+  },
 ];
 
 // ─── Manual Section Definitions ───────────────────────────────────────────────
@@ -1532,6 +1892,18 @@ const MANUAL_SECTIONS = [
     title: "Insights",
     icon: "📈",
     helpKeys: ["insights"],
+  },
+  {
+    id: "help_busytimes",
+    title: "Busy Times",
+    icon: "🔥",
+    helpKeys: ["busytimes"],
+  },
+  {
+    id: "help_locate",
+    title: "Locate",
+    icon: "🧭",
+    helpKeys: ["locate"],
   },
   {
     id: "help_monitor",

@@ -139,6 +139,8 @@ export const SURFACE_CLASS = Object.freeze({
   calibration: "presence",
   traceback:   "presence",
   insights:    "presence",
+  busytimes:   "presence",
+  locate:      "presence",
   forensics:   "presence",
   sandbox:     "presence",
   occupancy:   "presence",

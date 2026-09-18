@@ -176,6 +176,7 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("fabric_origin_lon"): vol.Any(vol.Coerce(float), None),
         vol.Optional("fabric_bearing_deg"): vol.Coerce(float),
         vol.Optional("hidden_map_ids"): list,
+        vol.Optional("locate_self_key"): str,
         vol.Optional("followed_addrs"): list,
         vol.Optional("health_reminder_enabled"): bool,
         vol.Optional("health_reminder_last_ts"): vol.Any(float, int, None),
@@ -343,6 +344,13 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
         if "hidden_map_ids" in msg:
             ids = msg["hidden_map_ids"]
             payload["hidden_map_ids"] = [str(x) for x in ids if isinstance(x, str)] if isinstance(ids, list) else []
+        if "locate_self_key" in msg:
+            # Locate is a PadSpan Pro feature; same gate as forensics_enabled
+            # below — refusing the write here (not just hiding the tab) means
+            # a free install can't get room-graph wayfinding by editing the
+            # frontend, only by not persisting who "you" are.
+            _lsk = str(msg.get("locate_self_key") or "")
+            payload["locate_self_key"] = _lsk if _padspan_pro_active(hass) else ""
         if "followed_addrs" in msg:
             addrs = msg["followed_addrs"]
             _new_followed = [str(x).upper() for x in addrs if isinstance(x, str)] if isinstance(addrs, list) else []

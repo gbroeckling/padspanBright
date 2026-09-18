@@ -45,6 +45,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "ref_power":      -59.0,   # dBm RSSI at 1 m (distance formula)
     "path_loss_exp":   2.5,    # path-loss exponent n (distance formula)
     "hidden_map_ids":  [],     # map IDs hidden from 3D stack view
+    "locate_self_key": "",     # which tracked object's position is "you", for the Locate tab's wayfinding
     "scanner_offsets": {},     # {source_name: offset_dBm} — manual per-scanner RSSI trim
     # Sources masked out of positioning (issue #59). A MASK, never a delete:
     # stored calibration samples, positions and registry entries are untouched,

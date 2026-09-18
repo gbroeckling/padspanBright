@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.48";
-const RELEASE_BUILD_ID = "20260918T002838Z";
+const APP_VERSION = "0.38.49";
+const RELEASE_BUILD_ID = "20260918T190832Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -39,7 +39,7 @@ const BUILD_ID = (() => {
     return RELEASE_BUILD_ID;
   }
 })();
-const CHANNEL = "stable";
+const CHANNEL = "beta";
 
 // ── Editions and tiers ───────────────────────────────────────────────────────
 // Which surfaces this build shows (views/editions.js). Loaded with the same
@@ -90,6 +90,8 @@ const _VIEW_PATHS = {
   occupancy:    "./views/occupancy.js",
   installbase:  "./views/installbase.js",
   insights:     "./views/insights.js",
+  busytimes:    "./views/busy_times.js",
+  locate:       "./views/locate.js",
 };
 
 // Views reachable by internal navigation but never listed in MENU. Being
@@ -161,6 +163,8 @@ const MENU = [
   ["calibration","Calibration","mdi:crosshairs"],
   ["traceback","Traceback","mdi:history"],
   ["insights","Insights","mdi:chart-timeline-variant"],
+  ["busytimes","Busy Times","mdi:fire"],
+  ["locate","Locate","mdi:compass-outline"],
   ["forensics","Forensics","mdi:magnify-scan"],
   ["occupancy","Occupancy","mdi:account-group-outline"],
   ["health","Health","mdi:heart-pulse"],
@@ -175,7 +179,7 @@ const MENU = [
 //   Advanced  — default set plus user-chosen extras from Settings -> UI Structure
 //   Dev       — everything visible (includes QA, Sandbox, raw Debug, etc.)
 const BASIC_TABS = new Set(["follow", "overview", "maps", "settings", "training"]);
-const ADVANCED_DEFAULT = new Set(["follow","overview","purelive","maps","settings","training","manage","calibration","traceback","insights","occupancy","health"]);
+const ADVANCED_DEFAULT = new Set(["follow","overview","purelive","maps","settings","training","manage","calibration","traceback","insights","busytimes","locate","occupancy","health"]);
 const DEV_ONLY_TABS = ["devices","bluetooth","presence","monitor","qa","sandbox","installbase"];
 
 // Accent color per tab — used for the sidebar dot, mobile nav, and active highlights
@@ -188,6 +192,8 @@ const MENU_COLORS = {
   presence: "#ba68c8",
   zones: "#81c784",
   insights: "#ffd54f",
+  busytimes: "#f57c00",
+  locate: "#818cf8",
   history: "#90a4ae",
   monitor: "#f06292",
   maps: "#4caf50",

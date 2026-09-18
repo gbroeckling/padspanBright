@@ -176,12 +176,30 @@ export const HELP = {
     ],
   },
   insights: {
-    title: "Insights — Rooms, signals and movement",
+    title: "Insights — Room-dwell analytics",
     body: [
-      "Insights turns your tracking data into charts. Room Occupancy is a bar chart of how many objects are currently in each room — click a bar to jump to that room's detail view.",
-      "Signal Quality lists every Bluetooth scanner with its device count, average RSSI, and a plain-language grade — Excellent, Good, Fair, or Poor — so you can spot a scanner that needs to move or be replaced.",
-      "The remaining charts show devices that move between rooms, rooms with weak coverage, and devices by type.",
-      "Quiet Mode filters unidentified devices out of these charts the same way it does everywhere else.",
+      "Insights aggregates your traceback history into two tables. Time in Room shows, per tracked object per day, how long it spent in each room and how many times it entered — pick a 1/3/7-day range with the buttons at the top.",
+      "Peak Concurrent Occupancy shows the most tracked objects seen in any one room at the same time, per day, with the hour it happened.",
+      "Both tables can be exported as CSV or JSON from the buttons on the Time in Room card. Data comes from the same 7-day traceback history Traceback plays back — nothing older is available.",
+      "For a visual, room-by-room version of the same underlying data — which rooms are busiest overall and by hour of day — see the Busy Times tab.",
+    ],
+  },
+  busytimes: {
+    title: "Busy Times — Which rooms are busiest, and when",
+    body: [
+      "Busy Times aggregates every tracked object's dwell time into one room-by-room picture: how much total time each room was occupied over the last 1/3/7 days, and a 24-hour bar showing when in the day that room tends to get busy.",
+      "Each room's box is tinted by its total occupied time relative to the busiest room in the selected range — darker means quieter, brighter orange/red means busier. The red bar in each room's 24-hour strip marks its single busiest hour.",
+      "This is a different view of the same data Insights shows as tables: Insights is per-object, day-by-day detail; Busy Times is the room-level summary at a glance. Neither is the live RSSI signal-quality heatmap on the Overview map — that's about scanner coverage, not room activity.",
+      "Busy Times is a PadSpan Pro feature.",
+    ],
+  },
+  locate: {
+    title: "Locate — Which way to walk to find something",
+    body: [
+      "Locate answers \"which way do I walk from here to that\" without a compass or a camera. Pick which tracked device is yours — the same one your Phone Setup Wizard or IRK setup already tracks — and pick what you're looking for.",
+      "If you're in the same room already, Locate shows the live distance in metres between you, with \"getting closer\" or \"getting further\" as you move.",
+      "If you're in a different room, Locate walks a path over your drawn room-adjacency map (Mapping → Rooms) and tells you which room to head to next, with the full route shown as a trail. If a floor change is needed it says so up front. If no route is drawn between the two rooms yet, it tells you the target's room and floor so you can head there directly.",
+      "This deliberately does not use your phone's compass — indoors, near BLE scanners and building wiring, a magnetic compass is not reliable enough to trust. Locate is a PadSpan Pro feature, and needs \"you\" set to a tracked device to work at all.",
     ],
   },
 

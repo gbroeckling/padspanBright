@@ -29,14 +29,20 @@ Long-press a light on the map for its full card — this one's a WLED strip mid-
 clustered in its room. Tap a marker or a row to toggle the light. Hide the
 lights you never want on the map.
 
-**PadSpan Bright Pro (key)** — place every light, fan, motion sensor,
-temperature sensor and lock exactly where it really is; set shape (pot,
-strip, pendant, sconce, fan…), size and angle in real units; place WLED
-strips and control their brightness, colour and effects live from the map;
-mark a door or window on a wall and see it open or closed live on the map,
-with closed doors modelled as real RF barriers (steel doors block harder than
-hollow-core); and turn on Automorph, which grows a soft aura from each
-fixture into its room (Glow, Blueprint or Nebula style).
+**PadSpan Bright Pro (key)** — place every light, fan, lock, and motion,
+temperature, humidity and air-quality sensor exactly where it really is; set
+shape (pot, strip, pendant, sconce, fan…), size and angle in real units;
+place WLED strips and control their brightness, colour and effects live from
+the map; mark a door or window on a wall and see it open or closed live on
+the map, with closed doors modelled as real RF barriers (steel doors block
+harder than hollow-core, and an Invert toggle handles a sensor that reports
+backwards); turn on Automorph, which grows a soft aura from each fixture into
+its room (Glow, Blueprint, Nebula and a growing set of other styles); and
+pick from 19 Showcase visual themes for the map itself, saved and reloaded
+from a presets bar.
+
+No key yet? **Settings → Features → PadSpan licence** has a one-time
+3-month free trial — no card required, no reinstall.
 
 Every motion sensor's flash and fade run through the same normalizer no
 matter the hardware underneath — an alarm-panel PIR that self-clears in 5
@@ -55,11 +61,14 @@ A **PadSpan Pro** key unlocks all of the same — one key, either download.
 | Real shape, size (width × length) and rotation                         |               |     ✓      |
 | WLED strip/series placement, sized and angled to the strip              |               |     ✓      |
 | Brightness, colour and effect control per light, live                  |               |     ✓      |
-| Fans, motion sensors, temperature sensors and locks placed on the map      |               |     ✓      |
-| Doors & windows linked to a wall, live open/closed state on the map     |               |     ✓      |
+| Fans, locks, and motion, temperature, humidity and air-quality sensors placed on the map |    |     ✓      |
+| Outdoor gear (shed, garden, driveway) placed on the floor plate beside its room |          |     ✓      |
+| Doors & windows linked to a wall, live open/closed state on the map, Invert for backwards sensors |  |  ✓  |
 | Closed doors modelled as real RF barriers (material-aware attenuation) |               |     ✓      |
 | Motion flash/fade normalized across every sensor's hardware hold time   |               |     ✓      |
-| Automorph room-aura rendering (Glow / Blueprint / Nebula)               |               |     ✓      |
+| Automorph room-aura rendering (Glow, Blueprint, Nebula and more)         |               |     ✓      |
+| Showcase — 19 curated visual themes, saved/loaded from a presets bar    |               |     ✓      |
+| Hover HUD + Alt+click to reach a fixture stacked under another one       |               |     ✓      |
 | Import an existing house from PadSpan Bright into PadSpan HA          |       ✓       |     ✓      |
 
 ## Install
@@ -72,14 +81,14 @@ Then:
 1. Install **PadSpan Bright** and restart Home Assistant.
 2. Open Settings → Devices & services → **Add integration** → PadSpan Bright.
 3. Open **PadSpan Bright** in the sidebar: draw your floors and rooms under
-   Mapping, then turn on the **Lights** sidebar panel in Settings.
+   Mapping, then turn on the **Atlas** sidebar panel in Settings.
 
 Home Assistant 2024.1 or newer. No hardware needed — it reads your `light.*`
 entities and their room assignments from Home Assistant.
 
 ## Already running PadSpan HA?
 
-You do not need this. PadSpan HA contains everything here — the same Lights
+You do not need this. PadSpan HA contains everything here — the same Atlas
 tab, the same sidebar panel — and a PadSpan Pro key unlocks it there.
 
 ## Moving from Bright to PadSpan HA
