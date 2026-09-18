@@ -19,7 +19,7 @@
 // metres, and now that is the only thing it reads.
 
 const { WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, MOTION_PULSE, TEMP_BORDER, LOCK_BORDER, DOOR_BORDER,
-        AIR_BORDER, HUMIDITY_BORDER, airQualityBadness } =
+        AIR_BORDER, HUMIDITY_BORDER, FLOOD_BORDER, airQualityBadness } =
   await import(`./light_codes.js${new URL(import.meta.url).search}`);
 
 function escSVG(s){ return String(s??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
@@ -1939,6 +1939,7 @@ export function lightClassOf(l){
   if(l.isFan) return "fan";
   if(l.isMotion) return "motion";
   if(l.isDoor) return "door";
+  if(l.isFlood) return "flood";
   if(l.isAir) return "air";
   if(l.isTemp) return "temp";
   if(l.isHumidity) return "humidity";
@@ -2729,7 +2730,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   const liveRoomColor=(rname,fallback)=>{
     if(!SHOW) return fallback;
     const onLights=(byRoom[rname]||[]).filter(li=>
-      li.state==="on" && !hiddenEids.has(li.entity_id) && !li.isFan && !li.isMotion && !li.isTemp && !li.isAir && !li.isHumidity && !li.isLock);
+      li.state==="on" && !hiddenEids.has(li.entity_id) && !li.isFan && !li.isMotion && !li.isTemp && !li.isAir && !li.isHumidity && !li.isLock && !li.isFlood);
     if(!onLights.length) return fallback;
     let rSum=0,gSum=0,bSum=0,wSum=0;
     for(const li of onLights){
@@ -2751,12 +2752,12 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   if(SHOW){
     for(const l of lights){
       const li=lightsByEid[l.eid];
-      if(!li || li.state!=="on" || hiddenEids.has(l.eid) || li.isFan || li.isMotion || li.isTemp || li.isAir || li.isHumidity || li.isLock) continue;
+      if(!li || li.state!=="on" || hiddenEids.has(l.eid) || li.isFan || li.isMotion || li.isTemp || li.isAir || li.isHumidity || li.isLock || li.isFlood) continue;
       const c=(FIELD ? fieldColOf(l.x,l.y,l.z) : null) || glowCol(li,l.lp);
       if(!glowIds.has(c)) glowIds.set(c, `psglow_${glowIds.size}`);
     }
     for(const rname of Object.keys(byRoom||{})) for(const li of byRoom[rname]||[]){
-      if(li.state!=="on" || hiddenEids.has(li.entity_id) || li.isFan || li.isMotion || li.isTemp || li.isAir || li.isHumidity || li.isLock) continue;
+      if(li.state!=="on" || hiddenEids.has(li.entity_id) || li.isFan || li.isMotion || li.isTemp || li.isAir || li.isHumidity || li.isLock || li.isFlood) continue;
       const rc=FIELD && roomCentre.get(rname);
       const c=(rc ? fieldColOf(rc[0],rc[1],rc[2]) : null) || glowCol(li, null);
       if(!glowIds.has(c)) glowIds.set(c, `psglow_${glowIds.size}`);
@@ -2784,6 +2785,22 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     const room=rooms.find(r=>r.z===pl.z && pointInPolygon(r.pts, pl.x, pl.y));
     if(!room) continue;
     airFx.push({eid: pl.eid, room, badness});
+  }
+
+  // ── Flood effects ─────────────────────────────────────────────────────────
+  // Garry, 2026-09-18: "add flood sensors to the list, and just like the air
+  // quality sensors, the entire [room] gets a bright red ring radiating out
+  // from the center of where the sensor is placed." Same admission shape as
+  // airFx above (placed, resolves to a room on its own floor, hidden markers
+  // draw nothing) but binary rather than a badness scale: a flood sensor
+  // either is wet right now or it draws nothing at all — no "a little wet".
+  const floodFx=[];
+  for(const pl of lights){
+    const li=lightsByEid[pl.eid];
+    if(!li || !li.isFlood || li.state!=="on" || hiddenEids.has(pl.eid)) continue;
+    const room=rooms.find(r=>r.z===pl.z && pointInPolygon(r.pts, pl.x, pl.y));
+    if(!room) continue;
+    floodFx.push({eid: pl.eid, room, x: pl.x, y: pl.y, z: pl.z});
   }
 
   // ── Fit to room ───────────────────────────────────────────────────────────
@@ -2934,6 +2951,29 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       `fill="hsl(${airHue(badness)},80%,60%)" fill-opacity="${op}">`+
       `<g><animateTransform attributeName="transform" type="translate" from="0 0" to="0 ${(-gap).toFixed(1)}" `+
       `dur="${dur}s" repeatCount="indefinite"/>${bars}</g></g>`;
+  };
+  // The flood ring: a bright red sonar-style pulse radiating out from the
+  // sensor's own placed point, clipped to its room — the same "make the
+  // room react" idea as airBarsSvg above, but binary (an alarm, not a
+  // graded reading) so there is no badness curve to speed up or slow down.
+  // Three rings staggered a third of a cycle apart (same convention as the
+  // Pure Live scanner sonar pulse) so at least one is always mid-sweep
+  // rather than all three flashing in lockstep.
+  const floodRingSvg=(room, eid, wx, wy)=>{
+    if(CLASSF && CLASSF!=="flood") return "";
+    const cid=roomClip.get(room);
+    if(!cid) return "";
+    const [cx,cy]=iso(wx,wy,room.z);
+    const DUR=2.2, R0=5, R1=140;
+    let rings="";
+    for(let k=0;k<3;k++){
+      const begin=(k*DUR/3).toFixed(2);
+      rings+=`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${R0}" fill="none" stroke="${FLOOD_BORDER}" stroke-width="3" opacity="0">`+
+        `<animate attributeName="r" values="${R0};${R1}" dur="${DUR}s" begin="${begin}s" repeatCount="indefinite"/>`+
+        `<animate attributeName="opacity" values="0.9;0" dur="${DUR}s" begin="${begin}s" repeatCount="indefinite"/>`+
+        `</circle>`;
+    }
+    return `<g class="lflood" data-eid="${escSVG(eid)}" data-class="flood" clip-path="url(#${cid})" pointer-events="none">${rings}</g>`;
   };
   // The legend strip's own stop offsets (Garry, 2026-09-08: "make sure
   // that's actually aligned with what is happening on the map" — the
@@ -3207,6 +3247,8 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   // the plain working map (no Showcase, no Automorph). No-op when already
   // emitted above, and nothing at all when no room has poor air.
   if(airFx.length) emitRoomClips();
+  // Same reasoning as airFx just above, for the flood ring's clip.
+  if(floodFx.length) emitRoomClips();
   s+=`</defs>`;
   if(SHOW) s+=`<rect x="${viewX0}" y="${viewY}" width="${WTOTAL}" height="${HTOTAL}" fill="url(#psvig)" pointer-events="none"/>`;
 
@@ -3286,7 +3328,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         // center not activating on motion... only some sensors"): the
         // pulse ring is a separate code path and kept firing, but the
         // glyph itself had been swapped for a transparent hit rect.
-        if(!l || l.shape==="perimeter" || l.isMotion || l.isFan || l.isTemp || l.isAir || l.isHumidity) continue;
+        if(!l || l.shape==="perimeter" || l.isMotion || l.isFan || l.isTemp || l.isAir || l.isHumidity || l.isFlood) continue;
         const r=hereRooms.find(rr=>pointInRoom(rr.pts, pl.x, pl.y));
         if(!r || r.pts.length<3) continue;
         const weight=automorphFixtureWeight(pl.lp&&pl.lp.width_cm, pl.lp&&pl.lp.height_cm);
@@ -3473,7 +3515,8 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         :(l.isTemp?TEMP_BORDER
         :(l.isAir?AIR_BORDER
         :(l.isHumidity?HUMIDITY_BORDER
-        :(l.isLock?LOCK_BORDER:null))))))));
+        :(l.isLock?LOCK_BORDER
+        :(l.isFlood?FLOOD_BORDER:null)))))))));
       const stroke=SHOW
         ? (on?(stripBorder||THEME.fixtureOnStrokeFallback):THEME.fixtureOffStroke)
         : (stripBorder||"#60a5fa");
@@ -4025,7 +4068,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // Defensive twin of the exclusion in the partition-grouping pass
       // above — motion/fan/temp never get a cell there any more, but this
       // function must refuse to aura them even if ever called directly.
-      if(!(AUTOMORPH_PCT>0) || !room || room.pts.length<3 || l.isMotion || l.isFan || l.isTemp || l.isAir || l.isHumidity) return null;
+      if(!(AUTOMORPH_PCT>0) || !room || room.pts.length<3 || l.isMotion || l.isFan || l.isTemp || l.isAir || l.isHumidity || l.isFlood) return null;
       // Inset stage — the shared automorphInsetRing above (smoothing,
       // well-spaced offset, fold pruning, containment, and the hardness cap
       // derived from the same margin). One inset constant was serving two
@@ -5113,7 +5156,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       if(l.state!=="on") return "";
       // Fans, motion sensors and temperature readouts are on the map, but
       // they are not light sources — nothing pools on the floor beneath them.
-      if(l.isFan||l.isMotion||l.isTemp||l.isAir||l.isHumidity) return "";
+      if(l.isFan||l.isMotion||l.isTemp||l.isAir||l.isHumidity||l.isFlood) return "";
       const col=(fx&&fx.col)||glowCol(l,entry);
       const b=briOf(l);
       const beam=BEAM[l.shape]||1;
@@ -5682,6 +5725,12 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       if(fx.room.z!==z) continue;
       s+=airBarsSvg(fx.room, fx.badness, fx.eid);
     }
+    // Wet flood sensors on this floor: the red ring, same layer as the air
+    // bars (see floodFx, computed before the defs alongside airFx).
+    for(const fx of floodFx){
+      if(fx.room.z!==z) continue;
+      s+=floodRingSvg(fx.room, fx.eid, fx.x, fx.y);
+    }
     for(const fn of labelJobs) fn();
 
     // Placed lights — metres from the fabric, through the same projection the
@@ -5721,7 +5770,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         // Wall spill: every wall of the fixture's room its pool actually
         // reaches, faded by how far away the wall is.
         let spillSegs=null;
-        if(room && l.state==="on" && !l.isFan && !l.isMotion && !l.isTemp && !l.isAir && !l.isHumidity){
+        if(room && l.state==="on" && !l.isFan && !l.isMotion && !l.isTemp && !l.isAir && !l.isHumidity && !l.isFlood){
           const reach=poolReachM(l)*0.8;
           for(let i=0,j=room.pts.length-1;i<room.pts.length;j=i++){
             const d=pointSegDist(pl.x, pl.y, room.pts[j], room.pts[i]);

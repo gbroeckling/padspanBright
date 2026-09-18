@@ -1417,7 +1417,7 @@ const STATES = {
   "binary_sensor.front_door":   {state: "on",  attributes: {friendly_name: "Front Door", device_class: "door"}},
   "binary_sensor.kitchen_window": {state: "off", attributes: {friendly_name: "Kitchen Window", device_class: "window"}},
   "binary_sensor.hall_motion":  {state: "on",  attributes: {friendly_name: "Hall Motion", device_class: "motion"}},
-  "binary_sensor.mystery":      {state: "on",  attributes: {friendly_name: "Mystery Sensor", device_class: "moisture"}},
+  "binary_sensor.mystery":      {state: "on",  attributes: {friendly_name: "Mystery Sensor", device_class: "vibration"}},
 };
 const lights = LM.gatherLights(STATES, AREA, {}, "pro", {}, {}, {}, {});
 const by = Object.fromEntries(lights.map(l => [l.entity_id, l]));

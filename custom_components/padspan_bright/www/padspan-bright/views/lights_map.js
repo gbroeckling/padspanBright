@@ -16,7 +16,7 @@ const { buildIsoSVG, shapeSvg, fabricFrame, sampleSceneField, pointInPolygon, of
   await import(`./iso_lights.js${new URL(import.meta.url).search}`);
 const { assignLightCodes, resolveLightShape, LIGHT_SHAPES, LIGHT_TYPE_OVERRIDES,
         WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, TEMP_BORDER, LOCK_BORDER, DOOR_BORDER, healthOf,
-        AIR_QUALITY_CLASSES, AIR_BORDER, HUMIDITY_BORDER, airQualityBadness, airQualityWord, isAirQualityEntity } =
+        AIR_QUALITY_CLASSES, AIR_BORDER, HUMIDITY_BORDER, FLOOD_BORDER, airQualityBadness, airQualityWord, isAirQualityEntity } =
   await import(`./light_codes.js${new URL(import.meta.url).search}`);
 const { tierAtLeast } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
@@ -141,7 +141,7 @@ export function effectiveState(eid, reported, now = Date.now()){
 // ── Device classes on the map ────────────────────────────────────────────────
 // The layer chips: the map keeps every class in view and DIMS the others,
 // because a fan's place on the ceiling is context for the light beside it.
-export const LIGHT_CLASSES = [["all","All"],["light","Lights"],["strip","Strips"],["fan","Fans"],["motion","Motion"],["temp","Temps"],["humidity","Humidity"],["air","Air"],["lock","Locks"],["door","Doors/Windows"]];
+export const LIGHT_CLASSES = [["all","All"],["light","Lights"],["strip","Strips"],["fan","Fans"],["motion","Motion"],["temp","Temps"],["humidity","Humidity"],["air","Air"],["lock","Locks"],["door","Doors/Windows"],["flood","Flood"]];
 
 // Automorph's style dropdown vocabulary — derived from AUTOMORPH_STYLE_LABELS
 // itself (iso_lights.js) rather than a hand-copied list. A style added there
@@ -180,6 +180,7 @@ export function roomAggregate(lights, roomName){
   const fansHere = here.filter(l => l.isFan);
   const motionHere = here.filter(l => l.isMotion);
   const airHere = here.filter(l => l.isAir);
+  const floodHere = here.filter(l => l.isFlood);
   return {
     room: roomName,
     lightsOn: lightsHere.filter(l => l.state === "on").length, lightsTotal: lightsHere.length,
@@ -187,6 +188,8 @@ export function roomAggregate(lights, roomName){
     motionActive: motionHere.filter(l => l.state === "on").length, motionTotal: motionHere.length,
     // Air quality: the worst reading in the room (NaN = none reporting).
     airTotal: airHere.length, airWorst: airWorstOf(airHere),
+    // Flood: binary, not a badness scale — how many are actively wet right now.
+    floodTotal: floodHere.length, floodActive: floodHere.filter(l => l.state === "on").length,
     lightEids: lightsHere.map(l => l.entity_id), fanEids: fansHere.map(l => l.entity_id),
     all: here,
   };
@@ -231,6 +234,7 @@ export function floorAggregate(lights, model, floorId){
     fansOn: fansHere.filter(l => l.state === "on").length, fansTotal: fansHere.length,
     motionActive: here.filter(l => l.isMotion && l.state === "on").length,
     airTotal: here.filter(l => l.isAir).length, airWorst: airWorstOf(here.filter(l => l.isAir)),
+    floodTotal: here.filter(l => l.isFlood).length, floodActive: here.filter(l => l.isFlood && l.state === "on").length,
     lightEids: lightsHere.map(l => l.entity_id), fanEids: fansHere.map(l => l.entity_id),
   };
 }
@@ -720,7 +724,7 @@ export function openAggregateSheet(api, { title, sub, items, actions }){
   for (const l of items) {
     const on = l.state === "on";
     const row = mk("div", _S.row);
-    const col = l.isWled ? WLED_BORDER : (l.isPartition ? PARTITION_BORDER : (l.isFan ? FAN_BORDER : (l.isMotion ? MOTION_BORDER : (l.isTemp ? TEMP_BORDER : (l.isHumidity ? HUMIDITY_BORDER : (l.isAir ? AIR_BORDER : (l.isDoor ? DOOR_BORDER : "#52b788")))))));
+    const col = l.isWled ? WLED_BORDER : (l.isPartition ? PARTITION_BORDER : (l.isFan ? FAN_BORDER : (l.isMotion ? MOTION_BORDER : (l.isTemp ? TEMP_BORDER : (l.isHumidity ? HUMIDITY_BORDER : (l.isAir ? AIR_BORDER : (l.isDoor ? DOOR_BORDER : (l.isFlood ? FLOOD_BORDER : "#52b788"))))))));
     row.appendChild(mk("span", _S.code + `;color:${col}`, l.code));
     row.appendChild(mk("span", _S.name, l.friendly_name));
     if (l.isMotion) {
@@ -737,6 +741,10 @@ export function openAggregateSheet(api, { title, sub, items, actions }){
       // a switch, and the generic On/Off button below would fire a toggle
       // that does nothing but surface a read-only toast.
       row.appendChild(mk("span", _S.state(on), on ? "OPEN" : "CLOSED"));
+    } else if (l.isFlood) {
+      // Read-only, same as door above — the red ring on the map already
+      // carries the alarm, this is just the word form of it.
+      row.appendChild(mk("span", _S.state(on), on ? "WET" : "DRY"));
     } else {
       const b = mk("button", _S.onoff(on), on ? "On" : "Off");
       b.addEventListener("click", (e) => {
@@ -771,6 +779,7 @@ export function openRoomSheet(api, lights, room, onlyEids){
   if (agg.fansTotal) parts.push(`Fans ${agg.fansOn}/${agg.fansTotal}`);
   if (agg.motionTotal) parts.push(agg.motionActive ? `Motion ×${agg.motionActive}` : "Motion clear");
   if (agg.airTotal) parts.push(`Air ${airQualityWord(agg.airWorst)}`);
+  if (agg.floodActive) parts.push(`⚠ Flood ×${agg.floodActive}`);
   const actions = [];
   if (lightEids.length) {
     actions.push({ label: "All lights off", run: () => api.setMany(lightEids, false) });
@@ -789,12 +798,13 @@ export function openFloorSheet(api, lights, model, z){
   if (!fid) { api.toast("No floor record for this storey"); return; }
   const agg = floorAggregate(lights, model, fid);
   const items = lights.filter(l => agg.lightEids.includes(l.entity_id) || agg.fanEids.includes(l.entity_id) || (l.isMotion && l.state === "on")
-    || (l.isAir && lightFloorId(l, model) === String(fid)));
+    || (l.isAir && lightFloorId(l, model) === String(fid)) || (l.isFlood && l.state === "on" && lightFloorId(l, model) === String(fid)));
   const parts = [`Lights ${agg.lightsOn}/${agg.lightsTotal}`];
   if (agg.fansTotal) parts.push(`Fans ${agg.fansOn}/${agg.fansTotal}`);
   if (agg.motionActive) parts.push(`Motion ×${agg.motionActive}`);
   // Like motion: only worth a word on the floor line when something is up.
   if (agg.airTotal && agg.airWorst > 0) parts.push(`Air ${airQualityWord(agg.airWorst)}`);
+  if (agg.floodActive) parts.push(`⚠ Flood ×${agg.floodActive}`);
   const actions = [];
   if (agg.lightEids.length) {
     actions.push({ label: "All lights off", run: () => api.setMany(agg.lightEids, false) });
@@ -1455,6 +1465,11 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
       // class — a static "is this left open" glyph, not a pulse.
       || (eid.startsWith("binary_sensor.")
           && ["door", "window"].includes(states[eid].attributes?.device_class))
+      // Flood/leak sensors (Garry, 2026-09-18): HA's own device_class for a
+      // water-leak detector is "moisture" — same admission shape as
+      // door/window above, its own class rather than folded into anything.
+      || (eid.startsWith("binary_sensor.")
+          && states[eid].attributes?.device_class === "moisture")
       // Temperature sensors ride the same ceiling map — "same as WLED or
       // any other object... devices telling the temperature can also act
       // like a motion sensor" (Garry). sensor.* is a domain nothing else
@@ -1625,8 +1640,10 @@ export function lightIsTouched(l, shapeOverrides, placements, linkedDoorEids) {
   // both while dragging and forever after, with no marker left to see or
   // save. Humidity is included pre-emptively — it draws the exact same
   // fixed glyph shape, so it would hit the identical trap the moment
-  // anyone placed one.
-  if (l.isMotion || l.isTemp || l.isHumidity || l.isAir || l.isLock) return true;
+  // anyone placed one. Flood joins the same list for the same reason
+  // (2026-09-18) — its whole "reading" is the ring it draws while wet, no
+  // shape/size/colour of its own either.
+  if (l.isMotion || l.isTemp || l.isHumidity || l.isAir || l.isLock || l.isFlood) return true;
   if (Number(p.width_cm) > 0 || Number(p.height_cm) > 0) return true;
   if (Number(p.rotation)) return true;
   if (p.color && String(p.color).toLowerCase() !== _DROP_COLOR) return true;
@@ -2563,7 +2580,8 @@ export function buildLightsTable(host, lights){
           : (l.isHumidity ? HUMIDITY_BORDER
           : (l.isAir ? AIR_BORDER
           : (l.isLock ? LOCK_BORDER
-          : (l.isDoor ? DOOR_BORDER : "#52b788"))))))));
+          : (l.isDoor ? DOOR_BORDER
+          : (l.isFlood ? FLOOD_BORDER : "#52b788")))))))));
         const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
         svg.setAttribute("width", "15"); svg.setAttribute("height", "15");
         svg.setAttribute("viewBox", "0 0 15 15");
@@ -2620,6 +2638,8 @@ export function buildLightsTable(host, lights){
              l.state === "jammed" ? "JAMMED" : (on ? "LOCKED" : "UNLOCKED"))
         : l.isDoor
         ? el("span", { class: `lv-state ${on ? "on" : "off"}` }, on ? "OPEN" : "CLOSED")
+        : l.isFlood
+        ? el("span", { class: `lv-state ${on ? "on" : "off"}`, title: "Flood — read-only" }, on ? "WET" : "DRY")
         : el("span", { class: `lv-state ${on ? "on" : "off"}` }, on ? "ON" : "OFF")),
       // Its own column, next to State (Garry, 2026-09-07: "we still need
       // another option next to state... a reassign to another device type
@@ -2652,7 +2672,7 @@ export function buildLightsTable(host, lights){
       el("td", { style: "text-align:center;white-space:nowrap" }, [
         // The visible way to the controls (sidebar): a "⋯" that opens the
         // card — the same card the hold opens, offered in plain sight.
-        ...(host.onRowMore && !l.isMotion && !l.isTemp && !l.isHumidity && !l.isAir ? [el("button", {
+        ...(host.onRowMore && !l.isMotion && !l.isTemp && !l.isHumidity && !l.isAir && !l.isFlood ? [el("button", {
           class: "lv-act", title: "Controls", style: "margin-right:6px",
           onclick: (e) => { e.stopPropagation(); host.onRowMore(l); },
         }, "⋯")] : []),

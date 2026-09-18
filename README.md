@@ -61,7 +61,7 @@ A **PadSpan Pro** key unlocks all of the same — one key, either download.
 | Real shape, size (width × length) and rotation                         |               |     ✓      |
 | WLED strip/series placement, sized and angled to the strip              |               |     ✓      |
 | Brightness, colour and effect control per light, live                  |               |     ✓      |
-| Fans, locks, and motion, temperature, humidity and air-quality sensors placed on the map |    |     ✓      |
+| Fans, locks, and motion, temperature, humidity, air-quality and flood sensors placed on the map |    |     ✓      |
 | Outdoor gear (shed, garden, driveway) placed on the floor plate beside its room |          |     ✓      |
 | Doors & windows linked to a wall, live open/closed state on the map, Invert for backwards sensors |  |  ✓  |
 | Closed doors modelled as real RF barriers (material-aware attenuation) |               |     ✓      |

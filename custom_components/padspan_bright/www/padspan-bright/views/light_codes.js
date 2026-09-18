@@ -75,6 +75,19 @@ export function isDoorSensor(l) {
     && ["door", "window"].includes(l.device_class);
 }
 
+// A water-leak/flood sensor (Garry, 2026-09-18: "add flood sensors to the
+// list"). HA's own device_class for this is "moisture" ("Wet"/"Dry"), not
+// "flood" or "leak" — same admission shape as door/window above: a binary
+// state, read-only on this map. Its job is a bright red ring radiating out
+// from where it's placed while wet (floodRingSvg in iso_lights.js), the
+// same "make the room itself react" idea air quality's rising bars use, for
+// an alarm rather than a gradual reading — so unlike air quality there's no
+// badness scale, just on/off.
+export function isFloodSensor(l) {
+  return String(l.entity_id || "").startsWith("binary_sensor.")
+    && l.device_class === "moisture";
+}
+
 // A sensor.* entity reporting device_class "temperature" — "same as WLED or
 // any other object... devices telling the temperature can also act like a
 // motion sensor" (Garry): a THIRD read-only status class riding the same
@@ -269,6 +282,11 @@ export function healthOf(l, nowMs) {
     }
     return { healthy: true, reason: "" };
   }
+  // Flood deliberately gets NO stuck-state check here, unlike motion/door
+  // above: "on" held for hours might be exactly correct — an actual ongoing
+  // leak, which should keep alarming until someone fixes it, not get
+  // silently marked "probably a hardware fault" and dismissed. It falls
+  // through to reachability-only, same as a fan or plain light.
   if (isWledLight(l)) {
     if (!Array.isArray(l.effect_list) || !l.effect_list.length) {
       return { healthy: false, reason: "No effects reported — this WLED strip may have lost its effect list" };
@@ -309,6 +327,10 @@ export const DOOR_BORDER = "#fb7185";
 // Indigo — its own hue, clear of both existing blues (motion, partition)
 // and both existing purples (WLED, lock).
 export const HUMIDITY_BORDER = "#818cf8";
+// Bright, saturated red — deliberately louder than DOOR_BORDER's soft rose
+// or MOTION_BORDER's blue: a flood alarm should read as urgent at a glance,
+// not blend in as just another sensor colour.
+export const FLOOD_BORDER = "#ef4444";
 
 // ── Fixture shape ────────────────────────────────────────────────────────────
 // The marker's OUTLINE answers "what kind of light is that" without reading
@@ -341,6 +363,7 @@ export const LIGHT_SHAPES = [
   ["airquality", "Air quality sensor"],
   ["lock",      "Door lock"],
   ["door",      "Door/window sensor"],
+  ["flood",     "Flood/leak sensor"],
 ];
 
 // "perimeter" is drawn once, structurally differently from every shape
@@ -369,6 +392,12 @@ export function deriveLightShape(l) {
   if (isFan(l)) return "fan";
   if (isMotionSensor(l)) return "motion";
   if (isDoorSensor(l)) return "door";
+  // Checked here, ahead of the has("flood") floodlight-name heuristic
+  // below — a real binary_sensor.* leak detector is classified by domain
+  // and never reaches that name match at all. The two "flood"s are
+  // otherwise unrelated: one is a spotlight naming convention, this is a
+  // water sensor.
+  if (isFloodSensor(l)) return "flood";
   if (isAirQualitySensor(l)) return "airquality";
   if (isHumiditySensor(l)) return "humidityreadout";
   if (isTempSensor(l)) return "tempreadout";
@@ -407,7 +436,7 @@ export function resolveLightShape(l, overrides) {
 // Letters reserved for a class series, skipped as the generic series counts
 // past them — precomputed once so another reserved letter is a one-line
 // change here, not new arithmetic.
-const _SERIES_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").filter(c => c !== "D" && c !== "F" && c !== "H" && c !== "L" && c !== "M" && c !== "P" && c !== "Q" && c !== "T" && c !== "W");
+const _SERIES_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").filter(c => c !== "D" && c !== "F" && c !== "H" && c !== "K" && c !== "L" && c !== "M" && c !== "P" && c !== "Q" && c !== "T" && c !== "W");
 
 // Mutates each light in place: sets l.code, l.isWled, l.isPartition,
 // l.isFan, l.isMotion, l.isDoor, l.isTemp and l.isHumidity. Pass EVERY
@@ -418,13 +447,14 @@ const _SERIES_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").filter(c => c !==
 // identity wins.
 export function assignLightCodes(lights) {
   const sorted = [...lights].sort((a, b) => a.entity_id.localeCompare(b.entity_id));
-  let f = 0, m = 0, w = 0, p = 0, t = 0, h = 0, lk = 0, d = 0, q = 0, n = 0;
+  let f = 0, m = 0, w = 0, p = 0, t = 0, h = 0, lk = 0, d = 0, q = 0, k = 0, n = 0;
   const seriesCode = (idx) =>
     _SERIES_LETTERS[Math.floor(idx / 99)] + String((idx % 99) + 1).padStart(2, "0");
   for (const l of sorted) {
     l.isFan = isFan(l);
     l.isMotion = isMotionSensor(l);
     l.isDoor = isDoorSensor(l);
+    l.isFlood = isFloodSensor(l);
     l.isAir = isAirQualitySensor(l);
     l.isHumidity = !l.isAir && isHumiditySensor(l);
     l.isTemp = !l.isAir && !l.isHumidity && isTempSensor(l);
@@ -438,6 +468,11 @@ export function assignLightCodes(lights) {
     } else if (l.isDoor) {
       l.isWled = false; l.isPartition = false;
       l.code = "D" + String((d++ % 99) + 1).padStart(2, "0");
+    } else if (l.isFlood) {
+      l.isWled = false; l.isPartition = false;
+      // K: D/F/L/W (door, fan, lock, WLED) all already taken — arbitrary,
+      // same as Q for air quality.
+      l.code = "K" + String((k++ % 99) + 1).padStart(2, "0");
     } else if (l.isAir) {
       l.isWled = false; l.isPartition = false;
       l.code = "Q" + String((q++ % 99) + 1).padStart(2, "0");
