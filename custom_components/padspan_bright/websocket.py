@@ -322,6 +322,7 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_traceback_get)
     websocket_api.async_register_command(hass, ws_traceback_objects)
     websocket_api.async_register_command(hass, ws_insights_get)
+    websocket_api.async_register_command(hass, ws_flood_reset)
     websocket_api.async_register_command(hass, ws_notify_services_list)
     websocket_api.async_register_command(hass, ws_notify_test)
     websocket_api.async_register_command(hass, ws_adaptive_status_get)
@@ -753,6 +754,20 @@ async def ws_insights_get(hass: HomeAssistant, connection, msg) -> None:
     tz_name = getattr(hass.config, "time_zone", None) or "UTC"
     stats = compute_dwell_stats(frames, tz_name=tz_name)
     connection.send_result(msg["id"], stats)
+
+
+# Flood/water-leak alarm latching (flood_latch.py) — the Atlas Reset button.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@websocket_api.websocket_command({
+    "type": "padspan_bright/flood_reset",
+    "entity_id": str,
+})
+@websocket_api.async_response
+async def ws_flood_reset(hass: HomeAssistant, connection, msg) -> None:
+    from .flood_latch import async_reset_latch
+    existed = await async_reset_latch(hass, msg["entity_id"])
+    connection.send_result(msg["id"], {"reset": existed})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

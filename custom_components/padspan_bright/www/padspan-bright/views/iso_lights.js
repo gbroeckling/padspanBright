@@ -24,6 +24,38 @@ const { WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, MOTION_PULSE, 
 
 function escSVG(s){ return String(s??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
 
+// 2 days — mirrors flood_latch.py's ACTIVE_WINDOW_S (Python owns the write,
+// this is read-only math against the same stored timestamp). A sensor that
+// re-triggers WHILE already latched does NOT push this out further —
+// flood_latch.py keeps the ORIGINAL trigger time (ISA-18.2 convention: a
+// still-active alarm keeps its first occurrence time), so this window is a
+// fixed 2 days from that first trip, not a rolling one.
+export const FLOOD_ACTIVE_WINDOW_S = 2 * 24 * 60 * 60;
+// nowMs is required, not defaulted to Date.now() — buildIsoSVG's own
+// nowMs fallback (NOW_MS below) is the only wall-clock read the renderer
+// may ever make; a second one here would break "the fabric alone
+// reproduces a render" (test_lights_renderer.py).
+export function floodLatchActive(triggeredAtS, nowMs){
+  if(!Number.isFinite(triggeredAtS) || !Number.isFinite(nowMs)) return false;
+  const age=(nowMs/1000)-triggeredAtS;
+  return age>=0 && age<FLOOD_ACTIVE_WINDOW_S;
+}
+// A unit-radius (1.0) scalloped ring — water, not a circle. Built once at
+// module load (pure Math.sin/cos on fixed inputs, no Date.now()/
+// Math.random()) and reused for every flood ripple, scaled up per-draw via
+// <animateTransform type="scale"> rather than rebuilt per fixture.
+const FLOOD_WAVE_LOBES = 7, FLOOD_WAVE_AMP = 0.16;
+const FLOOD_WAVE_PATH = (() => {
+  const STEPS = 64;
+  let d = "";
+  for (let i = 0; i <= STEPS; i++) {
+    const t = (i / STEPS) * Math.PI * 2;
+    const r = 1 + FLOOD_WAVE_AMP * Math.sin(t * FLOOD_WAVE_LOBES);
+    d += (i === 0 ? "M" : "L") + (r * Math.cos(t)).toFixed(4) + "," + (r * Math.sin(t)).toFixed(4) + " ";
+  }
+  return d + "Z";
+})();
+
 // ── Room colour ──────────────────────────────────────────────────────────────
 // Re-exported, not reimplemented. This file used to carry its own palette and
 // its own hash under a comment claiming they matched panel.js; they did not,
@@ -2412,6 +2444,9 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   // metres instead of their live colour. Preview only — nothing is written.
   const FIELD  = SHOW ? (opts.sceneField || null) : null;
   const ISOLUX = SHOW && !!opts.isolux;
+  // {entity_id: epoch-seconds of its most recent "on"} — flood_latch.py's
+  // event listener, not this render pass; read-only here.
+  const FLOOD_LATCHES = opts.floodLatches || {};
   // ── Ergonomics of control-from-a-map (both hosts opt in per surface) ──────
   // codeChip: the code is a TAP TARGET of its own (data-role="code"), drawn
   //   as a pill under the glyph — the glyph is the switch, the chip opens the
@@ -2794,13 +2829,22 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   // airFx above (placed, resolves to a room on its own floor, hidden markers
   // draw nothing) but binary rather than a badness scale: a flood sensor
   // either is wet right now or it draws nothing at all — no "a little wet".
+  //
+  // 2026-09-19: raw `state` alone under-reports — a real leak (Kitchen Sink,
+  // verified live) flapped on/off in a tight ~0.55s rhythm, shorter than
+  // this render loop's own refresh cadence could reliably catch. The ring
+  // now draws while EITHER the sensor currently reads "on" OR its latch
+  // (flood_latch.py, event-driven, catches every transition) is still
+  // active — 2 days from its most recent trip, or until someone hits Reset.
   const floodFx=[];
   for(const pl of lights){
     const li=lightsByEid[pl.eid];
-    if(!li || !li.isFlood || li.state!=="on" || hiddenEids.has(pl.eid)) continue;
+    if(!li || !li.isFlood || hiddenEids.has(pl.eid)) continue;
+    const latched=floodLatchActive((FLOOD_LATCHES[pl.eid]||{}).triggered_at, NOW_MS);
+    if(li.state!=="on" && !latched) continue;
     const room=rooms.find(r=>r.z===pl.z && pointInPolygon(r.pts, pl.x, pl.y));
     if(!room) continue;
-    floodFx.push({eid: pl.eid, room, x: pl.x, y: pl.y, z: pl.z});
+    floodFx.push({eid: pl.eid, room, x: pl.x, y: pl.y, z: pl.z, liveWet: li.state==="on"});
   }
 
   // ── Fit to room ───────────────────────────────────────────────────────────
@@ -2952,28 +2996,47 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       `<g><animateTransform attributeName="transform" type="translate" from="0 0" to="0 ${(-gap).toFixed(1)}" `+
       `dur="${dur}s" repeatCount="indefinite"/>${bars}</g></g>`;
   };
-  // The flood ring: a bright red sonar-style pulse radiating out from the
-  // sensor's own placed point, clipped to its room — the same "make the
-  // room react" idea as airBarsSvg above, but binary (an alarm, not a
-  // graded reading) so there is no badness curve to speed up or slow down.
-  // Three rings staggered a third of a cycle apart (same convention as the
-  // Pure Live scanner sonar pulse) so at least one is always mid-sweep
-  // rather than all three flashing in lockstep.
-  const floodRingSvg=(room, eid, wx, wy)=>{
+  // The flood ripple: a scalloped, wavy red outline — water, not a status
+  // dot — that grows from the sensor's own placed point out to the room's
+  // actual edges, clipped to its polygon. Garry, 2026-09-19, live review:
+  // "it's too much like the motion sensors, make it look wavey as well so
+  // it is distinct... and of course filling the room" — motion's own pulse
+  // (motionRecentPulseSvg, a bit below) is a plain static circle that only
+  // breathes opacity, sized to the marker; this must read as neither that
+  // nor the air bars' straight lines. FLOOD_WAVE_PATH is a unit-radius
+  // scalloped ring, built once; each ripple is that same path scaled up to
+  // rMax (the farthest room corner from the sensor) via <animateTransform
+  // type="scale">, so growth is real geometry, not a bigger stroke — and
+  // vector-effect keeps the stroke itself a constant width throughout.
+  // liveWet spins faster and staggers three ripples (something is actively
+  // happening); latched-only spins slower with a single ripple (steady,
+  // needs attention, nothing is moving right now).
+  const floodRingSvg=(room, eid, wx, wy, liveWet)=>{
     if(CLASSF && CLASSF!=="flood") return "";
     const cid=roomClip.get(room);
     if(!cid) return "";
     const [cx,cy]=iso(wx,wy,room.z);
-    const DUR=2.2, R0=5, R1=140;
-    let rings="";
-    for(let k=0;k<3;k++){
-      const begin=(k*DUR/3).toFixed(2);
-      rings+=`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${R0}" fill="none" stroke="${FLOOD_BORDER}" stroke-width="3" opacity="0">`+
-        `<animate attributeName="r" values="${R0};${R1}" dur="${DUR}s" begin="${begin}s" repeatCount="indefinite"/>`+
-        `<animate attributeName="opacity" values="0.9;0" dur="${DUR}s" begin="${begin}s" repeatCount="indefinite"/>`+
-        `</circle>`;
+    let rMax=40;
+    for(const p of (room.pts||[])){
+      const [px,py]=iso(p[0],p[1],room.z);
+      rMax=Math.max(rMax, Math.hypot(px-cx, py-cy));
     }
-    return `<g class="lflood" data-eid="${escSVG(eid)}" data-class="flood" clip-path="url(#${cid})" pointer-events="none">${rings}</g>`;
+    const N=liveWet?3:1;
+    const DUR=liveWet?2.6:4.2;
+    let ripples="";
+    for(let k=0;k<N;k++){
+      const begin=(k*DUR/N).toFixed(2);
+      ripples+=`<path d="${FLOOD_WAVE_PATH}" fill="none" stroke="${FLOOD_BORDER}" stroke-width="3" `+
+        `vector-effect="non-scaling-stroke" opacity="0">`+
+        `<animateTransform attributeName="transform" type="scale" values="${(rMax*0.03).toFixed(1)};${rMax.toFixed(1)}" `+
+        `dur="${DUR}s" begin="${begin}s" repeatCount="indefinite"/>`+
+        `<animate attributeName="opacity" values="0.85;0" dur="${DUR}s" begin="${begin}s" repeatCount="indefinite"/>`+
+        `</path>`;
+    }
+    const spin=(liveWet?9:18).toFixed(1);
+    return `<g class="lflood" data-eid="${escSVG(eid)}" data-class="flood" data-latched="${liveWet?0:1}" `+
+      `clip-path="url(#${cid})" pointer-events="none" transform="translate(${cx.toFixed(1)},${cy.toFixed(1)})">`+
+      `<g><animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="${spin}s" repeatCount="indefinite"/>${ripples}</g></g>`;
   };
   // The legend strip's own stop offsets (Garry, 2026-09-08: "make sure
   // that's actually aligned with what is happening on the map" — the
@@ -5729,7 +5792,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     // bars (see floodFx, computed before the defs alongside airFx).
     for(const fx of floodFx){
       if(fx.room.z!==z) continue;
-      s+=floodRingSvg(fx.room, fx.eid, fx.x, fx.y);
+      s+=floodRingSvg(fx.room, fx.eid, fx.x, fx.y, fx.liveWet);
     }
     for(const fn of labelJobs) fn();
 

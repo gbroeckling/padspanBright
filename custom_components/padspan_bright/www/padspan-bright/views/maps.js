@@ -8603,6 +8603,12 @@ function _lightsTab(ctx, maps, active) {
       ip: ctx.state._lightsRegStore?.reg?.ipMap?.[eid] || null }),
     openActivity: (eid) => openActivityCalendar(ctx.hass, eid),
     setMany: (eids, on) => setManyStates(ctx.hass, eids, on, { toast: (m, e) => ctx.toast(m, e), rerender: () => ctx.actions.renderRooms() }),
+    floodLatches: (ctx.state.settings && ctx.state.settings.flood_latches) || {},
+    onFloodReset: (eid) => {
+      ctx.actions.wsCall("padspan_bright/flood_reset", { entity_id: eid })
+        .then(() => ctx.actions.renderRooms())
+        .catch((e) => ctx.toast("Could not reset: " + String(e), true));
+    },
   };
   previewApi.openRoom = (room, onlyEids) => openRoomSheet(previewApi, lights, room, onlyEids);
   previewApi.openFloor = (z) => openFloorSheet(previewApi, lights, ctx.state.model, z);
@@ -9373,6 +9379,12 @@ function _lightsTab(ctx, maps, active) {
     onTableSort: (next) => { mapState._tableSort = next; ctx.actions.renderRooms(); },
     tableHealthFilter: !!mapState._tableHealthFilter,
     onTableHealthFilter: (on) => { mapState._tableHealthFilter = on; ctx.actions.renderRooms(); },
+    floodLatches: (ctx.state.settings && ctx.state.settings.flood_latches) || {},
+    onFloodReset: (eid) => {
+      ctx.actions.wsCall("padspan_bright/flood_reset", { entity_id: eid })
+        .then(() => ctx.actions.renderRooms())
+        .catch((e) => ctx.toast("Could not reset: " + String(e), true));
+    },
   };
   const mapCardEl = buildLightsMapCard(host);
   // The drafting grid on the stage says "editing" without a word.

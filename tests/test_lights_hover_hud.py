@@ -103,7 +103,7 @@ def test_the_hud_stays_inside_the_viewport_when_the_page_scrolls():
     assert '.lv-toolbar-sticky' in place and "getBoundingClientRect().bottom" in place
     assert "Math.max(visibleTop, a.top) - a.top" in place
     assert ".lv-toolbar-sticky{position:sticky;top:0;z-index:20;" in _CSS
-    show = _block(hud, "const show = (stack, room) => {", "if (!stack.length && !room)")
-    assert show.index("place();") < show.index("if (key === lastKey) return;"), (
-        "the box must be repositioned even when its content is unchanged"
+    show = _block(hud, "const show = (stack, room) => {", "};\n  isoDiv.addEventListener(\"pointermove\"")
+    assert show.index("place();") < show.index("const key ="), (
+        "the box must be repositioned even before content is evaluated at all"
     )

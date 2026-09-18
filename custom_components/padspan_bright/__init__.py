@@ -618,6 +618,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.debug("Forensics setup failed: %s", err)
 
+    # Flood/water-leak alarm latching — event-driven, not a poller (a real
+    # leak can flap on/off well under a second; see flood_latch.py).
+    try:
+        from .flood_latch import async_setup_flood_latch
+        async_setup_flood_latch(hass)
+    except Exception as err:
+        _LOGGER.debug("Flood latch setup failed: %s", err)
+
     return True
 
 
@@ -656,6 +664,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await _fs.async_save_if_due(force=True)
     except Exception as err:
         _LOGGER.debug("Forensics teardown error: %s", err)
+
+    # Stop the flood-latch event listener
+    try:
+        from .flood_latch import async_stop_flood_latch
+        async_stop_flood_latch(hass)
+    except Exception as err:
+        _LOGGER.debug("Flood latch teardown error: %s", err)
 
     # Stop presence coordinator (and its CPU-mode compute executor)
     try:

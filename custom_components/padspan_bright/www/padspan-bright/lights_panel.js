@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.51";
-const BUILD_ID = "20260918T201355Z";
+const APP_VERSION = "0.38.52";
+const BUILD_ID = "20260918T212045Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -227,6 +227,10 @@ class PadSpanLightsApp extends HTMLElement {
       // Quick-apply only (see onApplyPreset in the host below) — presets are
       // authored in Mapping -> Lights, this panel just switches between them.
       this.state._showcasePresets = Array.isArray(s.lights_showcase_presets) ? s.lights_showcase_presets : [];
+      // {entity_id: epoch-s of its most recent "on"} — flood_latch.py's
+      // event listener writes this server-side; ungated, same reasoning as
+      // the tier read above (a flood alarm isn't a paid convenience).
+      this.state._floodLatches = (s.flood_latches && typeof s.flood_latches === "object") ? s.flood_latches : {};
       // The effective tier the backend computed (licence.py). Below `bright`
       // the shared pipeline draws the free map — see lights_map.js. A settings
       // fetch that failed keeps the tier it last knew rather than flickering
@@ -372,6 +376,12 @@ class PadSpanLightsApp extends HTMLElement {
       setMany:(eids,on)=>this._setMany(eids,on),
       toast:(m,e)=>this._toast(m,e),
       rerender:()=>this._render(),
+      floodLatches: this.state._floodLatches || {},
+      onFloodReset: (eid)=>{
+        this._hass.callWS({ type: "padspan_bright/flood_reset", entity_id: eid })
+          .then(()=>this._render())
+          .catch((e)=>this._toast("Could not reset: " + String(e), true));
+      },
     };
     api.openRoom=(room, onlyEids)=>openRoomSheet(api, lights, room, onlyEids);
     api.openFloor=(z)=>openFloorSheet(api, lights, this.state.model, z);
@@ -604,6 +614,12 @@ class PadSpanLightsApp extends HTMLElement {
       onTableSort: (next)=>{ this.state._tableSort=next; this._render(); },
       tableHealthFilter: !!this.state._tableHealthFilter,
       onTableHealthFilter: (on)=>{ this.state._tableHealthFilter=on; this._render(); },
+      floodLatches: this.state._floodLatches || {},
+      onFloodReset: (eid)=>{
+        this._hass.callWS({ type: "padspan_bright/flood_reset", entity_id: eid })
+          .then(()=>this._render())
+          .catch((e)=>this._toast("Could not reset: " + String(e), true));
+      },
     };
 
     root.appendChild(buildLightsMapCard(host));

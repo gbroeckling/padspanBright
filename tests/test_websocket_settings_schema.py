@@ -34,6 +34,7 @@ _BACKEND_ONLY = {
     "room_tag_map",                # tag integration / live snapshot
     "telemetry_install_id",        # minted by telemetry.py; replaced via telemetry_reset_id
     "telemetry_last_day",          # stamped by telemetry.py on an accepted send
+    "flood_latches",               # flood_latch.py's state-change listener + padspan_bright/flood_reset
 }
 
 

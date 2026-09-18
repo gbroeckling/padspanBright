@@ -46,6 +46,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "path_loss_exp":   2.5,    # path-loss exponent n (distance formula)
     "hidden_map_ids":  [],     # map IDs hidden from 3D stack view
     "locate_self_key": "",     # which tracked object's position is "you", for the Locate tab's wayfinding
+    "flood_latches": {},       # {binary_sensor entity_id: {triggered_at, expires_at}} — flood_latch.py owns writes
     "scanner_offsets": {},     # {source_name: offset_dBm} — manual per-scanner RSSI trim
     # Sources masked out of positioning (issue #59). A MASK, never a delete:
     # stored calibration samples, positions and registry entries are untouched,
