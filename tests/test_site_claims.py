@@ -188,20 +188,97 @@ def test_the_release_history_covers_the_newest_release(html: str) -> None:
         "section, or the page describes older software than people are offered.")
 
 
-def test_the_view_count_agrees_with_the_readme(html: str) -> None:
+def _bracket_extract(src: str, needle: str) -> str:
+    """The full text of the array literal `needle` opens (e.g. "const X = ["),
+    from its `[` to the matching `]` — string-aware, so a `[`/`]` inside a
+    prose field (a title, a help sentence) never miscounts the depth."""
+    start = src.index(needle)
+    i = src.index("[", start)
+    depth = 0
+    in_str = None
+    esc = False
+    for j in range(i, len(src)):
+        c = src[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == in_str:
+                in_str = None
+            continue
+        if c in ('"', "'", "`"):
+            in_str = c
+            continue
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                return src[i:j + 1]
+    raise AssertionError(f"unbalanced brackets reading {needle!r}")
+
+
+def _real_menu_count() -> int:
+    """panel.js's own MENU array — the actual sidebar tab list — not a
+    number carried by hand in prose. Week-review finding, 2026-09-19: the
+    README/site count was bumped by +1 per new tab (24 -> 25 -> 26) without
+    ever being checked against MENU, which only ever had 22 entries — the
+    increments were applied to a baseline that was already wrong."""
+    panel = (_ROOT / "custom_components" / "padspan_bright" / "www" / "padspan-bright" / "panel.js").read_text(encoding="utf-8")
+    block = _bracket_extract(panel, "const MENU = [")
+    import re
+    return len(re.findall(r'^\s*\["[a-z0-9_]+",', block, re.M))
+
+
+def _real_walkthrough_count() -> int:
+    """training.js's own WALKTHROUGHS array."""
+    training = (_ROOT / "custom_components" / "padspan_bright" / "www" / "padspan-bright" / "views" / "training.js").read_text(encoding="utf-8")
+    block = _bracket_extract(training, "const WALKTHROUGHS = [")
+    import re
+    return len(re.findall(r'^\s{4}id:\s*"', block, re.M))
+
+
+def test_the_view_count_agrees_with_the_readme_and_with_panels_real_menu(html: str) -> None:
     """The site, the README and the repo description all quote a number of
     "dedicated views". They said 22 while panel.js listed 24, and nobody could
-    say where 22 came from. Whatever the number is, these two must not disagree
-    — a visitor who counts them should not catch us out."""
+    say where 22 came from — then drifted again (24 -> 25 -> 26, one +1 per
+    new tab, never checked against MENU) while MENU stayed at 22 the whole
+    time. Every occurrence — the hero line, the bullet, the og:description's
+    bare "N views" phrasing, and the comparison table's number cell — must
+    now agree with MENU itself, not just with each other."""
     import re
 
+    real = _real_menu_count()
     readme = (_ROOT / "README.md").read_text(encoding="utf-8")
-    r = re.search(r"\*\*(\d+) dedicated views\*\*", readme)
-    assert r, "the README no longer states a view count"
-    site = re.findall(r"(\d+) dedicated views", html)
-    assert site, "the site no longer states a view count"
-    assert set(site) == {r.group(1)}, (
-        f"README says {r.group(1)} dedicated views, the site says {sorted(set(site))}")
+    readme_nums = {int(n) for n in re.findall(r"\*\*(\d+) dedicated views\*\*", readme)}
+    readme_nums |= {int(n) for n in re.findall(r"\|\s*Dedicated UI views\s*\|\s*(\d+)\s*\|", readme)}
+    assert readme_nums, "the README no longer states a view count"
+    assert readme_nums == {real}, f"README states {sorted(readme_nums)} dedicated views; panel.js's MENU has {real}"
+
+    site_nums = {int(n) for n in re.findall(r"(\d+)\s+(?:dedicated\s+)?views\b", html)}
+    site_nums |= {int(n) for n in re.findall(r'Dedicated UI views</td><td class="num">(\d+)</td>', html)}
+    assert site_nums, "the site no longer states a view count"
+    assert site_nums == {real}, f"site/index.html states {sorted(site_nums)} views; panel.js's MENU has {real}"
+
+
+def test_the_walkthrough_count_agrees_across_readme_and_site_and_trainings_real_array(html: str) -> None:
+    """Same failure shape as the view count, found in the same review:
+    commit 06787ce4 fixed README's marketing bullet and one comparison-table
+    reference from 14 to 16, but missed a THIRD README instance and never
+    touched site/index.html at all — every one of its 4 occurrences still
+    said 14. training.js's WALKTHROUGHS array is the one source of truth."""
+    import re
+
+    real = _real_walkthrough_count()
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    readme_nums = {int(n) for n in re.findall(r"(\d+)\s+(?:animated\s+)?walkthroughs\b", readme)}
+    assert readme_nums, "the README no longer states a walkthrough count"
+    assert readme_nums == {real}, f"README states {sorted(readme_nums)} walkthroughs; training.js's WALKTHROUGHS has {real}"
+
+    site_nums = {int(n) for n in re.findall(r"(\d+)\s+(?:animated\s+)?walkthroughs\b", html)}
+    assert site_nums, "the site no longer states a walkthrough count"
+    assert site_nums == {real}, f"site/index.html states {sorted(site_nums)} walkthroughs; training.js's WALKTHROUGHS has {real}"
 
 
 def test_the_paid_and_lighting_products_are_explained(html: str) -> None:

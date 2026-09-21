@@ -75,6 +75,33 @@ def _normalize_automorph_style(value: Any) -> str:
     return v if v in _AUTOMORPH_STYLES else "glow"
 
 
+def _sanitize_light_shapes(raw: Any) -> dict[str, str]:
+    """entity_id -> shape kind. Only known kinds are stored; an unknown
+    value would just fall back to the default marker in the frontend, but
+    there is no reason to persist junk. "auto" is expressed by omitting the
+    entity, so it is never stored.
+
+    CORRECTED 2026-09-19 (Phase 2a registry audit): this used to keep only
+    "light."-prefixed keys, unlike light_type_overrides (which is correctly
+    light.*-only — a type override only ever makes sense for a light). But
+    the Atlas inspector offers this same Shape chooser for EVERY placed
+    class, and resolveLightShape (light_codes.js) already applies an
+    override generically regardless of class — so picking a shape for a
+    fan, a door, or any other non-light entity silently saved nothing
+    server-side, with no error shown. No domain check at all now, matching
+    what the frontend already does with the value; a fixed-glyph class
+    (motion/flood/temp/humidity/air/lock) has nothing to gain from an
+    override, but that's a UI decision (the inspector hides the control for
+    those — hasFixedGlyph), not something this schema needs to police.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(k): str(v) for k, v in raw.items()
+        if str(v) in _LIGHT_SHAPE_KINDS and str(k)
+    }
+
+
 def _normalize_showcase_theme(value: Any) -> str:
     """The Showcase-theme equivalent of _normalize_automorph_style above —
     same reasoning, same shared use by the live setter and the preset
@@ -507,17 +534,11 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             payload["lights_showcase_theme"] = _normalize_showcase_theme(msg["lights_showcase_theme"])
         if "lights_showcase_presets" in msg:
             payload["lights_showcase_presets"] = _sanitize_showcase_presets(msg["lights_showcase_presets"])
-        if "light_shapes" in msg:
-            # entity_id -> shape kind. Only known kinds are stored; an unknown
-            # value would just fall back to the default marker in the frontend,
-            # but there is no reason to persist junk. "auto" is expressed by
-            # omitting the entity, so it is never stored.
-            raw = msg["light_shapes"]
-            if isinstance(raw, dict):
-                payload["light_shapes"] = {
-                    str(k): str(v) for k, v in raw.items()
-                    if str(v) in _LIGHT_SHAPE_KINDS and str(k).startswith("light.")
-                }
+        if "light_shapes" in msg and isinstance(msg["light_shapes"], dict):
+            # A non-dict is ignored, not stored as empty — same discipline
+            # as every other dict-shaped setting here: a malformed payload
+            # must never wipe out what's already saved.
+            payload["light_shapes"] = _sanitize_light_shapes(msg["light_shapes"])
         if "light_type_overrides" in msg:
             # entity_id -> forced class (wled/partition/plain), same discipline
             # as light_shapes above: closed vocabulary, light.* keys only,
@@ -609,6 +630,16 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
         if "onboarding_completed" in msg:
             payload["onboarding_completed"] = bool(msg["onboarding_completed"])
         if "espresense_companion_url" in msg:
+            # Admin-only (Phase 2i security audit, 2026-09-19): this URL is
+            # later fetched server-side, verbatim, by the admin-only
+            # espresense_companion_import command — a non-admin account
+            # staging an arbitrary host here (internal, a cloud metadata
+            # address) and waiting for an admin to click Import was the
+            # actual attack shape found. Same gate as telemetry_enabled above.
+            _user = getattr(connection, "user", None)
+            if _user is not None and getattr(_user, "is_admin", True) is False:
+                connection.send_error(msg["id"], "unauthorized", "Only an administrator can change the ESPresense Companion URL")
+                return
             _url = str(msg["espresense_companion_url"]).strip().rstrip("/")
             payload["espresense_companion_url"] = _url
         if "espresense_topic_prefix" in msg:
@@ -638,18 +669,39 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
         if "occupancy_hybrid_enabled" in msg:
             payload["occupancy_hybrid_enabled"] = bool(msg["occupancy_hybrid_enabled"])
         if "padspan_automations" in msg:
-            # Validate and sanitize each rule
+            # Validate and sanitize each rule. Security-relevant, not just
+            # tidy input: presence_coordinator.py executes these unattended
+            # on a BLE arrive/depart trigger via
+            # hass.services.async_call(domain-from-entity_id, action, ...)
+            # with no allowlist of its own — found in the Phase 2i security
+            # audit, 2026-09-19. Before this, ANY domain/service pair a
+            # client stored would fire (lock.unlock, alarm_control_panel.
+            # alarm_disarm, ...), and this command has no require_admin, so
+            # any signed-in non-admin HA account (the padspan-bright panel is
+            # itself require_admin=False) could wire a lock or an alarm
+            # panel to a BLE presence trigger with zero human confirmation.
+            # The UI (settings.js) has only ever offered turn_on/turn_off
+            # against light./switch./scene./script. entities — this is the
+            # SAME allowlist, enforced server-side rather than trusted from
+            # the client that's supposed to be the only one using it.
             _clean_rules = []
             for r in (msg["padspan_automations"] or []):
                 if not isinstance(r, dict):
+                    continue
+                _action = str(r.get("action", ""))[:20]
+                _eid = str(r.get("entity_id", ""))[:120]
+                _domain = _eid.split(".", 1)[0] if "." in _eid else ""
+                if _action not in ("turn_on", "turn_off") or _domain not in (
+                    "light", "switch", "scene", "script"
+                ):
                     continue
                 _clean_rules.append({
                     "id": str(r.get("id", "")),
                     "trigger": str(r.get("trigger", ""))[:10],
                     "device_key": str(r.get("device_key", "")),
                     "device_label": str(r.get("device_label", ""))[:80],
-                    "action": str(r.get("action", ""))[:20],
-                    "entity_id": str(r.get("entity_id", ""))[:120],
+                    "action": _action,
+                    "entity_id": _eid,
                     "enabled": bool(r.get("enabled", True)),
                 })
             payload["padspan_automations"] = _clean_rules

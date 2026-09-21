@@ -423,6 +423,31 @@ _BARRIER_LBE = {**_LIGHTS_BY_EID, "binary_sensor.frontdoor": {
     "shape": "door", "isDoor": True}}
 
 
+def test_the_builder_can_ask_for_a_press_target_over_a_linked_opening(tmp_path):
+    """Garry, 2026-09-19: "press and hold doesn't work for all devices". A
+    linked door/window/lock is a section of wall drawn pointer-events:none —
+    an OPEN door draws nothing but two 2.6px dots — so there was literally
+    nothing to press. With barrierHit the renderer lays one invisible
+    stroke-hit path over the section, carrying the linked entity's id; an
+    open door (nothing visible) gets one too. Without the opt — the
+    household surface — the markup is exactly what it was."""
+    open_lbe = {**_BARRIER_LBE, "binary_sensor.frontdoor": {**_BARRIER_LBE["binary_sensor.frontdoor"], "state": "on"}}
+    script = (
+        "import * as M from './iso_lights.mjs';\n"
+        f"const MODEL={json.dumps(_BARRIER_MODEL)};\nconst FLOORS={json.dumps(_FLOORS)};\n"
+        f"const LBE={json.dumps(open_lbe)};\n"
+        "const plain=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS);\n"
+        "const hit=M.buildIsoSVG(MODEL,{},new Set(),null,150,0,LBE,false,FLOORS,{barrierHit:true});\n"
+        "const m=/<polyline class=\"lbarhit\" data-eid=\"([^\"]+)\"[^>]*pointer-events=\"([a-z]+)\"/.exec(hit);\n"
+        "console.log(JSON.stringify({plainHas: plain.includes('lbarhit'), eid: m&&m[1], pe: m&&m[2],\n"
+        "  count: (hit.match(/class=\"lbarhit\"/g)||[]).length}));\n"
+    )
+    out = _run_js(tmp_path, script)
+    assert out["plainHas"] is False, "the household surface's markup must not change"
+    assert out["count"] == 1 and out["eid"] == "binary_sensor.frontdoor", out
+    assert out["pe"] == "stroke", "the press target must actually receive the pointer"
+
+
 def test_a_linked_closed_barrier_draws_a_solid_line_and_two_purple_dots(tmp_path):
     out = _run_js(tmp_path, _barrier_harness(_BARRIER_MODEL, _BARRIER_LBE))
     svg = out["svg"]
@@ -1591,6 +1616,59 @@ def test_every_shape_is_visible_as_an_outline(tmp_path):
         assert re.search(r'(stroke|fill)="#', out[k]), (
             "shape {!r} paints nothing when drawn as an outline: {}".format(k, out[k])
         )
+
+
+def _polygon_bbox(svg: str) -> tuple[float, float, float, float]:
+    """(minx, miny, maxx, maxy) across every polygon/path/rect/circle point
+    findable in an SVG fragment — good enough for a bounding-box check on
+    the simple glyphs this file renders, without a real SVG parser."""
+    xs, ys = [], []
+    for m in re.finditer(r'points="([^"]+)"', svg):
+        for pair in m.group(1).split():
+            x, y = pair.split(",")
+            xs.append(float(x)); ys.append(float(y))
+    for m in re.finditer(r'\bd="([^"]+)"', svg):
+        for x, y in re.findall(r'([\-\d.]+),([\-\d.]+)', m.group(1)):
+            xs.append(float(x)); ys.append(float(y))
+    assert xs and ys, f"found no drawable points in: {svg}"
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def test_flood_marker_has_its_own_shape_not_the_hex_fallback(tmp_path):
+    """Issue #81: a placed flood sensor's marker, index swatch, drag handle
+    and shape legend all silently fell through to shapeSvg's `default: poly
+    (hexPts(...))` — the plain hexagon every unclassified fixture gets —
+    because shapeSvg/shapeDetailSvg had no `case "flood"` even though
+    LIGHT_SHAPES/LIGHT_SHAPE_KINDS both already listed it. Picked from 3
+    candidates rendered at true marker scale and reviewed directly."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        "const a='fill=\"#ef4444\" stroke=\"none\"';\n"
+        "console.log(JSON.stringify({\n"
+        "  flood: M.shapeSvg('flood', 20, 20, 14, a),\n"
+        "  hex:   M.shapeSvg('not_a_real_shape_kind', 20, 20, 14, a),\n"
+        "  floodDetail: M.shapeDetailSvg('flood', 20, 20, 14, '#f1f5f9', 2),\n"
+        "  defaultDetail: M.shapeDetailSvg('not_a_real_shape_kind', 20, 20, 14, '#f1f5f9', 2),\n"
+        "}));\n"
+    ))
+    assert out["flood"] != out["hex"], "flood still falls through to the plain hex fallback"
+    assert out["floodDetail"] != out["defaultDetail"], (
+        "flood's Showcase detail still falls through to the generic bevel+lamp default")
+
+
+def test_flood_marker_reads_as_a_puddle_wider_than_tall(tmp_path):
+    """The chosen design (a low, flat, gently-scalloped puddle) is the one
+    visual trait that makes it distinct from every other glyph here by
+    silhouette alone, not just by colour — every other class is roughly as
+    tall as it is wide, or taller (door). Pinned so a future tweak can't
+    accidentally narrow it back toward that shared proportion."""
+    out = _run_js(tmp_path, (
+        "import * as M from './iso_lights.mjs';\n"
+        "console.log(JSON.stringify(M.shapeSvg('flood', 20, 20, 14, 'fill=\"#ef4444\"')));\n"
+    ))
+    minx, miny, maxx, maxy = _polygon_bbox(out)
+    width, height = maxx - minx, maxy - miny
+    assert width > height * 1.5, f"flood's glyph is not distinctly wider than tall: {width}x{height}"
 
 
 def test_the_dotted_line_can_still_be_clicked(tmp_path):
@@ -3033,8 +3111,11 @@ def test_moving_a_light_does_not_count_as_touching_it(tmp_path):
     src = (_VIEWS / "lights_map.js").read_text(encoding="utf-8")
     body = src[src.index("const _DROP_COLOR"):]
     body = body[:body.index("// Legend for the shape vocabulary")]
+    # lightIsTouched asks the device-class registry (light_codes.js) which
+    # classes are fixed-glyph — the real module, not a stub of it.
     out = _run_js(tmp_path, (
-        body + "\n"
+        "import { hasFixedGlyph } from './light_codes.mjs';\n"
+        + body + "\n"
         "const T=(over,pl)=>lightIsTouched({entity_id:'light.x'},over,pl);\n"
         "const TD=(over,pl)=>lightIsTouched({entity_id:'light.x',isDoor:true},over,pl);\n"
         "const TDL=(over,pl,linked)=>lightIsTouched({entity_id:'light.x',isDoor:true},over,pl,linked);\n"
@@ -3108,11 +3189,13 @@ def test_a_placed_motion_temp_humidity_air_or_lock_sensor_is_touched_by_a_bare_p
     body = body[:body.index("// Legend for the shape vocabulary")]
     bare = "{x_m:1,y_m:2,floor_id:'main',color:'#fbbf24',width_cm:0,height_cm:0,rotation:0}"
     out = _run_js(tmp_path, (
-        body + "\n"
+        "import { hasFixedGlyph } from './light_codes.mjs';\n"
+        + body + "\n"
         "const T=(cls)=>lightIsTouched({entity_id:'x',[cls]:true},{},{'x':" + bare + "});\n"
         "const unplacedT=(cls)=>lightIsTouched({entity_id:'x',[cls]:true},{},{});\n"
         "console.log(JSON.stringify({\n"
         "  motion: T('isMotion'), temp: T('isTemp'), humidity: T('isHumidity'), air: T('isAir'), lock: T('isLock'),\n"
+        "  flood: T('isFlood'), fanStillUntouched: T('isFan'),\n"
         "  plainLightStillUntouched: lightIsTouched({entity_id:'x'},{},{'x':" + bare + "}),\n"
         "  unplacedMotionStillUntouched: unplacedT('isMotion'),\n"
         "}));\n"
@@ -3122,6 +3205,8 @@ def test_a_placed_motion_temp_humidity_air_or_lock_sensor_is_touched_by_a_bare_p
     assert out["humidity"] is True, out
     assert out["air"] is True, out
     assert out["lock"] is True, out
+    assert out["flood"] is True, out
+    assert out["fanStillUntouched"] is False, "a fan has a real size/rotation to edit — not a fixed glyph"
     assert out["plainLightStillUntouched"] is False, (
         "the carve-out is for the four read-only sensor classes only — "
         "an ordinary light fixture with the same bare drop stays untouched"
@@ -4654,7 +4739,7 @@ def test_suppressed_glyph_hit_targets_stay_disjoint_for_two_crowded_fixtures(tmp
         "two neighbouring fixtures' hit targets must stay distinct, not one path for both", out)
 
 
-def test_automorph_never_auras_or_suppresses_motion_fan_or_temp_markers(tmp_path):
+def test_automorph_never_auras_or_suppresses_a_non_light_marker(tmp_path):
     """Live regression, reported by Garry (2026-09-08): "the center not
     activating on motion... only some sensors" — a motion sensor sharing a
     room with a real light was pulled into the non-overlap partition (only
@@ -4663,23 +4748,41 @@ def test_automorph_never_auras_or_suppresses_motion_fan_or_temp_markers(tmp_path
     sensors read activity through motionActive() + their own pulse ring
     (a separate code path, unaffected), never through an aura. The pulse
     kept firing; the glyph underneath it silently went transparent. Same
-    root cause for isFan/isTemp: neither was excluded either. A real light
-    in the SAME room still gets its normal aura+suppression."""
+    root cause for isFan/isTemp: neither was excluded either.
+
+    Phase 2a (docs/PHASE2_STRATEGIC_REVIEW.md §5): the exclusion this test
+    guards is now one function, castsLight() (light_codes.js), read at
+    every site that used to hand-list the excluded classes separately —
+    and two of those sites (automorph's fixture-grouping pass and its
+    "defensive twin") had silently drifted to omit isLock, checked and
+    fixed in the same commit that added castsLight(). Extended to cover
+    every class castsLight() excludes, not just the three the original bug
+    happened to hit — this is the "does the registry's contract actually
+    hold everywhere" test 4.4 of the strategic review calls for. A real
+    light in the SAME room still gets its normal aura+suppression."""
     NOW = 1_000_000_000_000
     model = {
-        "room_geometry_m": {"Room": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [6, 0], [6, 6], [0, 6]]}},
+        "room_geometry_m": {"Room": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [8, 0], [8, 8], [0, 8]]}},
         "light_positions_m": {
-            "light.real":              {"x_m": 1.5, "y_m": 1.5, "floor_id": "main"},
-            "binary_sensor.motion":    {"x_m": 4.5, "y_m": 1.5, "floor_id": "main"},
-            "fan.ceiling":             {"x_m": 1.5, "y_m": 4.5, "floor_id": "main"},
-            "sensor.temp":             {"x_m": 4.5, "y_m": 4.5, "floor_id": "main"},
+            "light.real":              {"x_m": 1, "y_m": 1, "floor_id": "main"},
+            "binary_sensor.motion":    {"x_m": 3, "y_m": 1, "floor_id": "main"},
+            "fan.ceiling":             {"x_m": 5, "y_m": 1, "floor_id": "main"},
+            "sensor.temp":             {"x_m": 7, "y_m": 1, "floor_id": "main"},
+            "lock.front_door":         {"x_m": 1, "y_m": 3, "floor_id": "main"},
+            "sensor.humidity":         {"x_m": 3, "y_m": 3, "floor_id": "main"},
+            "sensor.air":              {"x_m": 5, "y_m": 3, "floor_id": "main"},
+            "binary_sensor.flood":     {"x_m": 7, "y_m": 3, "floor_id": "main"},
         },
     }
     lbe = {
-        "light.real":           {"entity_id": "light.real", "state": "on", "code": "A01", "shape": "circle", "isMotion": False, "last_changed": None},
+        "light.real":           {"entity_id": "light.real", "state": "on", "code": "A01", "shape": "circle", "last_changed": None},
         "binary_sensor.motion": {"entity_id": "binary_sensor.motion", "state": "on", "code": "M01", "shape": "hex", "isMotion": True, "last_changed": None},
         "fan.ceiling":          {"entity_id": "fan.ceiling", "state": "on", "code": "F01", "shape": "hex", "isFan": True, "last_changed": None},
         "sensor.temp":          {"entity_id": "sensor.temp", "state": "on", "code": "T01", "shape": "hex", "isTemp": True, "last_changed": None},
+        "lock.front_door":      {"entity_id": "lock.front_door", "state": "locked", "code": "L01", "shape": "hex", "isLock": True, "last_changed": None},
+        "sensor.humidity":      {"entity_id": "sensor.humidity", "state": "on", "code": "H01", "shape": "hex", "isHumidity": True, "last_changed": None},
+        "sensor.air":           {"entity_id": "sensor.air", "state": "on", "code": "Q01", "shape": "hex", "isAir": True, "last_changed": None},
+        "binary_sensor.flood":  {"entity_id": "binary_sensor.flood", "state": "on", "code": "K01", "shape": "hex", "isFlood": True, "last_changed": None},
     }
     floors = [{"id": "main", "name": "Main", "level": 0}]
     out = _run_js(tmp_path, (
@@ -4696,12 +4799,54 @@ def test_automorph_never_auras_or_suppresses_motion_fan_or_temp_markers(tmp_path
         "  motionVisible: (b=>b?visible(b):null)(grab('binary_sensor.motion')),\n"
         "  fanVisible: (b=>b?visible(b):null)(grab('fan.ceiling')),\n"
         "  tempVisible: (b=>b?visible(b):null)(grab('sensor.temp')),\n"
+        "  lockVisible: (b=>b?visible(b):null)(grab('lock.front_door')),\n"
+        "  humidityVisible: (b=>b?visible(b):null)(grab('sensor.humidity')),\n"
+        "  airVisible: (b=>b?visible(b):null)(grab('sensor.air')),\n"
+        "  floodVisible: (b=>b?visible(b):null)(grab('binary_sensor.flood')),\n"
         "}));\n"
     ))
     assert not out["realVisible"], "the real light's glyph must still be suppressed by its own aura (unchanged behaviour)"
     assert out["motionVisible"], "a motion sensor's glyph body must never be suppressed — it must never be pulled into the partition or get an aura in the first place"
     assert out["fanVisible"], "a fan's glyph body must never be suppressed"
     assert out["tempVisible"], "a temp readout's glyph body must never be suppressed"
+    assert out["lockVisible"], "a lock's glyph body must never be suppressed — a lock does not cast light"
+    assert out["humidityVisible"], "a humidity readout's glyph body must never be suppressed"
+    assert out["airVisible"], "an air-quality readout's glyph body must never be suppressed"
+    assert out["floodVisible"], "a flood sensor's glyph body must never be suppressed"
+
+
+def test_iso_lights_never_hand_writes_a_second_castslight_exclusion_list():
+    """The architectural fitness function 4.4 of the strategic review calls
+    for: a cheap structural test that turns a silently-reintroduced
+    duplicate exclusion list into a CI failure instead of a live bug (the
+    isLock gap the test above regression-guards was exactly this — a hand-
+    retyped copy that drifted from its siblings). castsLight() (light_codes.js)
+    is now the one place iso_lights.js decides whether a fixture casts
+    light; nothing in this file should ever again OR/AND together 3+ of the
+    classes castsLight() excludes the way the 7 sites §I of the strategic
+    review counted used to.
+
+    Scoped to iso_lights.js only, and to castsLight()'s own flag set — this
+    does not yet cover lights_map.js/maps.js (other exclusion-list
+    dimensions there: border colour, turn-on/off eligibility) or every
+    class (isTemp+isHumidity legitimately co-occur for the shared
+    freshness-window readout, a different capability from castsLight and
+    not what this guards). Each remaining dimension gets its own guard as
+    it migrates onto the registry, not one that claims coverage it doesn't have.
+    """
+    src = _code_only((_VIEWS / "iso_lights.js").read_text(encoding="utf-8"))
+    flag_re = re.compile(r"\bis(?:Fan|Motion|Temp|Humidity|Lock|Flood)\b")
+    for i, line in enumerate(src.splitlines(), 1):
+        # The freshness-window grouping (isTemp+isHumidity only, no others)
+        # is a real, distinct, legitimate co-occurrence — not this smell.
+        flags = set(flag_re.findall(line))
+        if flags <= {"isTemp", "isHumidity"}:
+            continue
+        n = len(flag_re.findall(line))
+        assert n < 3, (
+            f"iso_lights.js:{i} hand-writes a {n}-flag class exclusion — "
+            f"use castsLight(l) from light_codes.js instead of a new copy: {line.strip()!r}"
+        )
 
 
 # ── Automorph material stack (the light/composition round of the 2026-09-07

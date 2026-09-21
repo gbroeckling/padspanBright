@@ -12,18 +12,18 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.53";
-const BUILD_ID = "20260918T212822Z";
+const APP_VERSION = "0.38.55";
+const BUILD_ID = "20260921T162050Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
-const { isWledLight, isPartitionLight } =
+const { hasControlCard } =
   await import(`./views/light_codes.js${new URL(import.meta.url).search}`);
 // THE shared lights view — data pipeline, map card and index table, also used
 // verbatim by the Mapping → Lights tab (the builder for this display), so the
 // two tools always show the identical map. All lights-view edits go in there.
 const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable, lightIsTouched,
-        sunAmbient, lastBrightness, setOptimistic, clearOptimistic, effectiveState,
+        sunAmbient, toggleEntity,
         wireUseSurface, openControlCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates,
         wireHoverHud } =
   await import(`./views/lights_map.js${new URL(import.meta.url).search}`);
@@ -272,58 +272,11 @@ class PadSpanLightsApp extends HTMLElement {
   }
 
   async _toggle(eid){
-    if(!this._hass) return;
-    // The service domain is the entity's own: light.* → light, fan.* → fan.
-    // A binary_sensor — motion or door/window — is read-only — a tap on it
-    // is a no-op, its state is the blue pulse (motion) or a static glyph
-    // (door/window) on the map. A temperature sensor.* is read-only the
-    // same way — its "state" is the number it just showed on the marker.
-    const domain=String(eid).split(".")[0];
-    if(domain==="binary_sensor"){ this._toast("Sensors are read-only"); return; }
-    if(domain==="sensor"){ this._toast("Temperature and air quality sensors are read-only"); return; }
-    // lock.* (gap #8, best-in-class roadmap) has no on/off at all —
-    // "locked" is its normal state, lock/unlock its services.
-    const isLockDomain=domain==="lock";
-    // The EFFECTIVE state, not the raw HA one (Garry, 2026-09-11: "first
-    // time works great, but if you need to turn the light on/off the next
-    // time, it only is active after the light has reported its state
-    // back"). A slow device (Zigbee, cloud) can easily still be reporting
-    // its OLD state when a second tap lands inside the same 2.5s window —
-    // reading raw state then re-decided "on" from stale data, so the second
-    // tap silently repeated the first command instead of reversing it,
-    // and nothing looked wrong until HA's real report finally arrived.
-    // effectiveState prefers the standing optimistic claim over a reported
-    // state that hasn't caught up to it yet, so each tap toggles relative
-    // to what the marker is ACTUALLY showing, the same value the user is
-    // looking at when they tap again.
-    const reported=this._hass.states[eid]?.state;
-    const eff=effectiveState(eid, reported).state;
-    const on=isLockDomain ? eff==="locked" : eff==="on";
-    // Optimistic: the marker flips NOW (shared claim in lights_map.js, so the
-    // index row flips with it), and HA's next state reconciles it. A failed
-    // call takes the claim back at once and shakes the marker — a tap that
-    // did nothing must never look like a tap that worked.
-    setOptimistic(eid, isLockDomain ? (on?"unlocked":"locked") : (on?"off":"on"));
-    this._render();
-    try{
-      // Off→on restores the level it was dimmed to. HA drops `brightness`
-      // while a light is off, so this comes from the shared memory
-      // gatherLights keeps — a light that never reported one (or a plain
-      // switch, or a fan) sends none and behaves exactly as before.
-      const data={entity_id:eid};
-      if(!on && domain==="light"){
-        const bri=lastBrightness(eid);
-        if(bri!==null) data.brightness=bri;
-      }
-      const svc=isLockDomain ? (on?"unlock":"lock") : (on?"turn_off":"turn_on");
-      await this._hass.callService(domain, svc, data);
-      setTimeout(()=>this._render(), 600);
-    }catch(e){
-      clearOptimistic(eid);
-      this._render();
-      this._shake(eid);
-      this._toast("Could not toggle "+eid, true);
-    }
+    return toggleEntity(this._hass, eid, {
+      render: () => this._render(),
+      toast: (m, e) => this._toast(m, e),
+      shake: (eid) => this._shake(eid),
+    });
   }
 
   // The revert shake: a short wobble on the marker whose tap failed.
@@ -367,7 +320,7 @@ class PadSpanLightsApp extends HTMLElement {
   // The api the shared use surface and sheets act through — the sidebar's
   // toggle (optimistic + shake), its control card, its aggregate action.
   _useApi(lightsByEid, lights){
-    const controlsFor=(l0)=>!!(l0 && (isWledLight(l0)||isPartitionLight(l0)||l0.dimmable||l0.isFan||l0.isLock));
+    const controlsFor=hasControlCard;
     const api={
       hass:this._hass, lightsByEid, lights, controlsFor,
       toggle:(eid)=>this._toggle(eid),
@@ -577,9 +530,9 @@ class PadSpanLightsApp extends HTMLElement {
       // motion sensor in the list still said "read-only" long after tapping
       // its marker on the map started opening the calendar.
       onRowClick: (l)=> l.isMotion ? openActivityCalendar(this._hass, l.entity_id) : this._toggle(l.entity_id),
-      onRowLongPress: (l)=>{ if(isWledLight(l) || isPartitionLight(l) || l.dimmable || l.isFan || l.isLock) this._openWledDetail(l.entity_id); },
+      onRowLongPress: (l)=>{ if(hasControlCard(l)) this._openWledDetail(l.entity_id); },
       // The "⋯" on every row: the controls in plain sight.
-      onRowMore: (l)=>{ if(isWledLight(l) || isPartitionLight(l) || l.dimmable || l.isFan || l.isLock) this._openWledDetail(l.entity_id); else this._toggle(l.entity_id); },
+      onRowMore: (l)=>{ if(hasControlCard(l)) this._openWledDetail(l.entity_id); else this._toggle(l.entity_id); },
       onToggleHidden: (eid)=>{
         if(hidden.has(eid)) hidden.delete(eid);
         else hidden.add(eid);

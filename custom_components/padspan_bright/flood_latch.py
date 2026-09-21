@@ -42,8 +42,21 @@ this code would have to remember to flip. is_active() below is the one
 place that check lives server-side; views/iso_lights.js's
 floodLatchActive() is its JS mirror and must be kept in the same shape —
 change one, change both.
+
+Found by the week-review workflow, 2026-09-19: the read-modify-write into
+flood_latches must be serialized (see _async_latch's lock) — two different
+sensors triggering back-to-back used to read the same pre-update snapshot
+and silently clobber each other's write.
+
+Same review, 2026-09-19: deleting a moisture sensor's entity used to leave
+its flood_latches entry behind forever — nothing here listened for the
+entity going away. _on_entity_registry_updated below closes that; a rename
+(HA's "update" action) is deliberately left alone, since migrating the key
+to a new entity_id is a different, bigger feature nobody has asked for.
 """
 
+import asyncio
+import functools
 import logging
 import time
 from typing import Any
@@ -59,6 +72,8 @@ _LOGGER = logging.getLogger(__name__)
 ACTIVE_WINDOW_S = 2 * 24 * 60 * 60
 
 _DATA_UNSUB = "_flood_latch_unsub"
+_DATA_UNSUB_REGISTRY = "_flood_latch_unsub_registry"
+_DATA_LOCK = "_flood_latch_lock"
 
 
 def is_active(rec: Any, now_ts: float | None = None) -> bool:
@@ -73,6 +88,37 @@ def is_active(rec: Any, now_ts: float | None = None) -> bool:
     return now < expires_at
 
 
+async def _async_latch(hass: HomeAssistant, entity_id: str) -> None:
+    """The actual read-check-write for one trigger, serialized behind a
+    lock. Two DIFFERENT moisture sensors can fire 'on' back-to-back with no
+    await between the two _on_state_changed calls (a normal HA pattern —
+    e.g. RestoreEntity restoring several entities in one synchronous loop
+    at startup). If each computed its own new flood_latches dict from a
+    snapshot taken at trigger time, the later write would silently replace
+    the earlier one's addition (SettingsStore.async_set replaces the whole
+    key, it doesn't merge) — so the snapshot is taken here, at write time,
+    under the lock, not in the synchronous callback."""
+    dom = hass.data.get(DOMAIN)
+    if not dom:
+        return
+    st = dom.get(DATA_SETTINGS)
+    if not st:
+        return
+    lock = dom.setdefault(_DATA_LOCK, asyncio.Lock())
+    async with lock:
+        latches = dict(st.data.get("flood_latches") or {})
+        existing = latches.get(entity_id)
+        # A sensor that re-triggers (still wet, or wets again) while
+        # already latched is a no-op on purpose — see the module
+        # docstring's ISA-18.2 note. Without this, a chattering sensor
+        # would never expire.
+        if is_active(existing):
+            return
+        now = time.time()
+        latches[entity_id] = {"triggered_at": now, "expires_at": now + ACTIVE_WINDOW_S}
+        await st.async_set(flood_latches=latches)
+
+
 @ha_callback
 def _on_state_changed(hass: HomeAssistant, event: Event) -> None:
     new_state = event.data.get("new_state")
@@ -82,19 +128,25 @@ def _on_state_changed(hass: HomeAssistant, event: Event) -> None:
         return
     if new_state.attributes.get("device_class") != "moisture":
         return
-    st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
-    if not st:
+    if not hass.data.get(DOMAIN, {}).get(DATA_SETTINGS):
         return
-    latches = dict(st.data.get("flood_latches") or {})
-    existing = latches.get(new_state.entity_id)
-    # A sensor that re-triggers (still wet, or wets again) while already
-    # latched is a no-op on purpose — see the module docstring's ISA-18.2
-    # note. Without this, a sensor that chatters on/off would never expire.
-    if is_active(existing):
+    hass.async_create_task(_async_latch(hass, new_state.entity_id))
+
+
+@ha_callback
+def _on_entity_registry_updated(hass: HomeAssistant, event: Event) -> None:
+    """A deleted entity's flood_latches entry (if it has one) is now about
+    nothing — the emergency banner would otherwise keep showing it as an
+    ACTIVE alarm, identified only by its dead entity_id, for up to the full
+    2-day window. Only "remove" is handled; a rename ("update" with a
+    changed entity_id) leaves the old key in place rather than migrating it
+    — out of scope here, see the module docstring."""
+    if event.data.get("action") != "remove":
         return
-    now = time.time()
-    latches[new_state.entity_id] = {"triggered_at": now, "expires_at": now + ACTIVE_WINDOW_S}
-    hass.async_create_task(st.async_set(flood_latches=latches))
+    entity_id = event.data.get("entity_id")
+    if not entity_id:
+        return
+    hass.async_create_task(async_reset_latch(hass, entity_id))
 
 
 def async_setup_flood_latch(hass: HomeAssistant) -> None:
@@ -103,29 +155,51 @@ def async_setup_flood_latch(hass: HomeAssistant) -> None:
     dom = hass.data.setdefault(DOMAIN, {})
     if dom.get(_DATA_UNSUB):
         return
+    # functools.partial, NOT a lambda: HA's dispatcher unwraps partial to find
+    # the @callback marker on _on_state_changed and runs it straight on the
+    # event loop. A lambda wrapper is a distinct, unmarked function — HA then
+    # hands it to a worker thread instead, where the async_create_task below
+    # is illegal and raises (verified live, 2026-09-18: every trigger threw
+    # "calls hass.async_create_task from a thread other than the event loop"
+    # and silently never wrote the latch — this is why nothing ever latched).
     dom[_DATA_UNSUB] = hass.bus.async_listen(
-        "state_changed", lambda event: _on_state_changed(hass, event)
+        "state_changed", functools.partial(_on_state_changed, hass)
+    )
+    dom[_DATA_UNSUB_REGISTRY] = hass.bus.async_listen(
+        "entity_registry_updated", functools.partial(_on_entity_registry_updated, hass)
     )
 
 
 def async_stop_flood_latch(hass: HomeAssistant) -> None:
-    unsub = hass.data.get(DOMAIN, {}).pop(_DATA_UNSUB, None)
-    if unsub:
-        try:
-            unsub()
-        except Exception:
-            pass
+    dom = hass.data.get(DOMAIN, {})
+    for key in (_DATA_UNSUB, _DATA_UNSUB_REGISTRY):
+        unsub = dom.pop(key, None)
+        if unsub:
+            try:
+                unsub()
+            except Exception:
+                pass
 
 
 async def async_reset_latch(hass: HomeAssistant, entity_id: str) -> bool:
     """Clear one sensor's latch (the Atlas Reset button). Returns True if it
     existed. Resetting is unconditional — the underlying HA entity's real,
     current state is untouched; this only dismisses PadSpan's own memory
-    that it was recently triggered."""
-    st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
-    if not st or entity_id not in (st.data.get("flood_latches") or {}):
+    that it was recently triggered. Shares _async_latch's lock: a reset
+    racing a fresh trigger for a DIFFERENT entity is the same
+    read-modify-write hazard the module docstring describes, just from a
+    second caller."""
+    dom = hass.data.get(DOMAIN)
+    if not dom:
         return False
-    latches = dict(st.data.get("flood_latches") or {})
-    del latches[entity_id]
-    await st.async_set(flood_latches=latches)
-    return True
+    st = dom.get(DATA_SETTINGS)
+    if not st:
+        return False
+    lock = dom.setdefault(_DATA_LOCK, asyncio.Lock())
+    async with lock:
+        latches = dict(st.data.get("flood_latches") or {})
+        if entity_id not in latches:
+            return False
+        del latches[entity_id]
+        await st.async_set(flood_latches=latches)
+        return True

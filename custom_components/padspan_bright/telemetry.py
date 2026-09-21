@@ -506,21 +506,62 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
     except Exception:
         pass
 
-    # Placement adoption by domain, not just a single "placed_lights" total.
-    # light_positions_m is keyed by entity_id (light./fan./binary_sensor./
-    # sensor. all share the one placement store) — the domain prefix says
-    # which of the newer classes (motion, temperature) people have actually
-    # started using since they shipped, same question "placed_lights" alone
-    # could never answer. Counts only: entity_id strings themselves never
-    # leave this function (assert_shareable refuses anything entity-id-
-    # shaped), just how many of each domain prefix are placed.
+    # Placement adoption by CLASS, not just a single "placed_lights" total —
+    # which of the newer classes (motion, flood, humidity, air quality,
+    # lock...) people have actually started using since they shipped, a
+    # question "placed_lights" alone could never answer. Counts only:
+    # entity_id strings themselves never leave this function
+    # (assert_shareable refuses anything entity-id-shaped).
+    #
+    # CORRECTED 2026-09-19 (Phase 2a registry audit): this used to bucket by
+    # bare domain prefix alone — binary_sensor.* was ALL counted as
+    # "motion_sensor" even though that domain also covers door/window and
+    # flood/moisture sensors, and sensor.* was ALL counted as "temp_sensor"
+    # even though it also covers humidity and air-quality; lock.* wasn't
+    # counted in any bucket. Now looks up each placed entity's real
+    # device_class from hass.states — the same test light_codes.js's own
+    # classifiers use, kept intentionally approximate here (no enum-sensor-
+    # by-name heuristic for the bathroom-outlet air-quality case) since this
+    # is a telemetry bucket, not the source of truth for what the map draws.
+    _AQ_DEVICE_CLASSES = {
+        "aqi", "pm25", "pm10", "pm1",
+        "volatile_organic_compounds", "volatile_organic_compounds_parts",
+        "carbon_dioxide", "carbon_monoxide",
+        "nitrogen_dioxide", "nitrogen_monoxide", "ozone", "sulphur_dioxide",
+    }
     _light_ids = list((fab.get("light_positions_m") or {}).keys())
     placed_by_domain = {
-        "light": sum(1 for e in _light_ids if str(e).startswith("light.")),
-        "fan": sum(1 for e in _light_ids if str(e).startswith("fan.")),
-        "motion_sensor": sum(1 for e in _light_ids if str(e).startswith("binary_sensor.")),
-        "temp_sensor": sum(1 for e in _light_ids if str(e).startswith("sensor.")),
+        "light": 0, "fan": 0, "lock": 0, "motion_sensor": 0, "door_sensor": 0,
+        "flood_sensor": 0, "temp_sensor": 0, "humidity_sensor": 0,
+        "air_quality_sensor": 0, "other": 0,
     }
+    for _eid in _light_ids:
+        _eid = str(_eid)
+        if _eid.startswith("light."):
+            placed_by_domain["light"] += 1
+        elif _eid.startswith("fan."):
+            placed_by_domain["fan"] += 1
+        elif _eid.startswith("lock."):
+            placed_by_domain["lock"] += 1
+        elif _eid.startswith("binary_sensor.") or _eid.startswith("sensor."):
+            _st = hass.states.get(_eid)
+            _dc = _st.attributes.get("device_class") if _st else None
+            if _dc in ("motion", "occupancy"):
+                placed_by_domain["motion_sensor"] += 1
+            elif _dc in ("door", "window"):
+                placed_by_domain["door_sensor"] += 1
+            elif _dc == "moisture":
+                placed_by_domain["flood_sensor"] += 1
+            elif _dc == "humidity":
+                placed_by_domain["humidity_sensor"] += 1
+            elif _dc in _AQ_DEVICE_CLASSES:
+                placed_by_domain["air_quality_sensor"] += 1
+            elif _dc == "temperature" or (_eid.startswith("sensor.") and _dc is None):
+                placed_by_domain["temp_sensor"] += 1
+            else:
+                placed_by_domain["other"] += 1
+        else:
+            placed_by_domain["other"] += 1
 
     # Pro-only per-light type override (WLED/partition/plain) — one of the
     # few settings that only does anything at pro tier (see light_codes.js

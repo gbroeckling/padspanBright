@@ -38,9 +38,16 @@ MAX_SH3D_BYTES = 10 * 1024 * 1024
     "type": "padspan_bright/floorplan_import_sh3d",
     "sh3d_base64": str,
 })
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_floorplan_import_sh3d(hass: HomeAssistant, connection, msg) -> None:
-    """Parse a Sweet Home 3D (.sh3d) file into levels + room polygons."""
+    """Parse a Sweet Home 3D (.sh3d) file into levels + room polygons.
+
+    Admin-gated (Phase 2i security audit, 2026-09-19) — parsing an untrusted
+    file (even with the size cap and DOCTYPE rejection in sh3d_import.py) is
+    exactly the kind of action a household guest account shouldn't be able
+    to trigger unattended.
+    """
     b64 = msg.get("sh3d_base64") or ""
     max_b64_len = (MAX_SH3D_BYTES * 4) // 3 + 4
     if len(b64) > max_b64_len:

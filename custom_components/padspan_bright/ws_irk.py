@@ -126,6 +126,7 @@ async def ws_private_ble_status(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("force", default=False): bool,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_irk_add(hass: HomeAssistant, connection, msg) -> None:
     """Add an IRK directly via PadSpan settings (no private_ble_device integration needed).
@@ -405,6 +406,7 @@ async def ws_irk_auto_detect(hass: HomeAssistant, connection, msg) -> None:
         vol.Required("irk_hex"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_irk_remove(hass: HomeAssistant, connection, msg) -> None:
     """Remove a PadSpan-managed IRK and reload the resolver."""
@@ -433,6 +435,7 @@ async def ws_irk_remove(hass: HomeAssistant, connection, msg) -> None:
     vol.Required("irk"): str,
     vol.Optional("name", default=""): str,
 })
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_private_ble_add_irk(hass: HomeAssistant, connection, msg) -> None:
     """Add a Private BLE Device IRK via PadSpan UI (creates HA config entry)."""

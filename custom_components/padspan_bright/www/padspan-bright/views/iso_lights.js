@@ -18,8 +18,8 @@
 // refused to place a light. Everything the view needs is in the fabric, in
 // metres, and now that is the only thing it reads.
 
-const { WLED_BORDER, PARTITION_BORDER, FAN_BORDER, MOTION_BORDER, MOTION_PULSE, TEMP_BORDER, LOCK_BORDER, DOOR_BORDER,
-        AIR_BORDER, HUMIDITY_BORDER, FLOOD_BORDER, airQualityBadness } =
+const { WLED_BORDER, PARTITION_BORDER, MOTION_PULSE, DOOR_BORDER,
+        HUMIDITY_BORDER, FLOOD_BORDER, airQualityBadness, castsLight, classBorder, deviceClassOf } =
   await import(`./light_codes.js${new URL(import.meta.url).search}`);
 
 function escSVG(s){ return String(s??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
@@ -986,10 +986,16 @@ export function alignRingStart(pts){
 // fan's hub+arms, lock's shackle+body) keeps only its single dominant mass
 // as one ring — automorphRing needs one simple, non-self-intersecting
 // outline to morph, not the full multi-piece drawing shapeDetailSvg adds on
-// top. Only the true sensor readouts (motion/temp/humidity/air) and the
-// fan DOMAIN class stay on hex, matched by the render's own gate on
-// isMotion/isFan/isTemp/isAir/isHumidity a few hundred lines down — they
-// never reach this function's output at all.
+// top. Only a fixture whose class actually casts light ever reaches this
+// function at all — automorphAuraSvg's own gate (`!castsLight(l)`, a few
+// hundred lines down) returns null before calling it otherwise, so every
+// read-only sensor readout (motion/temp/humidity/air/flood) and every
+// domain class that isn't a light (fan/lock/door) stays on hex, same as
+// before Automorph existed. lock/door DO have real cases below — reachable
+// only through the shape-OVERRIDE system, when a real light/wled/partition
+// fixture is cosmetically set to draw as one of their glyphs, not through
+// an actual lock.*/binary_sensor.door entity (those never cast light
+// either, so they never get this far).
 export function iconRingLocal(shape, r){
   const HW=r*0.866;
   if(shape==="circle"){
@@ -1815,6 +1821,24 @@ export function shapeSvg(kind, cx, cy, r, attrs){
       return `<circle cx="${n(cx)}" cy="${n(bulbCy)}" r="${n(bulbR)}" ${attrs}/>`+
         `<path d="${drop}" ${attrs}/>`;
     }
+    // A flood/water-leak sensor: a puddle — wide, flat and gently
+    // scalloped, unlike every other glyph here (all taller than wide, or
+    // round). Water AT REST pools; it doesn't hang like a drop (humidity's
+    // teardrop, already spoken for) or explode outward (the alarm ring,
+    // floodRingSvg, drawn separately only while actually wet). Wider than
+    // HW on purpose — silhouette alone should say "not a lit fixture, not
+    // another sensor" even with the colour stripped out. Chosen from 3
+    // candidates rendered at true marker scale — see issue #81.
+    case "flood": {
+      const rx=HW*1.08, ry=HW*0.52, baseY=cy+HW*0.10;
+      const LOBES=5, AMP=0.07, STEPS=32, pts=[];
+      for(let i=0;i<=STEPS;i++){
+        const t=(i/STEPS)*Math.PI*2;
+        const k=1+AMP*Math.sin(t*LOBES);
+        pts.push(`${n(cx+rx*k*Math.cos(t))},${n(baseY+ry*k*Math.sin(t))}`);
+      }
+      return poly(pts.join(" "));
+    }
     // A padlock: solid shackle arch over a solid body — the universal
     // access-control symbol, so a lock reads as a lock even to someone
     // who has never seen this map before. Solid, like every glyph here
@@ -1944,6 +1968,14 @@ export function shapeDetailSvg(kind, cx, cy, r, ink, sw){
     case "tempreadout": return dot(cx,cy+HW*0.55,HW*0.22);
     // The wind strokes ARE the glyph; no separate detail.
     case "airquality": return "";
+    // Two flattened ripple-rings on the puddle's own surface — an echo of
+    // the alarm ring (floodRingSvg) at rest, not a literal miniature of
+    // it, and elliptical (matching the puddle's own proportions) rather
+    // than circular so it doesn't read as "circle"'s bullseye detail.
+    case "flood": {
+      const arc=(rr)=>path(sub(arcPts(cx,cy+HW*0.10,rr*1.6,rr*0.75,0,360,20)));
+      return arc(HW*0.5)+arc(HW*0.24);
+    }
     // A plain fixture plate: bevel, plus the lamp behind it.
     default:         return path(sub(arcPts(cx,cy,r*0.6,r*0.6,90,450,6)))+dot(cx,cy,HW*0.15);
   }
@@ -1967,17 +1999,7 @@ export function pointInPolygon(pts, x, y){
 // four domains: a strip (WLED or partition) is a light with more to offer,
 // and the layer chips, the halo and the tap semantics all key off this.
 export function lightClassOf(l){
-  if(!l) return "light";
-  if(l.isFan) return "fan";
-  if(l.isMotion) return "motion";
-  if(l.isDoor) return "door";
-  if(l.isFlood) return "flood";
-  if(l.isAir) return "air";
-  if(l.isTemp) return "temp";
-  if(l.isHumidity) return "humidity";
-  if(l.isLock) return "lock";
-  if(l.isWled||l.isPartition) return "strip";
-  return "light";
+  return deviceClassOf(l).filterClass;
 }
 
 // Cluster offsets (SVG px) for N hexes touching around a centre
@@ -2468,6 +2490,13 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   const HIDECODES = !!opts.hideCodes;
   const CLASSF    = opts.classFilter && opts.classFilter!=="all" ? String(opts.classFilter) : null;
   const HALO      = !!opts.hitHalo;
+  // Builder only: a fat invisible press target laid over each LINKED
+  // door/window/lock section. Those draw with pointer-events:none (an open
+  // door draws nothing at all but two 2.6px dots), so without this there is
+  // literally nothing to press — the one class of device on the map that
+  // could never be held (Garry, 2026-09-19: "press and hold doesn't work
+  // for all devices"). Opt-in so the household surface's markup is unchanged.
+  const BARRIER_HIT = !!opts.barrierHit;
   const COLLAPSE  = !!opts.collapseUnplaced;
   // Automorph (Garry, 2026-09-07): 0 disables it outright — see
   // automorphAuraSvg/automorphRing below, near perimeterSvg.
@@ -2765,7 +2794,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   const liveRoomColor=(rname,fallback)=>{
     if(!SHOW) return fallback;
     const onLights=(byRoom[rname]||[]).filter(li=>
-      li.state==="on" && !hiddenEids.has(li.entity_id) && !li.isFan && !li.isMotion && !li.isTemp && !li.isAir && !li.isHumidity && !li.isLock && !li.isFlood);
+      li.state==="on" && !hiddenEids.has(li.entity_id) && castsLight(li));
     if(!onLights.length) return fallback;
     let rSum=0,gSum=0,bSum=0,wSum=0;
     for(const li of onLights){
@@ -2787,12 +2816,12 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   if(SHOW){
     for(const l of lights){
       const li=lightsByEid[l.eid];
-      if(!li || li.state!=="on" || hiddenEids.has(l.eid) || li.isFan || li.isMotion || li.isTemp || li.isAir || li.isHumidity || li.isLock || li.isFlood) continue;
+      if(!li || li.state!=="on" || hiddenEids.has(l.eid) || !castsLight(li)) continue;
       const c=(FIELD ? fieldColOf(l.x,l.y,l.z) : null) || glowCol(li,l.lp);
       if(!glowIds.has(c)) glowIds.set(c, `psglow_${glowIds.size}`);
     }
     for(const rname of Object.keys(byRoom||{})) for(const li of byRoom[rname]||[]){
-      if(li.state!=="on" || hiddenEids.has(li.entity_id) || li.isFan || li.isMotion || li.isTemp || li.isAir || li.isHumidity || li.isLock || li.isFlood) continue;
+      if(li.state!=="on" || hiddenEids.has(li.entity_id) || !castsLight(li)) continue;
       const rc=FIELD && roomCentre.get(rname);
       const c=(rc ? fieldColOf(rc[0],rc[1],rc[2]) : null) || glowCol(li, null);
       if(!glowIds.has(c)) glowIds.set(c, `psglow_${glowIds.size}`);
@@ -3391,7 +3420,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         // center not activating on motion... only some sensors"): the
         // pulse ring is a separate code path and kept firing, but the
         // glyph itself had been swapped for a transparent hit rect.
-        if(!l || l.shape==="perimeter" || l.isMotion || l.isFan || l.isTemp || l.isAir || l.isHumidity || l.isFlood) continue;
+        if(!l || l.shape==="perimeter" || !castsLight(l)) continue;
         const r=hereRooms.find(rr=>pointInRoom(rr.pts, pl.x, pl.y));
         if(!r || r.pts.length<3) continue;
         const weight=automorphFixtureWeight(pl.lp&&pl.lp.width_cm, pl.lp&&pl.lp.height_cm);
@@ -3570,16 +3599,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // Showcase: a dark fixture is slate and recedes; the eye should go to
       // what is actually lit. Working mode keeps the flat pair it always had.
       const fill=on?lit:(SHOW?THEME.fixtureOffFill:"#374151");
-      const stripBorder=l.isWled?WLED_BORDER
-        :(l.isPartition?PARTITION_BORDER
-        :(l.isFan?FAN_BORDER
-        :(l.isMotion?MOTION_BORDER
-        :(l.isDoor?DOOR_BORDER
-        :(l.isTemp?TEMP_BORDER
-        :(l.isAir?AIR_BORDER
-        :(l.isHumidity?HUMIDITY_BORDER
-        :(l.isLock?LOCK_BORDER
-        :(l.isFlood?FLOOD_BORDER:null)))))))));
+      const stripBorder=classBorder(l);
       const stroke=SHOW
         ? (on?(stripBorder||THEME.fixtureOnStrokeFallback):THEME.fixtureOffStroke)
         : (stripBorder||"#60a5fa");
@@ -4131,7 +4151,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // Defensive twin of the exclusion in the partition-grouping pass
       // above — motion/fan/temp never get a cell there any more, but this
       // function must refuse to aura them even if ever called directly.
-      if(!(AUTOMORPH_PCT>0) || !room || room.pts.length<3 || l.isMotion || l.isFan || l.isTemp || l.isAir || l.isHumidity || l.isFlood) return null;
+      if(!(AUTOMORPH_PCT>0) || !room || room.pts.length<3 || !castsLight(l)) return null;
       // Inset stage — the shared automorphInsetRing above (smoothing,
       // well-spaced offset, fold pruning, containment, and the hardness cap
       // derived from the same margin). One inset constant was serving two
@@ -5219,7 +5239,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       if(l.state!=="on") return "";
       // Fans, motion sensors and temperature readouts are on the map, but
       // they are not light sources — nothing pools on the floor beneath them.
-      if(l.isFan||l.isMotion||l.isTemp||l.isAir||l.isHumidity||l.isFlood) return "";
+      if(!castsLight(l)) return "";
       const col=(fx&&fx.col)||glowCol(l,entry);
       const b=briOf(l);
       const beam=BEAM[l.shape]||1;
@@ -5642,6 +5662,13 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
           s+=`<circle cx="${dx.toFixed(1)}" cy="${dy.toFixed(1)}" r="2.6" fill="#9333ea" `+
             `stroke="#1b0f24" stroke-width="0.8" opacity="${barDim.toFixed(2)}" pointer-events="none"/>`;
         }
+        if(BARRIER_HIT && dl){
+          const a=bpts[0], b=bpts[bpts.length-1];
+          const [mx,my]=iso((a[0]+b[0])/2,(a[1]+b[1])/2,z);
+          s+=`<polyline class="lbarhit" data-eid="${escSVG(bar.linked_entity_id)}" data-cx="${mx.toFixed(1)}" data-cy="${my.toFixed(1)}" `+
+            `points="${ppx}" fill="none" stroke="#000" stroke-opacity="0" stroke-width="16" stroke-linecap="round" `+
+            `pointer-events="stroke" style="cursor:pointer"/>`;
+        }
       }
       // The wall the circle currently straddles, drawn WITH A GAP over the
       // part inside the circle — Garry, 2026-09-09: "make sure when the
@@ -5833,7 +5860,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         // Wall spill: every wall of the fixture's room its pool actually
         // reaches, faded by how far away the wall is.
         let spillSegs=null;
-        if(room && l.state==="on" && !l.isFan && !l.isMotion && !l.isTemp && !l.isAir && !l.isHumidity && !l.isFlood){
+        if(room && l.state==="on" && castsLight(l)){
           const reach=poolReachM(l)*0.8;
           for(let i=0,j=room.pts.length-1;i<room.pts.length;j=i++){
             const d=pointSegDist(pl.x, pl.y, room.pts[j], room.pts[i]);

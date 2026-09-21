@@ -177,3 +177,110 @@ out.draft = o.mapState._lightsDraftM || null;
 """)
     assert out["toggleCalls"] == [], "a real drag must never toggle"
     assert out["draft"] and "light.a" in out["draft"], "a real drag must still reposition the light"
+
+
+# ── Slop is screen pixels, never viewBox units (Garry, 2026-09-19: "press and
+# hold doesn't work for all devices") ───────────────────────────────────────
+# toVB() deltas scale with how the drawing is fitted/zoomed. On a big house
+# shown small, one screen pixel is several viewBox units, so the old
+# "3 viewBox units cancels the hold / 8 arms the drag" tripped on sub-pixel
+# jitter: a hold never completed and a plain tap could count as a drag and
+# nudge the fixture. _ZOOMED_OUT makes 1 screen px = 6 viewBox units.
+_ZOOMED_OUT = "svg.createSVGPoint = () => { const p = { x: 0, y: 0 }; p.matrixTransform = () => ({ x: p.x * 6, y: p.y * 6 }); return p; };\n"
+
+
+def test_a_jittery_tap_on_a_zoomed_out_map_still_toggles_and_never_moves_the_light():
+    out = _run(_ZOOMED_OUT + """
+g.dispatchEvent({ type: 'pointerdown', button: 0, pointerType: 'mouse', pointerId: 1,
+  clientX: 100, clientY: 100, preventDefault(){}, stopPropagation(){} });
+g.dispatchEvent({ type: 'pointermove', pointerId: 1, clientX: 102, clientY: 101 });
+g.dispatchEvent({ type: 'pointerup', pointerId: 1, clientX: 102, clientY: 101 });
+out.draft = o.mapState._lightsDraftM || null;
+""")
+    assert out["toggleCalls"] == ["light.a"], ("2px of mouse jitter is a tap, whatever the zoom", out)
+    assert not out["draft"], ("a tap must never reposition the fixture", out)
+
+
+def test_a_finger_hold_that_rolls_a_few_pixels_still_arms_and_jumps_to_the_row():
+    out = _run(_ZOOMED_OUT + """
+g.dispatchEvent({ type: 'pointerdown', button: 0, pointerType: 'touch', pointerId: 1,
+  clientX: 100, clientY: 100, preventDefault(){}, stopPropagation(){} });
+g.dispatchEvent({ type: 'pointermove', pointerId: 1, clientX: 104, clientY: 103 });
+await flush();
+g.dispatchEvent({ type: 'pointerup', pointerId: 1, clientX: 105, clientY: 104 });
+out.selLight = o.mapState._selLight || null;
+out.focusRow = o.mapState._focusRow || null;
+out.draft = o.mapState._lightsDraftM || null;
+""")
+    assert out["toggleCalls"] == [], ("a genuine hold must never toggle", out)
+    assert out["selLight"] and out["selLight"]["eid"] == "light.a", out
+    assert out["focusRow"] == "light.a", ("the hold is what jumps the index to the row", out)
+    assert not out["draft"], out
+
+
+def test_a_mouse_that_slides_off_before_the_hold_arms_cancels_the_jump():
+    """The 2026-09-11 rule survives: only a STILL press arms — a slow careful
+    drag that is released short of the drag threshold does nothing at all."""
+    out = _run("""
+g.dispatchEvent({ type: 'pointerdown', button: 0, pointerType: 'mouse', pointerId: 1,
+  clientX: 100, clientY: 100, preventDefault(){}, stopPropagation(){} });
+g.dispatchEvent({ type: 'pointermove', pointerId: 1, clientX: 106, clientY: 100 });
+await flush();
+g.dispatchEvent({ type: 'pointerup', pointerId: 1, clientX: 106, clientY: 100 });
+out.focusRow = o.mapState._focusRow || null;
+""")
+    assert out["focusRow"] is None, out
+
+
+# ── A linked door/window/lock section can be held too ───────────────────────
+_BARHIT = """
+const hb = document.createElementNS(NS, 'polyline');
+hb.setAttribute('class', 'lbarhit');
+hb.setAttribute('data-eid', 'binary_sensor.frontdoor');
+hb.setAttribute('data-cx', '10'); hb.setAttribute('data-cy', '10');
+svg.appendChild(hb);
+M._wireLightsBuild(ctx, isoDiv, o);
+"""
+
+
+def test_a_hold_on_a_door_section_jumps_the_index_to_its_row():
+    out = _run(_BARHIT + """
+hb.dispatchEvent({ type: 'pointerdown', button: 0, pointerType: 'touch', pointerId: 2,
+  clientX: 50, clientY: 50, preventDefault(){}, stopPropagation(){} });
+await flush();
+hb.dispatchEvent({ type: 'pointerup', pointerId: 2, clientX: 52, clientY: 51 });
+out.focusRow = o.mapState._focusRow || null;
+""")
+    assert out["focusRow"] == "binary_sensor.frontdoor", out
+    assert out["toggleCalls"] == [], out
+
+
+def test_a_tap_on_a_door_or_lock_section_does_nothing():
+    """A door has nothing to switch, and a lock must never be one stray tap
+    from unlocking — the section answers a HOLD only."""
+    out = _run(_BARHIT + """
+hb.dispatchEvent({ type: 'pointerdown', button: 0, pointerType: 'mouse', pointerId: 2,
+  clientX: 50, clientY: 50, preventDefault(){}, stopPropagation(){} });
+hb.dispatchEvent({ type: 'pointerup', pointerId: 2, clientX: 50, clientY: 50 });
+out.focusRow = o.mapState._focusRow || null;
+""")
+    assert out["focusRow"] is None, out
+    assert out["toggleCalls"] == [] and out["renderCalls"] == [], out
+
+
+def test_a_second_touch_on_the_same_door_section_does_not_hijack_the_first():
+    """A second pointerdown on the same lbarhit before the first pointer's
+    up/cancel (two fingers, or a rapid re-press) must not overwrite the
+    first gesture's timers/capture — found in the Phase 2a press-and-hold
+    audit, 2026-09-19."""
+    out = _run(_BARHIT + """
+hb.dispatchEvent({ type: 'pointerdown', button: 0, pointerType: 'touch', pointerId: 2,
+  clientX: 50, clientY: 50, preventDefault(){}, stopPropagation(){} });
+hb.dispatchEvent({ type: 'pointerdown', button: 0, pointerType: 'touch', pointerId: 3,
+  clientX: 80, clientY: 80, preventDefault(){}, stopPropagation(){} });
+await flush();
+hb.dispatchEvent({ type: 'pointerup', pointerId: 2, clientX: 51, clientY: 50 });
+out.focusRow = o.mapState._focusRow || null;
+""")
+    assert out["focusRow"] == "binary_sensor.frontdoor", (
+        "the first pointer's hold must still complete — a second pointerdown must be ignored, not take over", out)

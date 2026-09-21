@@ -20,6 +20,7 @@ from __future__ import annotations
 from custom_components.padspan_bright.ws_settings import (
     _normalize_automorph_style,
     _normalize_showcase_theme,
+    _sanitize_light_shapes,
     _sanitize_showcase_presets,
 )
 
@@ -151,3 +152,33 @@ def test_sanitize_showcase_presets_leaves_the_layout_out_of_an_older_look():
     assert "overview_iso_floor_gap" not in v
     assert "overview_iso_horiz_gap" not in v
     assert "overview_iso_focus" not in v
+
+
+# ── _sanitize_light_shapes ───────────────────────────────────────────────────
+
+def test_sanitize_light_shapes_keeps_a_valid_light_override():
+    assert _sanitize_light_shapes({"light.kitchen": "circle"}) == {"light.kitchen": "circle"}
+
+
+def test_sanitize_light_shapes_now_keeps_non_light_classes_too():
+    """Phase 2a registry audit, 2026-09-19: this used to keep only
+    'light.'-prefixed keys, so the Atlas inspector's Shape chooser — offered
+    for every placed class — silently saved nothing for a fan, a door, a
+    lock, or any other non-light entity. resolveLightShape (light_codes.js)
+    already applies an override generically regardless of class; the
+    backend just wasn't storing what it was sent."""
+    raw = {"fan.ceiling": "fan", "lock.front_door": "lock", "binary_sensor.front_door": "door"}
+    assert _sanitize_light_shapes(raw) == raw
+
+
+def test_sanitize_light_shapes_drops_an_unknown_shape_value():
+    assert _sanitize_light_shapes({"light.x": "not_a_real_shape"}) == {}
+
+
+def test_sanitize_light_shapes_drops_an_empty_key():
+    assert _sanitize_light_shapes({"": "circle"}) == {}
+
+
+def test_sanitize_light_shapes_returns_empty_dict_for_non_dict_input():
+    assert _sanitize_light_shapes(None) == {}
+    assert _sanitize_light_shapes([("light.x", "circle")]) == {}

@@ -117,6 +117,14 @@ def _hass():
     def _entries(domain):
         return [SimpleNamespace(entry_id="e1")] if domain in ("esphome", "bluetooth", "mobile_app") else []
     h.config_entries.async_entries = _entries
+    # placed_by_domain (Phase 2a registry audit, 2026-09-19) looks up each
+    # placed entity's real device_class via hass.states — a plain MagicMock
+    # here would answer every .attributes.get(...) with another MagicMock,
+    # not a real string, so nothing would ever match and everything would
+    # silently fall into "other".
+    _state_attrs = {_MOTION: {"device_class": "motion"}, _TEMP: {"device_class": "temperature"}}
+    h.states = SimpleNamespace(get=lambda eid, default=None:
+        SimpleNamespace(attributes=_state_attrs[eid]) if eid in _state_attrs else default)
     return h
 
 
@@ -136,7 +144,11 @@ def test_nothing_from_the_house_is_in_the_report():
     assert payload["env"]["scanners"] == 2 and payload["env"]["scanner_kinds"] == {"ip_known": 1, "espresense": 0, "other": 1}
     assert payload["env"]["rooms"] == 3 and payload["env"]["floors"] == 2
     assert payload["env"]["placed_lights"] == 4 and payload["env"]["walls"] == 1 and payload["env"]["irks"] == 1
-    assert payload["env"]["placed_by_domain"] == {"light": 1, "fan": 1, "motion_sensor": 1, "temp_sensor": 1}
+    assert payload["env"]["placed_by_domain"] == {
+        "light": 1, "fan": 1, "lock": 0, "motion_sensor": 1, "door_sensor": 0,
+        "flood_sensor": 0, "temp_sensor": 1, "humidity_sensor": 0,
+        "air_quality_sensor": 0, "other": 0,
+    }
     assert payload["env"]["light_type_overrides_by_kind"] == {"wled": 1}
     assert payload["env"]["followed"] == 2 and payload["env"]["scanner_state"] == {"lost": 1, "disabled": 0, "excluded": 1}
     assert payload["env"]["objects_by_kind"] == {"ibeacon": 1, "ble": 1}
@@ -196,7 +208,12 @@ def test_nothing_from_the_house_is_in_the_report():
     # _PRESET_SHARE_CAP), so a full report could run well past this fixture's
     # single-preset size — the cap, not this test, is what bounds it in
     # practice, and it is exercised on its own in test_presets_are_capped_.
-    assert len(text) < 3700
+    # Raised 3700 → 3800 for `placed_by_domain` growing from 4 buckets to 10
+    # (~70 bytes): it used to bucket by bare domain prefix, so a placed
+    # door/flood sensor was silently counted as "motion_sensor" and a
+    # humidity/air-quality sensor as "temp_sensor" — found in the Phase 2a
+    # registry audit, 2026-09-19. Now one bucket per real device_class.
+    assert len(text) < 3800
 
 
 def test_presets_are_capped_at_ten_per_report():

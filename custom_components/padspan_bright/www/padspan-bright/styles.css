@@ -1219,6 +1219,10 @@
   box-shadow:0 0 18px rgba(251,191,36,.08)}
 .lv-coach .lv-act{flex-shrink:0}
 .lv-table tbody tr.lv-row-sel{background:rgba(232,121,249,.12);box-shadow:inset 3px 0 0 #e879f9}
+/* The row a press-and-hold on the map just jumped to — a pulse that fades, so
+   the eye lands on it without the selection tint having to shout forever. */
+@keyframes lv-row-flash{0%,45%{background:rgba(94,234,212,.30);box-shadow:inset 4px 0 0 #5eead4}100%{background:transparent;box-shadow:inset 4px 0 0 transparent}}
+.lv-table tbody tr.lv-row-flash{animation:lv-row-flash 2.4s ease-out 1}
 .lv-editing{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;
   font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;
   color:#f0abfc;border:1px solid rgba(232,121,249,.55);background:rgba(232,121,249,.1);

@@ -55,6 +55,28 @@ def test_every_menu_entry_is_a_known_view() -> None:
     assert _menu_ids() <= _panel_view_ids()
 
 
+def _tab_set(name: str) -> set[str]:
+    """BASIC_TABS / ADVANCED_DEFAULT (new Set([...])) or DEV_ONLY_TABS (a
+    plain [...]) — a third/fourth hand-written id list gating which tabs a
+    user sees per complexity mode (panel.js's _getVisibleTabs). Week-review
+    finding, 2026-09-19: unlike MENU and SURFACE_CLASS, nothing asserted
+    these stay real view ids — today's entries are correct, but a future
+    typo or omission here would silently mis-gate a tab with no test
+    catching it."""
+    src = (_WWW / "panel.js").read_text(encoding="utf-8")
+    m = re.search(rf"const {name} = (.+?);\n", src)
+    assert m, f"could not find {name} in panel.js"
+    return set(re.findall(r'"([a-z_]+)"', m.group(1)))
+
+
+def test_the_complexity_mode_tab_sets_are_all_real_views() -> None:
+    views = _panel_view_ids()
+    for name in ("BASIC_TABS", "ADVANCED_DEFAULT", "DEV_ONLY_TABS"):
+        ids = _tab_set(name)
+        assert ids, f"{name} is empty or unparseable"
+        assert ids <= views, f"{name} names a view panel.js does not have: {sorted(ids - views)}"
+
+
 def test_bright_keeps_exactly_the_lighting_product() -> None:
     """The product promise, pinned: Mapping (rooms, floors, the fabric, the
     Lights tab), Settings, Health. Everything else is presence."""

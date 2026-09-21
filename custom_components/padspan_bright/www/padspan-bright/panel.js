@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.53";
-const RELEASE_BUILD_ID = "20260918T212822Z";
+const APP_VERSION = "0.38.55";
+const RELEASE_BUILD_ID = "20260921T162050Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -1292,6 +1292,17 @@ class PadSpanHaApp extends HTMLElement {
           }
           await this._getLiveSnapshot();
           await this._getStatus();
+          // Settings (flood_latches among them) otherwise only refresh on
+          // boot, manual Refresh, or a tab-focus/visibility wake-up — a
+          // kiosk display that's simply being watched, never losing focus,
+          // could miss a newly-tripped flood alarm on the emergency banner
+          // indefinitely (found in the week-review workflow, 2026-09-19).
+          // Same 30s-inside-the-fast-tick throttle lights_panel.js already
+          // uses for its own settings repoll.
+          if(Date.now() - (this._settingsPollTs || 0) > 30000){
+            this._settingsPollTs = Date.now();
+            await this._fetchSettings();
+          }
         })(),
         timeout,
       ]);
@@ -1700,6 +1711,10 @@ class PadSpanHaApp extends HTMLElement {
     const t0 = performance.now();
     if(userAction) this._toast("Refreshing…");
     await Promise.allSettled([this._fetchSettings()]);
+    // Stamp the throttle _pollTick's own quiet settings repoll checks
+    // against, so the very next 5s tick doesn't immediately re-fetch what
+    // was just fetched here.
+    this._settingsPollTs = Date.now();
     // Fetch the small critical geometry FIRST, awaited: the floor plan is
     // unrenderable without maps_list + model, and batching them with the
     // heavyweight live_snapshot meant a snapshot big enough to kill the WS

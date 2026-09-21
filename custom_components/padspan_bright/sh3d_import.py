@@ -82,10 +82,32 @@ def parse_sh3d(data: bytes) -> dict[str, Any]:
             )
         raise Sh3dParseError("Not a Sweet Home 3D file (no Home.xml entry found)")
 
+    # Decompressed-size cap, checked against the zip's own central-directory
+    # metadata BEFORE the expensive read — the caller already caps the
+    # COMPRESSED upload (ws_floorplan_import.py's MAX_SH3D_BYTES), which does
+    # nothing to stop one small entry inflating to gigabytes (a classic
+    # zip-bomb: found in the Phase 2i security audit, 2026-09-19). A real
+    # Home.xml is KB-to-low-MB scale even for a large house.
+    MAX_HOME_XML_BYTES = 50 * 1024 * 1024
+    if zf.getinfo("Home.xml").file_size > MAX_HOME_XML_BYTES:
+        raise Sh3dParseError("Home.xml is implausibly large for a floorplan file")
+
     try:
         xml_bytes = zf.read("Home.xml")
     except (KeyError, zipfile.BadZipFile) as exc:
         raise Sh3dParseError("Home.xml entry could not be read") from exc
+    if len(xml_bytes) > MAX_HOME_XML_BYTES:
+        raise Sh3dParseError("Home.xml is implausibly large for a floorplan file")
+
+    # Reject a DOCTYPE outright rather than trust ElementTree to handle one
+    # safely (same audit finding): stdlib ElementTree does not fetch external
+    # entities/DTDs, but it DOES expand internal ones, which is the "billion
+    # laughs" vector — a few KB of nested <!ENTITY> definitions can exhaust
+    # CPU/memory well before any size cap above would catch it. A real
+    # Sweet Home 3D export has no DOCTYPE at all, so this rejects nothing
+    # legitimate.
+    if b"<!DOCTYPE" in xml_bytes:
+        raise Sh3dParseError("Home.xml has a DOCTYPE declaration, which is not a Sweet Home 3D export")
 
     try:
         root = ET.fromstring(xml_bytes)

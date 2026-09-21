@@ -89,16 +89,36 @@ out.motionOver = LC.healthOf({ isMotion: true, state: 'on', last_changed: justOv
 
 
 def test_the_light_index_state_column_shows_open_closed_not_on_off():
+    """Phase 2a follow-up, 2026-09-19: buildLightsTable's own per-class
+    render chain (door among them) was retired into the same shared
+    stateWordOf the test above checks — this table's State cell now just
+    asks it, rather than re-deriving OPEN/CLOSED by hand a second time."""
     s = (_VIEWS / "lights_map.js").read_text(encoding="utf-8")
-    assert 'l.isDoor\n        ? el("span", { class: `lv-state ${on ? "on" : "off"}` }, on ? "OPEN" : "CLOSED")' in s
+    # Two call sites share this exact substring (the sort key, then the
+    # render chain below it) — the render chain is the later one.
+    i = s.rindex("const sw = stateWordOf(l, host.floodLatches);")
+    state_cell = s[i:i + 800]
+    assert "l.isDoor" not in state_cell, "door's OPEN/CLOSED word moved to stateWordOf — must not be re-derived here"
 
 
 def test_aggregate_sheet_gives_doors_a_readonly_badge_not_a_dead_toggle_button():
+    """Phase 2a follow-up, 2026-09-19: openAggregateSheet's per-class if/else
+    (door among them) was retired into one shared stateWordOf (lights_map.js,
+    also used by buildLightsTable's render AND sort chains — the same
+    duplication that let a lock read "Off" in one copy and the flood latch
+    go unsorted in another). Door's own OPEN/CLOSED word now lives there;
+    the structural guarantee here is stronger, not narrower — ANY class
+    with a word from stateWordOf gets no generic toggle button unless it's
+    specifically isLock or a latched isFlood, not just door by name."""
     s = (_VIEWS / "lights_map.js").read_text(encoding="utf-8")
-    fn = s[s.index("export function openAggregateSheet("):]
-    fn = fn[:fn.index("\n}\n")]
-    assert 'l.isDoor' in fn
-    i = fn.index("} else if (l.isDoor) {")
-    branch = fn[i:i + 400]
+    sw_fn = s[s.index("export function stateWordOf("):]
+    sw_fn = sw_fn[:sw_fn.index("\n}\n")]
+    assert "l.isDoor" in sw_fn
+    i = sw_fn.index("if (l.isDoor) {")
+    branch = sw_fn[i:i + 300]
     assert '"OPEN"' in branch and '"CLOSED"' in branch
-    assert "api.toggle" not in branch, "a door row must never wire the generic toggle button"
+
+    agg_fn = s[s.index("export function openAggregateSheet("):]
+    agg_fn = agg_fn[:agg_fn.index("\n}\n")]
+    assert "l.isDoor" not in agg_fn, "door's state word moved to stateWordOf — must not be re-special-cased here"
+    assert "const sw = stateWordOf(l, api.floodLatches);" in agg_fn

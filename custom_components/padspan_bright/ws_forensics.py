@@ -33,10 +33,18 @@ _LOGGER = logging.getLogger(__name__)
         vol.Required("to_ts"): vol.Coerce(float),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_forensics_query(hass: HomeAssistant, connection, msg) -> None:
     """Return devices present (recorded) or possibly present (first/last-seen
-    overlap) during [from_ts, to_ts] (epoch seconds)."""
+    overlap) during [from_ts, to_ts] (epoch seconds).
+
+    Admin-gated (Phase 2i security audit, 2026-09-19) — this is per-room
+    presence history of household members, the same sensitivity as the
+    license/reveal commands elsewhere in this file that already require
+    admin; the panel surfacing it is itself require_admin=False, so any
+    signed-in non-admin HA account could otherwise read it.
+    """
     from .const import DATA_FORENSICS
     from .forensics_store import retention_days
 

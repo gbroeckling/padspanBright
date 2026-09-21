@@ -581,3 +581,74 @@ console.log(JSON.stringify({
     assert out["transportsStayNull_template"] is None, out
     assert out["allNullIsSafe"] is None, out
     assert out["emptyManufacturerFallsThrough"] == "WLED", "a falsy-but-present manufacturer must still fall through to the domain"
+
+
+# ── stateWordOf: the one per-class state-word/sort answer ──────────────────
+# Phase 2a follow-up (docs/PHASE2_STRATEGIC_REVIEW.md #80), 2026-09-19:
+# openAggregateSheet's render chain, buildLightsTable's render chain and its
+# own separate sort-key chain each used to answer "what does this entity's
+# state read as" with independent hand-written per-class if/else — two live
+# bugs already shipped from the three copies disagreeing before this test
+# existed (a locked lock read "Off" in one chain with no lock branch; the
+# flood latch was invisible to the sort key in another). These pin the one
+# shared function all three now read from.
+
+def test_state_word_of_every_read_only_and_lock_class(tmp_path):
+    out = _run(tmp_path, r"""
+const NOW = new Date('2026-09-19T12:00:00Z').getTime();
+const cases = {
+  motionOn:    LM.stateWordOf({ isMotion: true, state: "on" }, {}),
+  motionOff:   LM.stateWordOf({ isMotion: true, state: "off" }, {}),
+  lockLocked:  LM.stateWordOf({ isLock: true, state: "locked" }, {}),
+  lockUnlocked:LM.stateWordOf({ isLock: true, state: "unlocked" }, {}),
+  lockJammed:  LM.stateWordOf({ isLock: true, state: "jammed" }, {}),
+  tempReading: LM.stateWordOf({ isTemp: true, temperature: 21.5 }, {}),
+  tempNoReading: LM.stateWordOf({ isTemp: true, temperature: null }, {}),
+  humidity:    LM.stateWordOf({ isHumidity: true, humidity: 61 }, {}),
+  doorOpen:    LM.stateWordOf({ isDoor: true, state: "on" }, {}),
+  doorClosed:  LM.stateWordOf({ isDoor: true, state: "off" }, {}),
+  plainLight:  LM.stateWordOf({ state: "on" }, {}),
+  wled:        LM.stateWordOf({ isWled: true, state: "on" }, {}),
+  fan:         LM.stateWordOf({ isFan: true, state: "on" }, {}),
+};
+console.log(JSON.stringify(cases));
+""")
+    assert out["motionOn"] == {"text": "MOTION", "lit": True, "sortValue": 1}
+    assert out["motionOff"] == {"text": "clear", "lit": False, "sortValue": 0}
+    assert out["lockLocked"] == {"text": "LOCKED", "lit": True, "sortValue": 1, "locked": True}
+    assert out["lockUnlocked"] == {"text": "UNLOCKED", "lit": False, "sortValue": 0, "locked": False}
+    assert out["lockJammed"] == {"text": "JAMMED", "lit": False, "sortValue": 0, "locked": False}
+    assert out["tempReading"] == {"text": "21.5°", "lit": False, "sortValue": 21.5}
+    assert out["tempNoReading"]["text"] == "—" and out["tempNoReading"]["sortValue"] is None  # -Infinity -> null over JSON
+    assert out["humidity"] == {"text": "61%", "lit": False, "sortValue": 61}
+    assert out["doorOpen"] == {"text": "OPEN", "lit": True, "sortValue": 1}
+    assert out["doorClosed"] == {"text": "CLOSED", "lit": False, "sortValue": 0}
+    # Controllable classes without a special word: null, so callers keep
+    # their own generic On/Off (+ optional Controls) button.
+    assert out["plainLight"] is None
+    assert out["wled"] is None
+    assert out["fan"] is None
+
+
+def test_state_word_of_flood_latched_beats_live_and_matches_floodisalarming(tmp_path):
+    # floodIsAlarming (lights_map.js) checks the latch against the REAL
+    # Date.now(), not a value this script controls — so the fixture's
+    # expires_at has to be built off the actual current time too, or the
+    # "still latched" case silently expires and starts failing days after
+    # whenever this was written (found the hard way: a hardcoded literal
+    # date here rotted exactly like that within 48 hours).
+    out = _run(tmp_path, r"""
+const NOW_S = Date.now() / 1000;
+const latches = { "binary_sensor.dried_but_latched": { triggered_at: NOW_S - 3600, expires_at: NOW_S + 3600 } };
+const wet    = LM.stateWordOf({ isFlood: true, state: "on", entity_id: "binary_sensor.wet" }, latches);
+const alarm  = LM.stateWordOf({ isFlood: true, state: "off", entity_id: "binary_sensor.dried_but_latched" }, latches);
+const dry    = LM.stateWordOf({ isFlood: true, state: "off", entity_id: "binary_sensor.never_tripped" }, latches);
+console.log(JSON.stringify({
+  wet, alarm, dry,
+  alarmMatchesFloodIsAlarming: LM.floodIsAlarming({ state: "off", entity_id: "binary_sensor.dried_but_latched" }, latches) === alarm.lit,
+}));
+""")
+    assert out["wet"] == {"text": "WET", "lit": True, "sortValue": 1, "latched": False}
+    assert out["alarm"] == {"text": "ALARM", "lit": True, "sortValue": 1, "latched": True}
+    assert out["dry"] == {"text": "DRY", "lit": False, "sortValue": 0, "latched": False}
+    assert out["alarmMatchesFloodIsAlarming"] is True

@@ -25,12 +25,12 @@ const { fabricFrame, markerScale, markerRadiusPx, cmFromHandlePx, MAX_FIXTURE_CM
 // verbatim by the Lights sidebar panel, so the two tools always show the
 // identical map; this tab layers the build tools on top of it.
 const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable, lightIsTouched,
-        sunAmbient, lastBrightness, spreadInRoom, createUndoStack, setOptimistic, clearOptimistic, effectiveState,
+        sunAmbient, spreadInRoom, createUndoStack, toggleEntity,
         wireUseSurface, openControlCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates,
         isOutdoorFloorId, wireHoverHud, pressRing, HOLD_MS, PRESS_RING_MS } =
   await import(`./lights_map.js${new URL(import.meta.url).search}`);
 // Fixture-shape vocabulary + derivation (the tab owns the manual override UI).
-const { LIGHT_SHAPES, deriveLightShape } =
+const { LIGHT_SHAPES, deriveLightShape, isControllable, deviceClassOf, hasControlCard, hasFixedGlyph } =
   await import(`./light_codes.js${new URL(import.meta.url).search}`);
 // "Is this map-setup step done?" — shared with the Overview onboarding
 // checklist (panel.js) so the two can never disagree about what's finished.
@@ -7411,11 +7411,15 @@ export function _wireLightsBuild(ctx, isoDiv, o) {
       ev.preventDefault(); ev.stopPropagation();
       const start = toVB(ev);
       let moved = false;
+      // Screen pixels, not viewBox units — same rule as the marker drag
+      // below: a viewBox delta scales with fit/zoom, a fingertip does not.
+      const downCX = ev.clientX, downCY = ev.clientY;
+      const ARM_PX = ev.pointerType === "mouse" ? 4 : 10;
       try { dropG.setPointerCapture(ev.pointerId); } catch (_) {}
       const mm = (e) => {
         const v = toVB(e);
         const dx = v.x - start.x, dy = v.y - start.y;
-        if (!moved && Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+        if (!moved && Math.hypot((e.clientX || 0) - downCX, (e.clientY || 0) - downCY) > ARM_PX) moved = true;
         if (moved) dropG.setAttribute("transform", `translate(${dx},${dy})`);
       };
       const up = (e) => {
@@ -7519,7 +7523,12 @@ export function _wireLightsBuild(ctx, isoDiv, o) {
       // file: a hold that's already completed doesn't get cancelled by the
       // hand settling before lifting.
       if (longPressed) return;
-      if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > 8) cancelTimer();
+      // Touch-aware, like the marker/door-section holds (found in the
+      // Phase 2a press-and-hold audit, 2026-09-19: this was the one hold
+      // surface still on a flat 8px for every pointer type — a finger's
+      // natural tremor during a still 500ms hold routinely exceeds that,
+      // so a room-name hold could still silently fail to arm on touch).
+      if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > (ev.pointerType === "mouse" ? 8 : 10)) cancelTimer();
     });
     rg.addEventListener("pointerup", cancelTimer);
     rg.addEventListener("pointerleave", cancelTimer);
@@ -7535,6 +7544,60 @@ export function _wireLightsBuild(ctx, isoDiv, o) {
       if (longPressed) o.mapState._focusRow = eids[0];
       ctx.actions.renderRooms();
     });
+  }
+
+  // A linked door / window / lock is a section of WALL, not a marker — the
+  // renderer draws it pointer-events:none, so it never had anything to press.
+  // The builder asks for an invisible hit path over each one (barrierHit) and
+  // a still hold on it jumps the index to that device's row, the same gesture
+  // every marker already has. Hold ONLY: a tap does nothing — a door has
+  // nothing to switch, and a lock must never be one stray tap from unlocking.
+  for (const hb of isoDiv.querySelectorAll("polyline.lbarhit[data-eid]")) {
+    const heid = hb.getAttribute("data-eid");
+    hb.style.touchAction = "none";
+    let lpTimer = null, ringT = null, ring = null, armed = false, downX = 0, downY = 0, capId = null;
+    const clear = () => {
+      if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+      if (ringT) { clearTimeout(ringT); ringT = null; }
+      if (ring) { try { ring.remove(); } catch (_) {} ring = null; }
+      if (capId !== null) { try { hb.releasePointerCapture(capId); } catch (_) {} capId = null; }
+    };
+    hb.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0 && ev.pointerType === "mouse") return;
+      // A second pointerdown while one is already in progress (two fingers
+      // on the same barrier, or a rapid re-press) must not overwrite this
+      // gesture's state out from under it — found in the Phase 2a press-
+      // and-hold audit, 2026-09-19: without this, the FIRST pointer's
+      // eventual pointerup called clear() on state that by then belonged
+      // to the SECOND, still-in-progress gesture, silently un-arming it
+      // and releasing its capture.
+      if (capId !== null) return;
+      ev.preventDefault(); ev.stopPropagation();
+      // Ownership is tracked independently of whether the real capture call
+      // below succeeds — it used to be set as a side effect INSIDE that same
+      // try, so a browser that refused capture (or a test harness that
+      // doesn't implement the API at all) left capId permanently null and
+      // silently defeated every ev.pointerId===capId guard above.
+      capId = ev.pointerId;
+      try { hb.setPointerCapture(ev.pointerId); } catch (_) {}
+      downX = ev.clientX; downY = ev.clientY; armed = false;
+      const cx = parseFloat(hb.getAttribute("data-cx")), cy = parseFloat(hb.getAttribute("data-cy"));
+      ringT = setTimeout(() => { ring = pressRing(svg, cx, cy, 12); }, PRESS_RING_MS);
+      lpTimer = setTimeout(() => { armed = true; if (ring) ring.classList.add("armed"); }, HOLD_MS);
+    });
+    hb.addEventListener("pointermove", (ev) => {
+      if (ev.pointerId !== capId || armed) return;
+      if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > (ev.pointerType === "mouse" ? 4 : 10)) clear();
+    });
+    hb.addEventListener("pointerup", (ev) => {
+      if (ev.pointerId !== capId) return;
+      const wasArmed = armed; armed = false; clear();
+      if (!wasArmed) return;
+      o.mapState._focusRow = heid;
+      ctx.actions.renderRooms();
+    });
+    hb.addEventListener("pointercancel", (ev) => { if (ev.pointerId !== capId) return; armed = false; clear(); });
+    hb.addEventListener("click", (ev) => ev.stopPropagation());
   }
 
   // Door/window circle tool: armed by the Lights row's "Place" button
@@ -7693,6 +7756,18 @@ export function _wireLightsBuild(ctx, isoDiv, o) {
         } catch (_) { originCx = start.x; originCy = start.y; }
       }
       let moved = false;
+      // Slop is measured in REAL SCREEN PIXELS off the raw event, never in
+      // viewBox units (Garry, 2026-09-19: "press and hold doesn't work for
+      // all devices"). toVB() deltas scale with how the drawing is fitted
+      // and zoomed: on a big house shown on a small screen one screen pixel
+      // is several viewBox units, so the old "3 units cancels the hold / 8
+      // units arms the drag" tripped on sub-pixel jitter — a hold could
+      // never complete, and a plain tap could register as a drag and nudge
+      // the fixture. A fingertip also rolls far more than a mouse while
+      // held still, so touch/pen get a finger-sized tolerance.
+      const downCX = ev.clientX, downCY = ev.clientY;
+      const HOLD_SLOP_PX = ev.pointerType === "mouse" ? 4 : 10;
+      const DRAG_ARM_PX = ev.pointerType === "mouse" ? 8 : 12;
       // The table-jump is gated on a long press, not a plain select (Garry,
       // 2026-09-11: selecting on the map "just pops to the part of the list
       // with the device... kills most of the functionality of the lights
@@ -7734,7 +7809,8 @@ export function _wireLightsBuild(ctx, isoDiv, o) {
         // to the table instead of just doing nothing. Cancelling on the
         // first sign of movement, whether or not it ever becomes a drag,
         // means only a genuinely STILL press can ever set longPressed.
-        if (!longPressCancelled && Math.abs(dx) + Math.abs(dy) > 3) {
+        const screenD = Math.hypot((e.clientX || 0) - downCX, (e.clientY || 0) - downCY);
+        if (!longPressCancelled && !longPressed && screenD > HOLD_SLOP_PX) {
           longPressCancelled = true;
           clearTimeout(lpTimer);
           cancelRing();
@@ -7743,7 +7819,7 @@ export function _wireLightsBuild(ctx, isoDiv, o) {
         // drag. 8px, not 3: every hex is draggable now, so a twitch while
         // select-clicking an auto-clustered light would pin it. 3px is inside
         // normal click jitter (and inside a fingertip's), 8px is not.
-        if (!moved && Math.abs(dx) + Math.abs(dy) > 8) {
+        if (!moved && screenD > DRAG_ARM_PX) {
           moved = true;
           o.mapState._editDragging = true;   // suppress poll re-renders mid-drag
         }
@@ -8560,42 +8636,15 @@ function _lightsTab(ctx, maps, active) {
     ? !!ctx.state.settings?.lights_show_beacons
     : !!mapState._lightsShowBeacons;
 
-  const toggle = async (eid) => {
-    if (!ctx.hass) return;
-    // Service domain is the entity's own (light / fan); a binary_sensor —
-    // motion or door/window — is read-only, same rules as the sidebar. So
-    // is a temperature sensor.*.
-    const domain = String(eid).split(".")[0];
-    if (domain === "binary_sensor") { ctx.toast("Sensors are read-only"); return; }
-    if (domain === "sensor") { ctx.toast("Temperature and air quality sensors are read-only"); return; }
-    // The EFFECTIVE state, not the raw HA one (Garry, 2026-09-11: a second
-    // tap inside the same optimistic window re-decided from state that
-    // hadn't caught up yet, so it silently repeated the first command
-    // instead of reversing it — see lights_panel.js's own _toggle for the
-    // full story; this preview path shares the same bug and the same fix).
-    const on = effectiveState(eid, ctx.hass.states[eid]?.state).state === "on";
-    // Optimistic, like the sidebar: the marker flips now, HA reconciles.
-    setOptimistic(eid, on ? "off" : "on");
-    ctx.actions.renderRooms();
-    try {
-      // Off→on restores the last dimmed level (shared memory in
-      // lights_map.js) — same behaviour as the sidebar, same source, so the
-      // two views cannot disagree about what "on" brings back.
-      const data = { entity_id: eid };
-      if (!on && domain === "light") {
-        const bri = lastBrightness(eid);
-        if (bri !== null) data.brightness = bri;
-      }
-      await ctx.hass.callService(domain, on ? "turn_off" : "turn_on", data);
-      setTimeout(() => ctx.actions.renderRooms(), 600);
-    } catch(err) {
-      clearOptimistic(eid);
-      ctx.actions.renderRooms();
-      ctx.toast("Could not toggle " + eid, true);
-    }
-  };
+  // The shared toggle (lights_map.js) — locks included; this preview path
+  // used to be its own copy with no lock branch, so a lock's Turn On/Off
+  // button called `lock.turn_on`, not a real HA service, and always failed.
+  const toggle = (eid) => toggleEntity(ctx.hass, eid, {
+    render: () => ctx.actions.renderRooms(),
+    toast: (m, e) => ctx.toast(m, e),
+  });
   // The sidebar's exact api, for Preview-as-sidebar (shared use surface).
-  const controlsFor = (l0) => !!(l0 && (l0.isWled || l0.isPartition || l0.dimmable || l0.isFan));
+  const controlsFor = hasControlCard;
   const previewApi = {
     hass: ctx.hass, lightsByEid, lights, controlsFor,
     toggle, toast: (m, e) => ctx.toast(m, e), rerender: () => ctx.actions.renderRooms(),
@@ -8910,6 +8959,15 @@ function _lightsTab(ctx, maps, active) {
       floor_id: o.floor_id || null,
     }));
 
+  // A press-and-hold jump must never land on a row the index's own filter
+  // is hiding — "take me to this device" outranks a list filter set earlier.
+  if (mapState._focusRow) {
+    const fl = lightsByEid[mapState._focusRow];
+    const cf = mapState._tableClassFilter || "all";
+    if (fl && cf !== "all" && deviceClassOf(fl).filterClass !== cf) mapState._tableClassFilter = "all";
+    if (fl && mapState._tableHealthFilter && fl.healthy) mapState._tableHealthFilter = false;
+  }
+
   const host = {
     el,
     floors,
@@ -9040,6 +9098,12 @@ function _lightsTab(ctx, maps, active) {
     // Preview-as-sidebar asks the renderer for the use-surface ergonomics
     // (the sidebar's exact options) and wires the sidebar's exact gestures.
     codeChip: preview, hitHalo: preview, collapseUnplaced: preview,
+    // paid && !preview, matching every sibling builder-only flag here — a
+    // free-tier install has no build tools wired (_wireLightsBuild never
+    // runs for it), so `!preview` alone drew an inert invisible hit-stroke
+    // over every linked barrier with nothing ever listening to it. Found
+    // in the Phase 2a press-and-hold audit, 2026-09-19.
+    barrierHit: paid && !preview,
     // Build-tool interaction: hexes select and drag instead of toggling.
     // Free tier: a hex switches the light, exactly as the sidebar does.
     // Preview: the shared use surface — tap switches, chip/hold opens the
@@ -9430,19 +9494,27 @@ function _lightsTab(ctx, maps, active) {
       },
     }, `⎘ Apply look to ${selSet.size - 1} selected`));
 
-    const on = l.state === "on";
+    // A lock's "on" is "locked" — its state is never the string "on" (found
+    // in the Phase 2a registry audit, 2026-09-19: this button always read a
+    // locked lock as "Off" and offered "Turn On").
+    const on = l.isLock ? l.state === "locked" : l.state === "on";
     // A read-only class (motion, door/window, temperature, humidity, air
     // quality, flood) has nothing to switch — the button only ever produced
     // the read-only toast.
-    if (!(l.isMotion || l.isDoor || l.isTemp || l.isHumidity || l.isAir || l.isFlood)) insp.appendChild(el("button", {
+    if (isControllable(l)) insp.appendChild(el("button", {
       class: `lv-onoff ${on ? "on" : "off"}`,
       onclick: () => toggle(l.entity_id),
-    }, on ? "Turn Off" : "Turn On"));
+    }, l.isLock ? (on ? "Unlock" : "Lock") : (on ? "Turn Off" : "Turn On")));
 
     // Fixture shape — derived from the entity by default; this is the override.
     // Stored per entity_id (not per pin) so it works for every light, whether
-    // it has been placed or is still auto-clustered in its room.
-    {
+    // it has been placed or is still auto-clustered in its room. Hidden for
+    // a fixed-glyph class (motion/flood/temp/humidity/air/lock — DEVICE_
+    // CLASSES.fixedGlyph): those have "no size/rotation/colour of its own to
+    // edit" by design, and the control offered one anyway with no effect —
+    // ws_settings.py silently dropped the save for any non-light.* key until
+    // fixed the same day (Phase 2a registry audit, 2026-09-19).
+    if (!hasFixedGlyph(l)) {
       const current = shapeOverrides[l.entity_id] || "auto";
       const derived = LIGHT_SHAPES.find(([k]) => k === deriveLightShape(l));
       const shapeLbl = el("label", { class: "lv-field" }, "Shape");

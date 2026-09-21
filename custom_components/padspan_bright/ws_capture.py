@@ -144,6 +144,7 @@ async def ws_capture_stop(hass: HomeAssistant, connection, msg) -> None:
 
 
 @websocket_api.websocket_command({"type": "padspan_bright/capture_status"})
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_capture_status(hass: HomeAssistant, connection, msg) -> None:
     """Live session state; polled by the Health tab while recording."""
@@ -184,6 +185,7 @@ async def ws_capture_mark(hass: HomeAssistant, connection, msg) -> None:
 
 
 @websocket_api.websocket_command({"type": "padspan_bright/capture_list"})
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_capture_list(hass: HomeAssistant, connection, msg) -> None:
     """Recorded sessions, newest first.  Prunes first, so a disabled install
@@ -200,6 +202,7 @@ async def ws_capture_list(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("limit", default=2000): vol.All(vol.Coerce(int), vol.Range(min=1, max=5000)),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_capture_get(hass: HomeAssistant, connection, msg) -> None:
     """One page of a session file — the export transport.

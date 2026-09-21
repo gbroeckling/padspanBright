@@ -97,6 +97,7 @@ async def _auto_backup(hass: HomeAssistant, note: str, store_keys: list[str]) ->
     "type": "padspan_bright/store_backup_create",
     vol.Optional("note"): str,
 })
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_store_backup_create(hass: HomeAssistant, connection, msg) -> None:
     """Create a full backup snapshot of all PadSpan persistent stores + map images.
@@ -191,6 +192,7 @@ async def ws_store_backup_create(hass: HomeAssistant, connection, msg) -> None:
 
 
 @websocket_api.websocket_command({"type": "padspan_bright/store_backup_list"})
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_store_backup_list(hass: HomeAssistant, connection, msg) -> None:
     """List all available backups."""
@@ -215,6 +217,7 @@ async def ws_store_backup_list(hass: HomeAssistant, connection, msg) -> None:
     vol.Optional("store_keys"): [str],
     vol.Optional("restore_map_images"): bool,
 })
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_store_backup_restore(hass: HomeAssistant, connection, msg) -> None:
     """Restore selected stores from a backup snapshot.
@@ -401,6 +404,7 @@ async def ws_store_backup_restore(hass: HomeAssistant, connection, msg) -> None:
     "type": "padspan_bright/store_backup_delete",
     vol.Required("backup_id"): str,
 })
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_store_backup_delete(hass: HomeAssistant, connection, msg) -> None:
     """Delete a specific backup."""

@@ -3348,7 +3348,21 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if _fire:
                 parts = entity_id.split(".", 1)
-                if len(parts) == 2:
+                # Defense in depth: ws_settings.py already rejects any rule
+                # outside turn_on/turn_off on light/switch/scene/script at
+                # save time (Phase 2i security audit, 2026-09-19 — this call
+                # previously had NO allowlist of its own, so a rule stored
+                # before that fix, or one that somehow bypassed it, could
+                # call any domain/service pair unattended — lock.unlock,
+                # alarm_control_panel.alarm_disarm — with no human
+                # confirmation). Checked again here, at the one place that
+                # actually fires the service, rather than trusted from
+                # storage.
+                if (
+                    len(parts) == 2
+                    and action in ("turn_on", "turn_off")
+                    and parts[0] in ("light", "switch", "scene", "script")
+                ):
                     svc_domain, _ = parts
                     try:
                         await self.hass.services.async_call(
