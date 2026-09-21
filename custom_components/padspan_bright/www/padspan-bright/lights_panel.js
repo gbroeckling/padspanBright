@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.55";
-const BUILD_ID = "20260921T162050Z";
+const APP_VERSION = "0.38.56";
+const BUILD_ID = "20260921T191445Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -25,7 +25,7 @@ const { hasControlCard } =
 const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable, lightIsTouched,
         sunAmbient, toggleEntity,
         wireUseSurface, openControlCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates,
-        wireHoverHud } =
+        wireHoverHud, captureWholeHouse, applyWholeHouse } =
   await import(`./views/lights_map.js${new URL(import.meta.url).search}`);
 
 // ── DOM helpers ──────────────────────────────────────────────────────────────
@@ -227,6 +227,13 @@ class PadSpanLightsApp extends HTMLElement {
       // Quick-apply only (see onApplyPreset in the host below) — presets are
       // authored in Mapping -> Lights, this panel just switches between them.
       this.state._showcasePresets = Array.isArray(s.lights_showcase_presets) ? s.lights_showcase_presets : [];
+      this.state._wholeHousePresets = Array.isArray(s.whole_house_presets) ? s.whole_house_presets : [];
+      // Layout v2 (Garry, 2026-09-21) is a house-wide trial toggle, set
+      // from the builder only — this panel reflects it, same convention
+      // as showcase/automorph above, but renders its OWN DISPLAY variant
+      // (host.displayMode below): edge-to-edge map, a slim rail, no
+      // onLayoutV2 handed to the host, so no toggle button shows here.
+      this.state._atlasLayoutV2 = !!s.atlas_layout_v2;
       // {entity_id: epoch-s of its most recent "on"} — flood_latch.py's
       // event listener writes this server-side; ungated, same reasoning as
       // the tier read above (a flood alarm isn't a paid convenience).
@@ -413,6 +420,13 @@ class PadSpanLightsApp extends HTMLElement {
       tier: this.state._tier,
       byRoom,
       hiddenEids: hidden,
+      // This screen IS the house map (Garry, 2026-09-21: "anything to the
+      // sides is a distraction from the purpose of the screen") — v2's
+      // display variant: edge-to-edge map, a slim icon rail, every bar a
+      // drawer over the map. No onLayoutV2: the toggle lives in the
+      // builder only, this panel just reflects what it's set to.
+      layoutV2: !!this.state._atlasLayoutV2,
+      displayMode: true,
       showcase: !!this.state._showcase,
       showcaseTheme: this.state._showcaseTheme || "classic",
       fitRooms: !!this.state._fitRooms,
@@ -433,6 +447,35 @@ class PadSpanLightsApp extends HTMLElement {
       // stays an editing action for Mapping -> Lights, same line as the
       // read-only modes above.
       showcasePresets: this.state._showcasePresets || [],
+      // Whole House Presets — quick-apply from the sidebar, same as the
+      // Showcase presets above (Garry, 2026-09-11 precedent: no edit UI in
+      // the everyday panel, editing stays in Mapping -> Lights). Set/Delete
+      // are included too, since this is the panel someone reaches for on a
+      // wall kiosk without opening the full builder.
+      wholeHousePresets: this.state._wholeHousePresets || [],
+      onWholeHouseSet: async (name) => {
+        const lights = Object.values(this.state.lightsByEid || {});
+        const cap = captureWholeHouse(lights, this._hass?.states || {});
+        const rest = (this.state._wholeHousePresets || []).filter((p) => p.name !== name);
+        const preset = { name, created_at: Date.now() / 1000, entities: cap.entities };
+        try { await this._hass.callWS({ type: "padspan_bright/settings_set", whole_house_presets: [...rest, preset] }); }
+        catch (e) { return null; }
+        this.state._wholeHousePresets = [...rest, preset];
+        this._render();
+        return cap;
+      },
+      onWholeHouseApply: async (preset) => {
+        if (!this._hass) return null;
+        try { return await applyWholeHouse(this._hass, preset); }
+        catch (e) { return null; }
+      },
+      onWholeHouseDelete: async (name) => {
+        const rest = (this.state._wholeHousePresets || []).filter((p) => p.name !== name);
+        try { await this._hass.callWS({ type: "padspan_bright/settings_set", whole_house_presets: rest }); }
+        catch (e) { return; }
+        this.state._wholeHousePresets = rest;
+        this._render();
+      },
       onApplyPreset: async (values) => {
         this.state._showcase = !!values.lights_showcase;
         this.state._showcaseTheme = values.lights_showcase_theme || "classic";
