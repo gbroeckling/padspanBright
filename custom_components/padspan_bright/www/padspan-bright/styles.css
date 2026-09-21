@@ -21,6 +21,15 @@
    off to the side regardless of the active tab, hidden entirely when
    nothing is latched. Deliberately louder than .pill: this is an alarm,
    not a status readout. */
+/* Vacation Mode (vacation_mode.py) — informational, not an alarm, so a
+   warm amber-green rather than the emergency banner's red. A full-width
+   bar at the top of the content area, not a floating overlay — impossible
+   to miss without blocking whatever tab is actually open underneath it. */
+.vacation-banner{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;
+  padding:8px 12px;border-radius:10px;background:rgba(120,90,20,.28);border:1px solid #b58a1f;
+  font-size:12.5px;color:#fde9b8}
+.vacation-banner-slider{display:flex;align-items:center;gap:6px}
+.vacation-banner-slider input[type="range"]{width:100px;accent-color:#e0b23a}
 .emergency-banner{margin-top:12px;padding:8px 10px;border-radius:10px;background:rgba(127,29,29,.35);border:1px solid #dc2626}
 .emergency-banner-head{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:#fecaca;cursor:pointer}
 .emergency-banner-list{margin-top:6px;display:flex;flex-direction:column;gap:4px}
@@ -1152,6 +1161,23 @@
   box-shadow:0 10px 24px -8px rgba(0,0,0,.6);transition:max-height .16s ease}
 .lv-drawer.open{max-height:220px;overflow-y:auto;border-bottom:1px solid rgba(120,190,155,.16)}
 .lv-drawer .lv-toolbar,.lv-drawer .lv-presetbar{margin:0;border:none;background:none;border-radius:0}
+
+/* The builder's own columns (Garry, 2026-09-21: "get it done" — the rest of
+   the layout plan). Below "wide" this is just a column of stacked cards,
+   identical to the classic layout it replaces (.lv-atlascols only exists at
+   all when layoutV2 is on — see maps.js's `cols`). At "wide" the map and the
+   device table sit side by side; at "ultra" the selected-light inspector
+   (when a light is selected) joins as a third column. */
+.lv-atlascols{display:flex;flex-direction:column;gap:0}
+.lv-atlascols.lv-cols-2,.lv-atlascols.lv-cols-3{display:grid;align-items:start;gap:12px}
+.lv-atlascols.lv-cols-2{grid-template-columns:minmax(0,1fr) minmax(320px,440px)}
+.lv-atlascols.lv-cols-3{grid-template-columns:minmax(0,1fr) minmax(320px,420px) minmax(270px,340px)}
+.lv-atlascols.lv-cols-2 .lv-mapcard,.lv-atlascols.lv-cols-3 .lv-mapcard{grid-column:1;grid-row:1/-1}
+.lv-atlascols.lv-cols-2 .lv-atlascol-table,.lv-atlascols.lv-cols-3 .lv-atlascol-table{grid-column:2;margin-bottom:0}
+.lv-atlascols.lv-cols-3 .lv-atlascol-inspector{grid-column:3;margin-bottom:0}
+/* No 3rd column yet (wide, not ultra) — the inspector, if one is open,
+   stacks above the table in the same column rather than vanishing. */
+.lv-atlascols.lv-cols-2 .lv-atlascol-inspector{grid-column:2;margin-bottom:0}
 
 /* ── legend ─────────────────────────────────────────────────────────────── */
 .lv-legend{display:flex;flex-wrap:wrap;gap:5px 8px;align-items:center;margin-top:10px;

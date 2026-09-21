@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.56";
-const BUILD_ID = "20260921T191445Z";
+const APP_VERSION = "0.38.57";
+const BUILD_ID = "20260921T210615Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -475,6 +475,16 @@ class PadSpanLightsApp extends HTMLElement {
         catch (e) { return; }
         this.state._wholeHousePresets = rest;
         this._render();
+      },
+      // Vacation Mode's own "permanent option" — quick-apply from the
+      // sidebar too, same as any other Whole House Preset here. Disabling
+      // and the intensity slider stay in panel.js's global banner, not
+      // this panel, since they must be reachable from every tab.
+      onVacationModeEnable: async () => {
+        if (!this._hass) return false;
+        try { await this._hass.callWS({ type: "padspan_bright/settings_set", vacation_mode_enabled: true }); }
+        catch (e) { return false; }
+        return true;
       },
       onApplyPreset: async (values) => {
         this.state._showcase = !!values.lights_showcase;
