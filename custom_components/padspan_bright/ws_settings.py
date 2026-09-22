@@ -368,6 +368,7 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("light_shapes"): dict,
         vol.Optional("light_type_overrides"): dict,
         vol.Optional("door_opener_ids"): list,
+        vol.Optional("door_composites"): list,
         vol.Optional("beacon_auto_calibrate"): bool,
         vol.Optional("overview_persistent_pins"): bool,
         vol.Optional("overview_show_walls"): bool,
@@ -687,21 +688,39 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     if str(v) in LIGHT_TYPE_OVERRIDE_KINDS and str(k).startswith("light.")
                 }
         if "door_opener_ids" in msg:
-            # A flat allowlist, not a classifier: cover./switch./button. cover
-            # nearly every domain in the house (raw device relays especially
-            # give no reliable hint they open a door rather than run a pump),
-            # so — unlike light_type_overrides' closed vocabulary of forced
-            # CLASSES — this is a closed vocabulary of DOMAINS only, and
-            # membership itself is the entire signal: Garry, 2026-09-22,
-            # confirming two real garage-door relays as the motivating case
-            # ("Upper Garage Car Door"/"Upper Garage Truck Door", switch.*
-            # with no device_class of their own to test against).
+            # A flat allowlist, not a classifier: cover./switch./button./
+            # script. cover nearly every domain in the house (raw device
+            # relays especially give no reliable hint they open a door
+            # rather than run a pump), so — unlike light_type_overrides'
+            # closed vocabulary of forced CLASSES — this is a closed
+            # vocabulary of DOMAINS only, and membership itself is the
+            # entire signal: Garry, 2026-09-22, confirming two real
+            # garage-door relays as the motivating case ("Upper Garage Car
+            # Door"/"Upper Garage Truck Door", switch.* with no
+            # device_class of their own to test against). script. joined
+            # the same day — his own script.garage_door_car/_truck, likely
+            # the CORRECT thing to trigger rather than the raw relay
+            # underneath it, whatever sequencing those scripts do.
             raw = msg["door_opener_ids"]
             if isinstance(raw, list):
                 payload["door_opener_ids"] = sorted({
                     str(eid) for eid in raw
-                    if isinstance(eid, str) and eid.startswith(("cover.", "switch.", "button."))
+                    if isinstance(eid, str) and eid.startswith(("cover.", "switch.", "button.", "script."))
                 })
+        if "door_composites" in msg:
+            # The receipt for Devices -> Door Openers' "build from relays"
+            # wizard — every HA object (script/automation/template entity/
+            # helper) the frontend created for one composite, so a later
+            # Remove can delete exactly those objects via the same REST/WS
+            # calls that created them. The frontend owns the shape entirely
+            # (it both writes and reads this list); the backend only keeps
+            # entries that are at minimum a dict with a string "id", so a
+            # malformed message can't wedge garbage into storage.
+            raw = msg["door_composites"]
+            if isinstance(raw, list):
+                payload["door_composites"] = [
+                    c for c in raw if isinstance(c, dict) and isinstance(c.get("id"), str)
+                ]
         if "object_history_days" in msg:
             _days = int(msg["object_history_days"])
             payload["object_history_days"] = (
