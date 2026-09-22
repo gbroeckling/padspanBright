@@ -8686,7 +8686,11 @@ function _lightsTab(ctx, maps, active) {
     floorGap: ctx.state.settings?.overview_iso_floor_gap ?? 150,
     horizGap: ctx.state.settings?.overview_iso_horiz_gap ?? 0,
     focusIdx: ctx.state.settings?.overview_iso_focus ?? 0,
-    zoom: 1.0,
+    // Persisted too (Garry, 2026-09-22: "stabilize the zoom in, so when
+    // that is locked well, it can stay that way for months") — the
+    // sidebar Atlas panel is set up once and left running unattended; an
+    // in-memory-only zoom reset to 1.0 on every reboot/reload.
+    zoom: ctx.state.settings?.overview_iso_zoom ?? 1.0,
   };
   const view = mapState._lightsView;
 
@@ -8694,7 +8698,11 @@ function _lightsTab(ctx, maps, active) {
   // Off by default: with handles live, a stray drag near a fixture resizes it
   // instead of moving it, and moving is the common action.
   const xfBtn = !paid ? null : el("button", {
-    class: "lv-tgl tone-violet" + (mapState._lightsTransform ? " on" : ""),
+    // lv-tgl-big (Garry, 2026-09-21: "the transform button... should be
+    // bigger") — a resize/rotate on the wrong fixture is a real mistake,
+    // not just a missed tap, so this one gets extra size on top of the
+    // shared lv-tgl toggle styling every other toggle here still uses.
+    class: "lv-tgl lv-tgl-big tone-violet" + (mapState._lightsTransform ? " on" : ""),
     onclick: () => {
       mapState._lightsTransform = !mapState._lightsTransform;
       ctx.actions.renderRooms();
@@ -8833,7 +8841,10 @@ function _lightsTab(ctx, maps, active) {
     const bar = el("div", { class: "card lv-tablecard", style: "display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 12px;border:1px solid rgba(251,191,36,.5);box-shadow:0 0 18px rgba(251,191,36,.08);margin-bottom:12px" }, [
       el("span", { style: "font-size:12px;color:#fbbf24;font-weight:600" },
         `${dirtyEids.length} unsaved light placement${dirtyEids.length !== 1 ? "s" : ""}`),
-      el("button", { class: "btn inline primary", onclick: async (e) => {
+      // lv-btn-big (Garry, 2026-09-21: "the save button should be bigger")
+      // — this is the one button that actually commits placed fixtures;
+      // losing unsaved placements to a missed tap is real lost work.
+      el("button", { class: "btn inline primary lv-btn-big", onclick: async (e) => {
         const btn = e.currentTarget;
         btn.disabled = true; btn.textContent = "Saving…";
         // Drop each map from the draft as it lands. If a later one fails, the
@@ -9029,6 +9040,7 @@ function _lightsTab(ctx, maps, active) {
           overview_iso_floor_gap: view.floorGap,
           overview_iso_horiz_gap: view.horizGap,
           overview_iso_focus:     view.focusIdx,
+          overview_iso_zoom:      view.zoom,
         });
         ctx.toast("Map view saved ✔");
       } catch (e) {
@@ -9354,6 +9366,7 @@ function _lightsTab(ctx, maps, active) {
       if (values.overview_iso_floor_gap !== undefined) view.floorGap = values.overview_iso_floor_gap;
       if (values.overview_iso_horiz_gap !== undefined) view.horizGap = values.overview_iso_horiz_gap;
       if (values.overview_iso_focus !== undefined) view.focusIdx = values.overview_iso_focus ?? 0;
+      if (values.overview_iso_zoom !== undefined) view.zoom = values.overview_iso_zoom;
       try { await ctx.actions.settingsSet(values); }
       catch (e) { ctx.toast("Could not apply the preset: " + String(e), true); }
       ctx.actions.renderRooms();
@@ -9385,6 +9398,7 @@ function _lightsTab(ctx, maps, active) {
         overview_iso_floor_gap: view.floorGap,
         overview_iso_horiz_gap: view.horizGap,
         overview_iso_focus:     view.focusIdx,
+        overview_iso_zoom:      view.zoom,
       };
       const rest = (ctx.state.settings?.lights_showcase_presets || []).filter((p) => p.name !== name);
       try {

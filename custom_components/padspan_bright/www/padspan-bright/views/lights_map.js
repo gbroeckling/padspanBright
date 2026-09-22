@@ -375,16 +375,6 @@ export function layoutTierFor(widthPx){
   const w = Number(widthPx) || 0;
   return w < 900 ? "narrow" : w < 1500 ? "medium" : w < 2300 ? "wide" : "ultra";
 }
-// The drawing is taller than it is wide, and classic sizing pins it to the
-// stage's WIDTH — so the wider the monitor, the taller the map and the more
-// there is to scroll. v2 fits the whole house in the space actually on
-// screen: the width at which the drawing is no taller than availH, never
-// wider than the stage. Zoom multiplies from there, so "100%" means "the
-// whole house, no scrolling".
-export function fitWidthPx(stageW, availH, vbW, vbH){
-  if (!(stageW > 0) || !(availH > 0) || !(vbW > 0) || !(vbH > 0)) return 0;
-  return Math.max(160, Math.min(stageW, availH * vbW / vbH));
-}
 // Which folds are open is a per-browser habit, not a house setting.
 const _foldOpen = (name) => { try { return localStorage.getItem("padspan_lv_fold_" + name) === "1"; } catch (_) { return false; } };
 const _foldSave = (name, open) => { try { localStorage.setItem("padspan_lv_fold_" + name, open ? "1" : "0"); } catch (_) {} };
@@ -2002,6 +1992,16 @@ export function buildLightsMapCard(hostIn){
   // map from side to side, because the SVG was pinned to its natural size.
   const isoDiv = document.createElement("div");
   isoDiv.className = "lv-stage";
+  // Same flash, different dimension: V2's height cap (below, in applyZoom)
+  // can only be MEASURED once this card is attached and laid out, so a
+  // freshly rebuilt isoDiv started every poll cycle with NO maxHeight at
+  // all — full, unconstrained natural height — until the deferred
+  // applyZoom() call landed a moment later and collapsed it down to the
+  // fitted size. Every poll tick, every ~5s: a visible snap from tall to
+  // fitted (Garry: "a visible flash on the screen every 5 seconds").
+  // Seeding the LAST computed height synchronously, right now, means the
+  // very first paint already matches what applyZoom would have set —
+  // nothing to visibly collapse into once the real measurement runs.
   // Pan position, mirrored into view (the same persistent object zoom
   // already lives on) so it survives a full rebuild of this card, not just
   // an in-place rebuildISO() — the whole card (this isoDiv included) is
@@ -2026,24 +2026,43 @@ export function buildLightsMapCard(hostIn){
   const applyZoom = () => {
     const svg = isoDiv.querySelector("svg");
     if (!svg) return;
+    // Width, V2 or classic alike: a plain CSS percentage of the stage,
+    // exactly like classic always did. V2 used to compute this as a pixel
+    // value instead (isoDiv.clientWidth, needing real layout — unavailable
+    // until this card was attached, and even then only measurable from a
+    // ResizeObserver callback or a deferred timer), but that pixel value
+    // was always going to equal "100% of the stage" in the end anyway once
+    // the fit-to-height shrink was removed (see git history) — a plain
+    // 100% already says exactly that, synchronously, on the very first
+    // paint, with nothing to defer and nothing that can race the height
+    // cap below. That JS/ResizeObserver path was the source of two live
+    // bugs at once: a visible flash every poll rebuild (default size →
+    // measured fit, a moment apart) and, whenever the ResizeObserver or
+    // the deferred correction failed to run at all (this Atlas panel is
+    // routinely a wall-kiosk tab that may not be the OS's focused window),
+    // the map simply never getting fitted — reading as "not reaching side
+    // to side."
+    svg.style.width = `${Math.round((view.zoom || 1) * 100)}%`;
+    // 2026-09-22, after three straight rounds of this still being wrong
+    // live (a visible flash, then not filling the width, then the whole
+    // map shrinking further and "stupid short" — Garry: "you really need
+    // to rethink what you are doing here"): V2 also used to CAP isoDiv's
+    // height to whatever vertical space the toolbar/presets chrome above
+    // it happened to leave, computed from a real layout measurement that
+    // could only run once this card was attached — every attempt to make
+    // that measurement land before the user could see the gap (a
+    // ResizeObserver, a deferred timer, seeding a cached value) fixed one
+    // symptom and produced another, because the real problem was the cap
+    // itself: capping height at all means the map's SIZE depends on how
+    // much chrome happens to sit above it, which is exactly what kept
+    // making it smaller as more got added there. Classic never had this
+    // problem because it never had this cap — height simply follows the
+    // drawing's own aspect ratio at 100% width, same as classic, and the
+    // page scrolls for whatever doesn't fit, same as classic. No
+    // measurement, no attachment, nothing left to get wrong here.
     if (V2) {
-      // Not laid out yet (the host appends this card after it is built):
-      // leave the SVG at its own width="100%" — the ResizeObserver below
-      // calls back here the moment the stage has a real size.
-      if (!(isoDiv.clientWidth > 0)) return;
-      const vb = String(svg.getAttribute("viewBox") || "").trim().split(/\s+/).map(Number);
-      const top = isoDiv.getBoundingClientRect().top;
-      const availH = Math.max(260, (window.innerHeight || 800) - Math.max(0, top) - (DISPLAY ? 10 : 22));
-      const fit = fitWidthPx(isoDiv.clientWidth - 22, availH - 22, vb[2], vb[3]);
-      const wPx = `${Math.round(fit * (view.zoom || 1))}px`;
-      if (fit > 0 && svg.style.width !== wPx) svg.style.width = wPx;
       svg.style.display = "block";
       svg.style.margin = "0 auto";
-      const mh = `${Math.round(availH)}px`;
-      if (isoDiv.style.maxHeight !== mh) isoDiv.style.maxHeight = mh;
-      if (DISPLAY && isoDiv.style.minHeight !== mh) isoDiv.style.minHeight = mh;
-    } else {
-      svg.style.width = `${Math.round(view.zoom * 100)}%`;
     }
     if (host.codeChip && codesShown !== null && codesShown !== codesVisibleAtZoom(view.zoom)) rebuildISO();
   };
@@ -2703,31 +2722,21 @@ export function buildLightsMapCard(hostIn){
     whBar.appendChild(whStatus);
     presetBars.push({ key: "house", label: "Whole house", node: whBar });
   }
-  // Classic: each bar is its own full-width row. v2 with both present: ONE
-  // row, switched by a two-way tab that takes the place of each bar's own
-  // label — they are the same shape and do different jobs, so they share
-  // the space instead of stacking.
+  // Classic: each bar is its own full-width row. v2 with both present:
+  // ONE row, side by side — Look on the left, Whole house on the right
+  // (Garry, 2026-09-22: "presets and whole house should share a row, one
+  // to the left, one to the right"). An earlier cut of this switched
+  // between them with a tab instead of showing both at once, trading a
+  // row of vertical space for having to click to see the other bar —
+  // wrong tradeoff when the actual goal was using LESS vertical space,
+  // not hiding a whole bar.
   if (V2 && presetBars.length === 2) {
-    const active = presetBars.some((b) => b.key === view.presetTab) ? view.presetTab : "look";
-    const strips = [];
-    const show = (key) => {
-      view.presetTab = key;
-      for (const b of presetBars) b.node.hidden = b.key !== key;
-      for (const st of strips) for (const btn of st.children) btn.classList.toggle("on", btn._tabKey === key);
-    };
-    for (const b of presetBars) {
-      const strip = el("span", { class: "lv-tabs" });
-      for (const t of presetBars) {
-        const btn = el("button", { class: "lv-tab", onclick: () => show(t.key) }, t.label);
-        btn._tabKey = t.key;
-        strip.appendChild(btn);
-      }
-      strips.push(strip);
-      b.node.replaceChild(strip, b.node.firstChild);
-    }
-    show(active);
+    const row = el("div", { class: "lv-presetrow" });
+    for (const b of presetBars) row.appendChild(b.node);
+    mount(row, "presets");
+  } else {
+    for (const b of presetBars) mount(b.node, "presets");
   }
-  for (const b of presetBars) mount(b.node, "presets");
 
   // ── Layers + navigation bar ─────────────────────────────────────────────
   // Separate from the view-shaping toolbar above: this row is about WHAT you
@@ -2878,8 +2887,41 @@ export function buildLightsMapCard(hostIn){
   // correct. Real browsers clamp an out-of-range scrollLeft/scrollTop to
   // the content's own current bounds, so this is safe even if the drawing
   // shrank since the value was saved.
-  if (view.scrollLeft !== undefined) isoDiv.scrollLeft = view.scrollLeft;
-  if (view.scrollTop !== undefined) isoDiv.scrollTop = view.scrollTop;
+  //
+  // mapCard is still DETACHED here — the caller appends the div this
+  // function returns into the live document only after it gets it back.
+  // Setting scrollLeft/scrollTop on an element with no layout box yet is a
+  // silent no-op, so every poll-driven rebuild (both Atlas hosts rebuild
+  // the whole card from scratch on their ~5s timer) was quietly dropping
+  // the user's pan position back to 0,0 the moment it redrew — "the
+  // position of the map keeps resetting after 5-10 seconds." Deferred one
+  // frame so it runs after the caller's synchronous appendChild.
+  //
+  // V2 also fits the drawing to the screen via a ResizeObserver, which
+  // only gets real numbers once isoDiv is attached — same frame this
+  // restore runs in, order unspecified between the two. If that fit lands
+  // AFTER this restore, its width change can shrink scrollWidth out from
+  // under the position just set, clamping it down — a slow drift toward
+  // 0,0 across repeated poll rebuilds ("keeps getting moved to some
+  // useless position"), and each rebuild both re-fitting AND re-clamping
+  // is exactly what reads as the map "getting smaller" over time too.
+  // Calling applyZoom() explicitly, synchronously, right before restoring
+  // — rather than trusting the observer to have already run — makes the
+  // fit settle first in EVERY case, so the restore always lands on final,
+  // stable bounds instead of racing whichever happens to fire second.
+  //
+  // setTimeout, not requestAnimationFrame: this Atlas panel is often a
+  // wall-kiosk tab that is not always the OS's frontmost/focused window,
+  // and Chrome fully suspends rAF (indefinitely, not just throttled) in a
+  // backgrounded tab — the restore would then silently never run at all,
+  // which reproduces as this exact bug. setTimeout still fires there.
+  if (view.scrollLeft !== undefined || view.scrollTop !== undefined) {
+    setTimeout(() => {
+      applyZoom();
+      if (view.scrollLeft !== undefined) isoDiv.scrollLeft = view.scrollLeft;
+      if (view.scrollTop !== undefined) isoDiv.scrollTop = view.scrollTop;
+    }, 0);
+  }
   return mapCard;
 }
 
