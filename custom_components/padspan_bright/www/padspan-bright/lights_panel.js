@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.65";
-const BUILD_ID = "20260922T182328Z";
+const APP_VERSION = "0.38.66";
+const BUILD_ID = "20260922T200546Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -346,6 +346,9 @@ class PadSpanLightsApp extends HTMLElement {
       setMany:(eids,on)=>this._setMany(eids,on),
       toast:(m,e)=>this._toast(m,e),
       rerender:()=>this._render(),
+      // Barrier card's paired-lock lookup (computeDoorLockPairs) — same
+      // registry fetch as everything else in _regStore, no extra round trip.
+      doorLockMap: this._regStore?.reg?.doorLockMap || {},
       floodLatches: this.state._floodLatches || {},
       onFloodReset: (eid)=>{
         this._hass.callWS({ type: "padspan_bright/flood_reset", entity_id: eid })
@@ -422,12 +425,16 @@ class PadSpanLightsApp extends HTMLElement {
 
     // ── The shared map card — identical map to the Mapping → Lights tab ──────
     const floors=this.state.model.floors||[];
+    // Door/window/lock click-to-control (Garry, 2026-09-22) — same gate as
+    // maps.js's own barrierHit (_isPro there): Bright or Pro, never free.
+    const paid=["bright","pro"].includes(String(this.state._tier||"").toLowerCase());
 
     const host={
       el,
       floors,
       model: this.state.model,
       tier: this.state._tier,
+      barrierHit: paid,
       byRoom,
       hiddenEids: hidden,
       // This screen IS the house map (Garry, 2026-09-21: "anything to the
