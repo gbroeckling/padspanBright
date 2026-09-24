@@ -35,6 +35,7 @@ from .const import (
     CALIBRATION_STORE_KEY,
     ADAPTIVE_STORE_KEY,
     OBJECT_STORE_KEY,
+    FINDMY_STORE_KEY,
     MAPS_STORE_KEY,
     MODEL_STORE_KEY,
     FABRIC_STORE_KEY,
@@ -225,6 +226,21 @@ async def ws_factory_reset(hass: HomeAssistant, connection, msg) -> None:
     except Exception as e:
         _LOGGER.warning("Factory reset: objects — %s", e)
         errors.append(OBJECT_STORE_KEY)
+
+    # ── 6b. Find My links — which address each known tag uses (findmy.py) ──
+    try:
+        # Through the live Store too: a delayed save it still holds (within
+        # 5 s of a link) would otherwise write the old links back (round 8).
+        _old_fm = domain.pop("findmy_bridge_store", None)
+        if _old_fm is not None:
+            await _old_fm.async_save({})
+        st = _St(hass, 1, FINDMY_STORE_KEY)
+        await st.async_save({})
+        cleared += 1
+        domain.pop("findmy_bridge", None)
+    except Exception as e:
+        _LOGGER.warning("Factory reset: Find My links — %s", e)
+        errors.append(FINDMY_STORE_KEY)
 
     # ── 7. AlertStore — reset to {} ───────────────────────────────────────
     try:

@@ -312,6 +312,27 @@ def resolve_device(hass: HomeAssistant, entity_id: str | None = None,
     return None
 
 
+def unreachable_host(hass: HomeAssistant, entity_id: str | None = None, device_id: str | None = None) -> str | None:
+    """The address of a WLED entry this light/device has that Home Assistant
+    couldn't set up (the device didn't answer) — so the card can say it's
+    unreachable instead of "not a WLED device" (2026-09-23, live: four
+    offline strips read as not WLED at all). Never used to reach it."""
+    from homeassistant.helpers import device_registry as dr, entity_registry as er  # noqa: PLC0415
+
+    if entity_id and not device_id:
+        ent = er.async_get(hass).async_get(entity_id)
+        device_id = ent.device_id if ent is not None else None
+    dev = dr.async_get(hass).async_get(device_id) if device_id else None
+    if dev is None:
+        return None
+    entries = _wled_entries(hass)
+    for entry_id in getattr(dev, "config_entries", ()) or ():
+        entry = entries.get(entry_id)
+        if entry is not None and not getattr(entry, "disabled_by", None):
+            return str((entry.data or {}).get("host") or "its address")
+    return None
+
+
 def _norm_mac(mac: Any) -> str:
     return re.sub(r"[^0-9a-f]", "", str(mac or "").lower())
 
@@ -466,8 +487,14 @@ async def _gate(hass: HomeAssistant, connection, msg) -> dict[str, Any] | None:
         return None
     tgt = _target(hass, msg)
     if tgt is None:
-        connection.send_error(msg["id"], "not_wled",
-                              "That light isn't a WLED device in Home Assistant's WLED integration")
+        host = unreachable_host(hass, entity_id=msg.get("entity_id"), device_id=msg.get("device_id"))
+        if host:
+            connection.send_error(msg["id"], "unreachable",
+                                  f"Home Assistant can't reach this WLED at {host} — check it's powered on and on "
+                                  "the network (if its address changed, Home Assistant's WLED integration needs the new one)")
+        else:
+            connection.send_error(msg["id"], "not_wled",
+                                  "That light isn't a WLED device in Home Assistant's WLED integration")
         return None
     return tgt
 
@@ -628,10 +655,13 @@ async def ws_wled_cfg(hass: HomeAssistant, connection, msg) -> None:
             after = None
         # A config write resets the live "send my changes" switch to the
         # saved one (0.15+): put the live one back (round 5) — unless this
-        # write sets the saved switch itself, which the admin meant to act
-        # now (round 6).
+        # write CHANGES the saved switch, which the admin meant to act now
+        # (round 6). The Sync card always sends the whole block, so being
+        # present isn't enough (round 7).
         send_patch = ((msg["patch"].get("if") or {}).get("sync") or {}).get("send") or {}
-        if isinstance(live_send, bool) and not ({"en", "dir"} & set(send_patch)):
+        send_before = ((before.get("if") or {}).get("sync") or {}).get("send") or {}
+        switch_changed = any(k in send_patch and send_patch[k] != send_before.get(k) for k in ("en", "dir"))
+        if isinstance(live_send, bool) and not switch_changed:
             try:
                 now_send = ((await _request(hass, host, "GET", "json/state")).get("udpn") or {}).get("send")
                 if isinstance(now_send, bool) and now_send != live_send:
@@ -1116,10 +1146,19 @@ def sanitize_teams(hass: HomeAssistant, teams: Any, stored: list | None = None) 
 
 def follower_light_entities(hass: HomeAssistant, teams: list | None) -> set[str]:
     """Every light entity of a team follower — the lights the rest of HA
-    should leave to their leader."""
+    should leave to their leader. A team not finished (`incomplete`: a
+    setup that couldn't be rolled back everywhere, a break-up that couldn't
+    reach everyone, a setup in progress) counts only its unfinished
+    followers: the others are back to themselves (round 7)."""
     from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
 
-    devs = {f for t in (teams or []) if isinstance(t, dict) for f in (t.get("followers") or [])}
+    devs = set()
+    for t in teams or []:
+        if not isinstance(t, dict):
+            continue
+        followers = set(t.get("followers") or [])
+        pending = set(t.get("incomplete") or [])
+        devs |= (followers & pending) if pending else followers
     if not devs:
         return set()
     reg = er.async_get(hass)

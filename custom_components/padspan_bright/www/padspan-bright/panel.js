@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.76";
-const RELEASE_BUILD_ID = "20260924T031340Z";
+const APP_VERSION = "0.38.77";
+const RELEASE_BUILD_ID = "20260924T043710Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -3115,7 +3115,12 @@ class PadSpanHaApp extends HTMLElement {
         // Fall through to full rebuild below. Recorded only once that
         // rebuild happens (after the swap): a rebuild the interaction guard
         // skipped — the "Resume Normal" click itself — must not count as
-        // done, or the banner stays up for good (round 6).
+        // done, or the banner stays up for good (round 6). The dots keep
+        // moving meanwhile: a guard can hold the rebuild back for minutes
+        // (a focused slider), and they used to freeze with it (round 7).
+        if (typeof this.state._isoUpdateObjects === "function") {
+          try { this.state._isoUpdateObjects(); } catch(e) {}
+        }
       } else {
         // Update suspend countdown in-place (no full rebuild)
         if(_curSusp) {

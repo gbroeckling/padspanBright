@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.76";
-const BUILD_ID = "20260924T031340Z";
+const APP_VERSION = "0.38.77";
+const BUILD_ID = "20260924T043710Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -23,7 +23,7 @@ const { hasControlCard } =
 // verbatim by the Mapping → Lights tab (the builder for this display), so the
 // two tools always show the identical map. All lights-view edits go in there.
 const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable, lightIsTouched,
-        sunAmbient, toggleEntity,
+        sunAmbient, toggleEntity, atlasLookFromSettings,
         wireUseSurface, openControlCard, controlApiFor, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates, doorInvertOf,
         wireHoverHud, captureWholeHouse, applyWholeHouse } =
   await import(`./views/lights_map.js${new URL(import.meta.url).search}`);
@@ -218,17 +218,20 @@ class PadSpanLightsApp extends HTMLElement {
       // here for the same reason the shapes are: this panel DISPLAYS the map
       // that tab BUILDS, so a mode that changed only one of them would mean
       // the two views no longer show the same house.
-      this.state._showcase      = !!s.lights_showcase;
-      this.state._fitRooms      = !!s.lights_fit_rooms;
-      this.state._hideUntouched = !!s.lights_hide_untouched;
-      this.state._hideDeviceCodes = !!s.lights_hide_device_codes;
-      this.state._isolux        = !!s.lights_isolux;
-      this.state._automorph     = !!s.lights_automorph_enabled;
-      this.state._automorphPct  = Number(s.lights_automorph_room_pct) || 0;
-      this.state._automorphHardness = Number(s.lights_automorph_hardness) || 0;
-      this.state._automorphStyle = s.lights_automorph_style || "glow";
-      this.state._automorphSubtlety = Number(s.lights_automorph_subtlety) || 0;
-      this.state._showcaseTheme = s.lights_showcase_theme || "classic";
+      // One reading of the look, shared with Traceback's Full house
+      // activity (atlasLookFromSettings) so the two always match.
+      const look = atlasLookFromSettings(s);
+      this.state._showcase      = look.showcase;
+      this.state._fitRooms      = look.fitRooms;
+      this.state._hideUntouched = look.hideUntouched;
+      this.state._hideDeviceCodes = look.hideDeviceCodes;
+      this.state._isolux        = look.isolux;
+      this.state._automorph     = look.automorph;
+      this.state._automorphPct  = look.automorphRoomPct;
+      this.state._automorphHardness = look.automorphHardness;
+      this.state._automorphStyle = look.automorphStyle;
+      this.state._automorphSubtlety = look.automorphSubtlety;
+      this.state._showcaseTheme = look.showcaseTheme;
       // Quick-apply only (see onApplyPreset in the host below) — presets are
       // authored in Mapping -> Lights, this panel just switches between them.
       this.state._showcasePresets = Array.isArray(s.lights_showcase_presets) ? s.lights_showcase_presets : [];

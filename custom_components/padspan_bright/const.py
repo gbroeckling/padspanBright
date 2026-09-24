@@ -19,7 +19,7 @@ Organisation:
 
 DOMAIN = "padspan_bright"
 NAME = "PadSpan Bright"
-VERSION = "0.38.76"
+VERSION = "0.38.77"
 
 # ── Config-flow option keys ───────────────────────────────────────────────────
 CONF_ENABLE_CLOUD = "enable_cloud"
@@ -76,6 +76,7 @@ MAPS_STORE_KEY = "padspan_bright.maps"
 MODEL_STORE_KEY = "padspan_bright.model"
 FABRIC_STORE_KEY = "padspan_bright.fabric"
 OBJECT_STORE_KEY = "padspan_bright.objects"
+FINDMY_STORE_KEY = "padspan_bright.findmy_bridge"   # findmy.py — which address each known Find My tag uses now
 CALIBRATION_STORE_KEY = "padspan_bright.calibration"
 ALERTS_STORE_KEY = "padspan_bright.follow_alerts"
 MOVEMENT_STORE_KEY = "padspan_bright.movement_history"
