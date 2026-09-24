@@ -189,3 +189,152 @@ for (let i = 0; i < 4; i++) { for (const r of pending.splice(0)) r({}); await se
 out.status = (String(B.children[2].innerHTML).match(/color:#94a3b8">([^<]*)</) || [])[1];
 """)
     assert out["status"] and "Loading" not in out["status"]
+
+
+
+# ── Re-review of the repairs (2026-09-23): a repair round ships regressions ──
+
+
+def test_history_landing_mid_playback_restarts_it_on_the_merged_list():
+    """Playback kept the old frame count: it stopped halfway once the house
+    history landed, or ran past the end when the switch went off."""
+    out = _run("""
+const now = Math.floor(Date.now() / 1000), start = now - 300;
+const frames = []; for (let i = 0; i < 10; i++) frames.push({ ts: start + 10 + i * 10.37, o: [{ k: "a", r: "Kitchen", x_m: 1, y_m: 1, f: "main" }] });
+const door = { entity_id: "binary_sensor.d", state: "off", attributes: { friendly_name: "D", device_class: "door" } };
+const rows = [{ s: "off", lu: start }]; for (let i = 0; i < 10; i++) rows.push({ s: i % 2 ? "off" : "on", lu: start + 150.5 + i * 7.25 });
+const pending = [];
+const { ctx } = H.makeCtx({ states: { "binary_sensor.d": door },
+  wsCall: (t) => t === "padspan_bright/traceback_get" ? { frames, range: {} } : t === "padspan_bright/traceback_objects" ? { objects: [] }
+    : t === "padspan_bright/vacation_log_get" ? { actions: [], periods: [] } : {},
+  callWS: (m) => m.type === "history/history_during_period" ? new Promise(r => pending.push(() => r({ "binary_sensor.d": rows }))) : {} });
+ctx.state._traceback = undefined;
+const outer = H.TB.render(ctx);
+ctx.state._traceback.house.on = true;
+modeBtn(outer, "playback").click();
+await settle();
+const tb = ctx.state._traceback;
+tb.playing = false;
+out.before = tb.frames.length;
+// press Play, then let the history land
+const play = all(outer).find(n => n.title === "Play");
+out.foundPlay = !!play;
+play.click();
+out.playing = tb.playing;
+for (const p of pending.splice(0)) p();
+await settle();
+out.after = tb.frames.length;
+out.stillPlaying = tb.playing;
+""")
+    assert out["foundPlay"] and out["playing"]
+    assert out["before"] == 10
+    assert out["after"] == 20
+    assert out["stillPlaying"], "playback must be restarted on the merged list, not left on the old count"
+
+
+def test_an_events_frame_is_never_before_the_event_with_real_timestamps():
+    """Rounding the synthetic frame to the second put half of all events'
+    frames up to 0.5 s early: the click drew the door still shut."""
+    out = _run("""
+const ev = [{ t: 200312.456 }];
+const m = H.HA.mergeHouseFrames([{ ts: 10.37, o: [] }], ev);
+out.ts = m.map(f => f.ts);
+""")
+    assert out["ts"] == [10.37, 200.312456]
+
+
+def test_a_thinned_week_keeps_people_on_house_frames():
+    """A 7-day range comes back ~150 s apart; a fixed 30 s carry dropped
+    everyone from every house-event frame."""
+    out = _run("""
+const raw = []; for (let i = 0; i < 20; i++) raw.push({ ts: i * 150, o: [{ k: "a" }] });
+const m = H.HA.mergeHouseFrames(raw, [{ t: 1_560_000 }, { t: 9_000_000 }], 150);  // thinned to 150 s; +60 s after a frame; far past the end
+out.carried = m.find(f => f.ts === 1560).o.length;
+out.past = m.find(f => f.ts === 9000).o.length;
+""")
+    assert out == {"carried": 1, "past": 0}
+
+
+def test_a_new_range_never_shows_the_old_windows_history():
+    out = _run("""
+const hs = { eids: ["light.a"], timeline: { "light.a": [{ t: 0, state: "on", attributes: {}, lc: 0 }] }, events: [{ t: 1 }] };
+const ctx = { hass: { states: { "light.a": { state: "off", attributes: {} } }, callWS: () => new Promise(() => {}) },
+  actions: { wsCall: async () => ({ actions: [], periods: [] }) } };
+H.HA.loadHouseHistory(ctx, hs, 100, 200);
+out.timeline = hs.timeline; out.events = hs.events.length; out.loading = hs.loading;
+// an entity with rows, asked about before its first row, is omitted — not drawn "live"
+const tl = H.HA.buildStateTimeline({ "light.b": [{ s: "on", lu: 500 }] });
+out.beforeFirst = H.HA.statesAt(tl, { "light.b": { state: "off" } }, ["light.b"], 100_000)["light.b"].state;
+""")
+    # Before its first row the state is unknown — never today's "off", never missing.
+    assert out == {"timeline": None, "events": 0, "loading": True, "beforeFirst": "unknown"}
+
+
+def test_an_unavailable_gap_does_not_hide_the_change_across_it():
+    out = _run("""
+const tl = H.HA.buildStateTimeline({ "light.porch": [{ s: "off", lu: 0 }, { s: "unavailable", lu: 10 }, { s: "on", lu: 20 }] });
+out.ev = H.HA.activityEvents(tl, e => e, 0, 1e9).map(e => [e.from, e.to, e.t / 1000]);
+""")
+    assert out["ev"] == [["off", "on", 20]]
+
+
+# ── Round 3 (2026-09-23) ─────────────────────────────────────────────────────
+
+
+def test_a_click_lands_on_its_own_event_when_another_is_300_ms_earlier():
+    """Motion at T, the automation's light at T+0.3 s: clicking the light
+    landed on the motion frame and drew the light still off."""
+    out = _run("""
+const raw = [{ ts: 10, o: [] }];
+const ev = [{ t: 1_000_000 }, { t: 1_000_300 }];
+const m = H.HA.mergeHouseFrames(raw, ev);
+let i = 0; const e = ev[1];
+while (i < m.length - 1 && m[i].ts * 1000 < e.t) i++;       // the row handler's rule
+out.landed = m[i].ts;
+""")
+    assert out["landed"] == 1000.3
+
+
+def test_isolated_sightings_are_not_carried_for_hours():
+    """A tag seen twice an hour apart has no 'cadence' — carrying it across
+    the gap drew it long after it was last recorded (round 3)."""
+    out = _run("""
+const m = H.HA.mergeHouseFrames([{ ts: 0, o: [{ k: "fob" }] }, { ts: 3600, o: [{ k: "fob" }] }],
+                                [{ t: 1_800_000 }, { t: 7_600_000 }]);
+out.carried = m.filter(f => f.house).map(f => f.o.length);
+""")
+    assert out["carried"] == [0, 0]
+
+
+def test_carry_follows_the_real_recording_rate():
+    """Round 4: a 60 s presence poll must keep people on house frames; an
+    isolated sighting must not be stretched; a thinned week scales with how
+    much it was thinned."""
+    out = _run("""
+const every = (step, n) => Array.from({ length: n }, (_, i) => ({ ts: i * step, o: [{ k: "a" }] }));
+const c = (raw, t, f) => H.HA.mergeHouseFrames(raw, [{ t: t * 1000 }], f).find(x => x.house).o.length;
+out.poll60 = c(every(60, 50), 60 * 10 + 75, 1);           // 75 s after a frame, 60 s cadence
+out.isolated = c([{ ts: 0, o: [{ k: "a" }] }, { ts: 3600, o: [{ k: "a" }] }], 1800, 1);
+out.thinned = c(every(150, 50), 150 * 10 + 200, 15);       // 200 s after a frame, thinned 15x
+""")
+    assert out == {"poll60": 1, "isolated": 0, "thinned": 1}
+
+
+def test_reset_forgets_the_saved_house_floor_too():
+    """Review round 5: Reset showed "All floors" and "Reset ✓" in house mode,
+    but never cleared traceback_house_focus — the next visit opened on the
+    old floor again."""
+    out = _run("""
+const { ctx } = H.makeCtx({ wsCall: (t) => t === "padspan_bright/traceback_get" ? { frames: [], range: {} }
+  : t === "padspan_bright/traceback_objects" ? { objects: [] } : {} });
+const sent = [];
+ctx.actions.settingsSet = async (p) => { sent.push(p); return {}; };
+ctx.state._traceback = undefined;
+const outer = H.TB.render(ctx);
+await settle();
+all(outer).find(n => String(n.textContent).startsWith("🏠 Full house activity")).click();
+all(outer).find(n => n.tagName === "BUTTON" && n.textContent === "Reset").click();
+await settle();
+out.sent = sent;
+""")
+    assert out["sent"] and out["sent"][-1].get("traceback_house_focus") == 0, out

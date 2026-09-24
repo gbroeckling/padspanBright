@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.75";
-const RELEASE_BUILD_ID = "20260923T205010Z";
+const APP_VERSION = "0.38.76";
+const RELEASE_BUILD_ID = "20260924T031340Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -1093,7 +1093,12 @@ class PadSpanHaApp extends HTMLElement {
           const _liveSet = new Set(["overview","follow","monitor"]);
           const _isLiveView = _liveSet.has(this.state?.view);
           const sinceGoodRender = this._lastGoodRender ? performance.now() - this._lastGoodRender : 0;
-          if(sinceGoodRender > 20_000){
+          // Follow/Monitor re-render from the poll every 20 s (_SLOW_INTERVAL),
+          // through its focus guard. The watchdog stays above that, so it only
+          // steps in on a real stall — it used to beat the poll to it and
+          // rebuild outside the guard, snapping an open picker shut.
+          const _stallMs = (this.state?.view === "follow" || this.state?.view === "monitor") ? 30_000 : 20_000;
+          if(sinceGoodRender > _stallMs){
             if(!_isLiveView){
               // Non-live view: just reset the timer, don't force render
               this._lastGoodRender = performance.now();
@@ -1317,7 +1322,7 @@ class PadSpanHaApp extends HTMLElement {
       const _view = this.state.view;
       const _fastViews = new Set(["overview","purelive"]);  // efficient partial update
       const _slowViews = new Set(["follow","monitor"]);                 // full rebuild — throttle
-      const _SLOW_INTERVAL = 35_000;
+      const _SLOW_INTERVAL = 20_000;   // the ~20 s cadence Follow/Monitor have always had in practice
 
       if(_fastViews.has(_view)){
         // Overview: always re-render (uses _isoUpdateObjects or Preact diffing)
@@ -3107,8 +3112,10 @@ class PadSpanHaApp extends HTMLElement {
       // Detect suspend state change — force full rebuild so banner appears/disappears
       const _curSusp = !!(this.state.live?.snapshot?.suspended);
       if(this._lastSuspendState !== _curSusp) {
-        this._lastSuspendState = _curSusp;
-        // Fall through to full rebuild below
+        // Fall through to full rebuild below. Recorded only once that
+        // rebuild happens (after the swap): a rebuild the interaction guard
+        // skipped — the "Resume Normal" click itself — must not count as
+        // done, or the banner stays up for good (round 6).
       } else {
         // Update suspend countdown in-place (no full rebuild)
         if(_curSusp) {
@@ -3140,14 +3147,21 @@ class PadSpanHaApp extends HTMLElement {
     // Only applies to fromPoll=true — explicit renders (tab clicks, actions)
     // must always go through immediately.
     if(fromPoll){
+      // A deliberate skip is a live view, not a stall: stamp it, or the
+      // watchdog rebuilds the view mid-typing (round 4). Only while someone
+      // is using it — a field left focused on an idle screen would otherwise
+      // hold the view frozen for good (round 5).
       try {
         const active = (this.shadowRoot || this).querySelector(":focus");
         if(active){
           const tag = active.tagName;
-          if(tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+          if(tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA"){
+            if(this._lastUserInteraction && (performance.now() - this._lastUserInteraction) < 120_000) this._lastGoodRender = performance.now();
+            return;
+          }
         }
       } catch(e) { /* ignore */ }
-      if(this._lastUserInteraction && (performance.now() - this._lastUserInteraction) < 3000) return;
+      if(this._lastUserInteraction && (performance.now() - this._lastUserInteraction) < 3000){ this._lastGoodRender = performance.now(); return; }
     }
     // Verify $content is a live node in the shadow DOM (not a stale detached reference)
     if(!this.$content || !this.$content.isConnected){
@@ -3377,6 +3391,7 @@ class PadSpanHaApp extends HTMLElement {
       this.$content.appendChild(frag);
       this._lastGoodRender = performance.now();
       this._renderFailCount = 0;
+      if(v === "overview") this._lastSuspendState = !!(this.state.live?.snapshot?.suspended);
 
       // Restore scroll after DOM paint
       requestAnimationFrame(()=> {

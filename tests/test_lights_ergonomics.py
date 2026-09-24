@@ -1040,3 +1040,71 @@ console.log(JSON.stringify({ calls, r }));
 """)
     assert out["calls"] == []
     assert out["r"] == {"applied": 0, "skipped": 1}
+
+
+def test_open_barrier_card_says_no_reading_for_an_offline_sensor_or_lock(tmp_path):
+    """Review round 5: the Atlas draws an offline door or lock as a quiet
+    'no data' line; the card that opens from it said 'Open' (an inverted
+    door) or a red 'Unlocked'. One rule, barrierNoReading, for both."""
+    out = _run(tmp_path, r"""
+const hass = { states: {
+  "binary_sensor.garage": { state: "unavailable", attributes: { friendly_name: "Garage" } },
+  "lock.front": { state: "unknown", attributes: { friendly_name: "Front Lock" } },
+}, callService: async () => {} };
+const api = { toast: () => {}, rerender: () => {} };
+LM.openBarrierCard(hass, { linked_entity_id: "binary_sensor.garage", invert_state: true, name: "Garage" }, api);
+const door = document.body.textContent;
+while (document.body.children.length) document.body.removeChild(document.body.children[0]);
+LM.openBarrierCard(hass, { linked_entity_id: "lock.front", name: "Front" }, api);
+const lock = document.body.textContent;
+while (document.body.children.length) document.body.removeChild(document.body.children[0]);
+hass.states["binary_sensor.garage"].state = "off";
+LM.openBarrierCard(hass, { linked_entity_id: "binary_sensor.garage", linked_lock_entity_id: "lock.front", name: "Garage" }, api);
+const closedLockOffline = document.body.textContent;
+console.log(JSON.stringify({ door, lock, closedLockOffline }));
+""")
+    assert "No reading" in out["door"] and "Open" not in out["door"], out["door"]
+    assert "No reading" in out["lock"] and "Unlocked" not in out["lock"], out["lock"]
+    assert "Closed" in out["closedLockOffline"] and "Unlocked" not in out["closedLockOffline"], out["closedLockOffline"]
+
+
+def test_state_word_reads_doors_and_locks_the_way_the_atlas_draws_them(tmp_path):
+    """Review round 6: the table and room/floor sheets said CLOSED for an
+    offline door, UNLOCKED for an offline lock, and OPEN for the inverted
+    Upper Garage Car Door while it was closed — right beside its own
+    'Inverted ✓' button. Same rules as the Atlas now."""
+    out = _run(tmp_path, r"""
+const inv = { "binary_sensor.garage": true };
+console.log(JSON.stringify({
+  offlineDoor: LM.stateWordOf({ isDoor: true, entity_id: "binary_sensor.x", state: "unavailable" }, {}, {}).text,
+  offlineLock: LM.stateWordOf({ isLock: true, entity_id: "lock.x", state: "unknown" }, {}, {}).text,
+  invClosed:   LM.stateWordOf({ isDoor: true, entity_id: "binary_sensor.garage", state: "on" }, {}, inv).text,
+  invOpen:     LM.stateWordOf({ isDoor: true, entity_id: "binary_sensor.garage", state: "off" }, {}, inv).text,
+  plainOpen:   LM.stateWordOf({ isDoor: true, entity_id: "binary_sensor.y", state: "on" }, {}, inv).text,
+  map: LM.doorInvertOf({ rf_barriers_m: [{ linked_entity_id: "binary_sensor.garage", invert_state: true }, { points_m: [] }] }),
+}));
+""")
+    assert out["offlineDoor"] == "NO READING" and out["offlineLock"] == "NO READING"
+    assert out["invClosed"] == "CLOSED" and out["invOpen"] == "OPEN" and out["plainOpen"] == "OPEN"
+    assert out["map"] == {"binary_sensor.garage": True}
+
+
+def test_a_garage_door_or_opening_sensor_is_a_door_on_the_atlas(tmp_path):
+    """Round 6: HA's "Show as" can make a door contact garage_door or
+    opening; left out of isDoorSensor, a barrier linked to one had no state
+    on the Atlas and drew 'no reading' forever."""
+    out = _run(tmp_path, r"""
+const LC = await import('./light_codes.mjs');
+const states = {
+  "binary_sensor.car": { state: "on", attributes: { device_class: "garage_door" } },
+  "binary_sensor.hatch": { state: "off", attributes: { device_class: "opening" } },
+  "binary_sensor.pir": { state: "off", attributes: { device_class: "motion" } },
+};
+const lights = LM.gatherLights(states, {}, {}, "pro", {}, {}, {}, {}, Date.now(), true);
+console.log(JSON.stringify({
+  doors: lights.filter(l => l.isDoor).map(l => l.entity_id).sort(),
+  admitted: ["binary_sensor.car", "binary_sensor.hatch"].map(e => LC.isAtlasEntity(e, states[e].attributes)),
+}));
+""")
+    assert out["doors"] == ["binary_sensor.car", "binary_sensor.hatch"]
+    assert out["admitted"] == [True, True]

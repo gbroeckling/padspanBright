@@ -86,9 +86,10 @@ PERIODS_MAX = 50
 LOG_STORE_KEY = "padspan_bright.vacation_log"
 LOG_MAX_AGE_S = 8 * 86400     # Traceback keeps 7 days; one spare
 LOG_MAX = 20000               # ~1000 switches/day in a 40-light house fits
-LOG_SAVE_DELAY_S = 300        # one write per tick at most
+LOG_SAVE_DELAY_S = 60         # well inside the 5-min tick: Store's delay is a trailing debounce
 # A pattern build that found nothing usable is not retried every tick.
 RETRY_EMPTY_S = 3600
+RETRY_FAILED_S = 900
 
 _VM_UNSUB = "_vacation_mode_unsub"
 _VM_LOG = "_vacation_mode_log"
@@ -177,18 +178,25 @@ def build_pattern(
     vacations) whose sample points are skipped — they are Vacation Mode's
     own output, not the house's routine."""
     start = now - timedelta(days=history_days)
-    points = sample_points(start, now)
+    # The sample points and their slots are the same for every entity; each
+    # entity's changes are sorted once and walked alongside them (round 6:
+    # re-sorting per sample point took seconds on HA's event loop).
+    points = [(pt.timestamp(), bucket_key(pt), any_day_key(pt)) for pt in sample_points(start, now)]
     pattern: dict[str, dict[str, float]] = {}
     for entity_id, changes in history.items():
         if not changes:
             continue
         spans = entity_exclusions(changes, exclude or [], now.timestamp())
+        ordered = sorted(changes, key=lambda c: c[0])
+        idx, st = 0, None
         counts: dict[str, list[int]] = {}
-        for pt in points:
-            ts = pt.timestamp()
+        for ts, key_day, key_any in points:
+            # The state holding at ts: the latest change at or before it.
+            while idx < len(ordered) and ordered[idx][0] <= ts:
+                st = ordered[idx][1]
+                idx += 1
             if in_periods(ts, spans):
                 continue
-            st = state_at(changes, ts)
             if st not in ("on", "off"):
                 continue
             # Each sample counts toward its own weekday slot and toward the
@@ -196,7 +204,7 @@ def build_pattern(
             # (review 2026-09-23: with the recorder's default 10 days, a trip
             # starting on a Friday had no Sat/Sun/Mon data at all, and the
             # house went dark every weekend).
-            for key in (bucket_key(pt), any_day_key(pt)):
+            for key in (key_day, key_any):
                 on, total = counts.get(key, [0, 0])
                 counts[key] = [on + (1 if st == "on" else 0), total + 1]
         buckets = {k: on / total for k, (on, total) in counts.items() if total >= MIN_SAMPLES}
@@ -225,7 +233,10 @@ def entity_exclusions(changes: list[tuple[float, str]], periods: list, now_ts: f
         if end is None:
             out.append([start, None])
             continue
-        nxt = next((ts for ts, _ in ordered if ts > end), None)
+        # The first REAL on/off change away from how Vacation Mode left it —
+        # an "unavailable" blip in between is not someone touching the light.
+        left = state_at(changes, end)
+        nxt = next((ts for ts, st in ordered if ts > end and st in ("on", "off") and st != left), None)
         out.append([start, nxt if nxt is not None else now_ts])
     return out
 
@@ -261,7 +272,10 @@ def decide_states(
 
 async def _async_fetch_history(
     hass: HomeAssistant, entity_ids: list[str], days: int, end: datetime | None = None
-) -> dict[str, list[tuple[float, str]]]:
+) -> dict[str, list[tuple[float, str]]] | None:
+    """{} when there is nothing to read (no recorder, or no rows); None when
+    the query itself failed — a failure is retried in 15 minutes, an empty
+    answer after an hour."""
     if not entity_ids:
         return {}
     try:
@@ -269,42 +283,99 @@ async def _async_fetch_history(
         from homeassistant.components.recorder.history import get_significant_states  # noqa: PLC0415
         from homeassistant.util import dt as dt_util  # noqa: PLC0415
     except Exception as err:
+        # No recorder at all is not a failed query: it's an empty answer, and
+        # waits the hour like one (re-review round 3).
         _LOGGER.debug("Vacation mode: recorder not available: %s", err)
         return {}
     end = end or dt_util.utcnow()
     start = end - timedelta(days=days)
     try:
         instance = get_instance(hass)
+    except Exception as err:        # recorder not set up: nothing to read, not a failure
+        _LOGGER.debug("Vacation mode: recorder not set up: %s", err)
+        return {}
+    try:
         raw = await instance.async_add_executor_job(
             get_significant_states, hass, start, end, entity_ids
         )
     except Exception as err:
         _LOGGER.warning("Vacation mode: could not read history, skipping this cycle: %s", err)
-        return {}
+        return None
     out: dict[str, list[tuple[float, str]]] = {}
     for entity_id, states in (raw or {}).items():
         out[entity_id] = [(s.last_changed.timestamp(), s.state) for s in states if s.last_changed]
     return out
 
 
+def _platform_of(hass: HomeAssistant, entity_id: str) -> str | None:
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+    ent = er.async_get(hass).async_get(entity_id)
+    return getattr(ent, "platform", None) if ent else None
+
+
 def _eligible_entity_ids(hass: HomeAssistant) -> list[str]:
-    """Every light and fan except groups (attributes.entity_id is a list):
-    a group and its members would each be decided on their own and fight,
-    and a group switched on reads, bulb by bulb, as a person's doing
-    (review 2026-09-23)."""
+    """Every light and fan, each physical light decided exactly once — a group
+    and its members decided separately fight, and read bulb by bulb as a
+    person's doing (reviews 2026-09-23). The members are what's kept, with
+    ONE exception:
+    - a light.group helper (attributes.entity_id) — drop the helper; and
+      recognised first, so a helper that also publishes group_entities
+      never takes its members down with it;
+    - an integration group (attributes.group_entities, HA 2026.3+):
+      * WLED's main light, while it works, IS the strip's power — its
+        segment lights can't turn the strip on: keep it, drop its segments;
+      * anything else (ZHA, MQTT groups) — drop the group, keep the bulbs:
+        one lamp's routine must not light a whole floor, and overlapping
+        groups would fight over shared bulbs (round 4)."""
     try:
-        out = []
-        for eid in hass.states.async_entity_ids():
-            if not eid.startswith(VM_DOMAINS):
-                continue
-            st = hass.states.get(eid)
-            members = st.attributes.get("entity_id") if st is not None and st.attributes else None
-            if isinstance(members, (list, tuple)):
-                continue
-            out.append(eid)
-        return out
+        states = {eid: hass.states.get(eid) for eid in hass.states.async_entity_ids() if eid.startswith(VM_DOMAINS)}
     except Exception:
         return []
+    drop: set[str] = set()
+    for eid, st in states.items():
+        attrs = (st.attributes if st is not None and st.attributes else {}) or {}
+        if isinstance(attrs.get("entity_id"), (list, tuple)):
+            drop.add(eid)
+            continue
+        members = attrs.get("group_entities")
+        if not isinstance(members, (list, tuple)):
+            continue
+        try:
+            wled_main = _platform_of(hass, eid) == "wled"
+        except Exception:  # noqa: BLE001 — no registry: treat as an ordinary group
+            wled_main = False
+        usable = st is not None and st.state not in ("unavailable", "unknown") and not attrs.get("restored")
+        if wled_main and usable:
+            drop.update(m for m in members if m != eid)
+        else:
+            drop.add(eid)
+    # A WLED team follower takes its lights from its leader over sync;
+    # switching it separately would fight the leader (ws_wled.py teams). A
+    # registry hiccup here costs only the team filtering, never the whole list.
+    st = (hass.data.get(DOMAIN) or {}).get(DATA_SETTINGS)
+    teams = (st.data.get("wled_teams") if st else None) or []
+    if teams:
+        try:
+            from .ws_wled import follower_light_entities  # noqa: PLC0415
+            drop |= follower_light_entities(hass, teams)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Vacation mode: couldn't read WLED teams, switching every light: %s", err)
+    return [eid for eid in states if eid not in drop]
+
+
+def learned_pattern(data: dict) -> dict:
+    """The newest pattern learned under today's rules — from history that
+    ended when a vacation began (pattern_until set) and began after every
+    vacation in it was recorded (vacation_mode_tracked_since), so never from
+    Vacation Mode's own switching. An install that ran Vacation Mode before
+    spans were recorded has unrecorded ones in the recorder for up to
+    HISTORY_DAYS (round 6); a pattern that could have learned from those,
+    or one from before pattern_until existed, is never carried."""
+    since = data.get("vacation_mode_tracked_since") or 0
+    until = data.get("vacation_mode_pattern_until") or 0
+    if data.get("vacation_mode_pattern") and until and (not since or until - HISTORY_DAYS * 86400 >= since):
+        return data["vacation_mode_pattern"]
+    return data.get("vacation_mode_pattern_prev") or {}
 
 
 def switch_fields(data: dict, turn_on: bool, now_ts: float) -> dict:
@@ -314,7 +385,12 @@ def switch_fields(data: dict, turn_on: bool, now_ts: float) -> dict:
     vacation_mode_periods. No change, no fields."""
     was_on = bool(data.get("vacation_mode_enabled"))
     if turn_on and not was_on:
-        return {"vacation_mode_enabled_at": now_ts}
+        # A new vacation gets a new pattern. The last one learned is kept
+        # aside: the recorder may already have purged the days before this
+        # start (an off/on mid-trip, a trip right after another), and then
+        # it stands in rather than leaving the house dark (round 5).
+        return {"vacation_mode_enabled_at": now_ts, "vacation_mode_pattern": {}, "vacation_mode_pattern_until": 0,
+                "vacation_mode_pattern_prev": learned_pattern(data)}
     if was_on and not turn_on:
         return {
             "vacation_mode_periods": closed_periods(data.get("vacation_mode_periods") or [],
@@ -329,17 +405,23 @@ def restore_fields(live: dict, restored: dict, now_ts: float) -> dict:
     vacation bookkeeping describes what is really in the recorder: keep its
     spans, and apply the on/off change the restore makes as a switch. A
     vacation restored ON starts now with a fresh pattern, never an old one."""
-    out = {"vacation_mode_periods": list(live.get("vacation_mode_periods") or [])}
+    out = {"vacation_mode_periods": list(live.get("vacation_mode_periods") or []),
+           "vacation_mode_pattern_prev": learned_pattern(live),
+           "vacation_mode_tracked_since": live.get("vacation_mode_tracked_since") or 0}
     turn_on = bool(restored.get("vacation_mode_enabled"))
     out.update(switch_fields({**live, **out}, turn_on, now_ts))
     if turn_on and live.get("vacation_mode_enabled"):
         for k in ("vacation_mode_enabled_at", "vacation_mode_pattern",
                   "vacation_mode_pattern_until", "vacation_mode_pattern_built_at"):
             out[k] = live.get(k)
-    elif turn_on:
-        out.update(vacation_mode_pattern={}, vacation_mode_pattern_until=0, vacation_mode_pattern_built_at=0)
     else:
-        out.setdefault("vacation_mode_enabled_at", 0)
+        # Restored on as a new vacation, or off: the backup's own pattern is
+        # never let back in — the live one is already kept as prev, and an
+        # older backup's would otherwise outrank it at the next switch-on
+        # (round 6).
+        out.update(vacation_mode_pattern={}, vacation_mode_pattern_until=0, vacation_mode_pattern_built_at=0)
+        if not turn_on:
+            out.setdefault("vacation_mode_enabled_at", 0)
     return out
 
 
@@ -367,14 +449,25 @@ async def _async_refresh_pattern_if_stale(hass: HomeAssistant, st: Any) -> None:
     attempt = st.data.get("vacation_mode_pattern_attempt") or [0, 0]
     if attempt[0] == enabled_at and now_ts - attempt[1] < RETRY_EMPTY_S:
         return
-    entity_ids = _eligible_entity_ids(hass)
+    # Every light and fan is learned; which of them to switch is decided at
+    # each tick. A WLED strip offline right now still gets its main light
+    # learned, and switched once it's back (round 5).
+    entity_ids = [eid for eid in hass.states.async_entity_ids() if eid.startswith(VM_DOMAINS)]
     end = dt_util.utc_from_timestamp(enabled_at)
     history = await _async_fetch_history(hass, entity_ids, HISTORY_DAYS, end=end)
-    pattern = build_pattern(history, dt_util.as_local(end),
-                            exclude=st.data.get("vacation_mode_periods") or []) if history else {}
+    if history is None:
+        # The query failed: retry in 15 minutes, not every tick and not after
+        # the hour an empty answer waits.
+        await st.async_set(vacation_mode_pattern_attempt=[enabled_at, now_ts - RETRY_EMPTY_S + RETRY_FAILED_S])
+        return
+    # Pure and CPU-bound over up to 30 days of every light: off the event loop.
+    pattern = await hass.async_add_executor_job(
+        build_pattern, history, dt_util.as_local(end), HISTORY_DAYS,
+        st.data.get("vacation_mode_periods") or []) if history else {}
     if not pattern:
-        _LOGGER.warning("Vacation mode: no usable light history before it was switched on; "
-                        "it will not switch anything until there is (next try in an hour)")
+        _LOGGER.warning("Vacation mode: no usable light history before it was switched on; %s (next try in an hour)",
+                        "using the pattern learned before the last vacation" if st.data.get("vacation_mode_pattern_prev")
+                        else "it will not switch anything until there is")
         await st.async_set(vacation_mode_pattern_attempt=[enabled_at, now_ts])
         return
     await st.async_set(vacation_mode_pattern=pattern, vacation_mode_pattern_built_at=now_ts,
@@ -425,6 +518,18 @@ async def _async_tick(hass: HomeAssistant) -> None:
     if not st.data.get("vacation_mode_enabled"):
         return
     pattern = st.data.get("vacation_mode_pattern") or {}
+    # A pattern built for THIS vacation — or, while its build is failing or
+    # finds nothing, the last one learned before a vacation (learned_pattern);
+    # never a stored pattern older rules may have learned from Vacation
+    # Mode's own switching (rounds 4-5).
+    enabled_at = st.data.get("vacation_mode_enabled_at") or 0
+    until = st.data.get("vacation_mode_pattern_until") or st.data.get("vacation_mode_pattern_built_at") or 0
+    if enabled_at and until < enabled_at:        # same rule as the refresh's
+        pattern = st.data.get("vacation_mode_pattern_prev") or {}
+    # A pattern built under older rules may name lights the current ones
+    # leave out (group members, team followers): apply the rules now.
+    eligible = set(_eligible_entity_ids(hass))
+    pattern = {eid: b for eid, b in pattern.items() if eid in eligible}
     if not pattern:
         return
     intensity = st.data.get("vacation_mode_intensity")

@@ -1,0 +1,337 @@
+// PadSpan Bright — BLE Room-Presence Tracking for Home Assistant
+// Copyright (C) 2026 Garry Broeckling
+// Licensed under the GNU General Public License v3.0
+// See LICENSE file or https://www.gnu.org/licenses/gpl-3.0.html
+/**
+ * WLED workbench — LEDs: the device's LED outputs and power, and the
+ * colour-order wizard. The hardware settings people get wrong most, so:
+ *
+ * - Checked before saving, in words: duplicate pins, input-only pins, pins
+ *   another feature holds (WLED 16's /json/pins), the chip's LED limit, the
+ *   per-output limit, outputs that overlap or leave LEDs to no output.
+ * - Saved through the safe config write (backup first, refused over a device
+ *   that changed meanwhile), with hw.led.ins always sent whole — WLED
+ *   replaces every output from that list. Output changes apply live.
+ * - Colour-order wizard (no WLED tool has one; people guess — WLED discourse
+ *   t/12574): the output lights pure red, green, blue; you tap what you see;
+ *   the true order follows (wled_model.orderFromObservation). Everything is
+ *   put back afterwards.
+ *
+ * Administrators only: a wrong pin or length changes real hardware.
+ */
+
+const _q = new URL(import.meta.url).search;
+const M = await import(`./wled_model.js${_q}`);
+const { C, S, h, numberBox, check, select, field, errText, reportCfg } = await import(`./wled_ui.js${_q}`);
+
+export function ledsView(ctx) {
+  const root = h("div");
+  const status = h("div", { style: `font-size:12px;color:${C.dim}` }, "Reading the LED settings…");
+  root.appendChild(status);
+  (async () => {
+    let cfg, hash, pins = null;
+    try {
+      ({ data: cfg, hash } = await ctx.call("padspan_bright/wled_get", { path: "json/cfg" }));
+      if (M.has(ctx.info, "pins")) pins = await ctx.get("json/pins").catch(() => null);
+    } catch (e) { status.textContent = "Couldn't read the settings: " + errText(e); status.style.color = C.red; return; }
+    status.remove();
+    root.appendChild(editor(ctx, cfg, hash, Array.isArray(pins) ? pins : null));
+    root.appendChild(matrixCard(ctx, cfg));
+  })();
+  return root;
+}
+
+// ── 2D matrix: panels, start corner, direction, serpentine — with a wiring
+// preview like WLED's own 2D page (first LED green, last red, the path). ──
+function matrixCard(ctx, cfg) {
+  const mx = (cfg.hw && cfg.hw.led && cfg.hw.led.matrix) || null;
+  const draft = { enabled: !!mx, panels: JSON.parse(JSON.stringify((mx && mx.panels) || [])) };
+  const ro = !ctx.isAdmin;
+  const card = h("div", { style: S.card + ";margin-top:10px" });
+  const body = h("div");
+  const paint = () => {
+    body.innerHTML = "";
+    body.appendChild(h("div", { style: "display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px" }, [
+      h("b", {}, "2D matrix"),
+      ro ? h("span", { style: `font-size:12px;color:${C.dim}` }, draft.enabled ? `${draft.panels.length} panel(s)` : "not a matrix")
+        : check("This device drives a matrix", draft.enabled, v => { draft.enabled = v; if (v && !draft.panels.length) draft.panels.push({ b: 0, r: 0, v: 0, s: 1, x: 0, y: 0, w: 8, h: 8 }); paint(); }),
+    ]));
+    if (!draft.enabled) return;
+    draft.panels.forEach((p, i) => {
+      const row = h("div", { style: "display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin:4px 0" }, [
+        h("b", { style: "font-size:12px;width:56px" }, `Panel ${i + 1}`),
+        field("Width", ro ? h("span", {}, String(p.w)) : numberBox(p.w, v => { p.w = v; paint(); }, { min: 1, max: 256, width: 50 })),
+        field("Height", ro ? h("span", {}, String(p.h)) : numberBox(p.h, v => { p.h = v; paint(); }, { min: 1, max: 256, width: 50 })),
+        field("X", ro ? h("span", {}, String(p.x)) : numberBox(p.x || 0, v => { p.x = v; paint(); }, { max: 1024, width: 50 })),
+        field("Y", ro ? h("span", {}, String(p.y)) : numberBox(p.y || 0, v => { p.y = v; paint(); }, { max: 1024, width: 50 })),
+        field("First LED at", ro ? h("span", {}, `${p.b ? "bottom" : "top"}-${p.r ? "right" : "left"}`)
+          : select([["tl", "Top left"], ["tr", "Top right"], ["bl", "Bottom left"], ["br", "Bottom right"]],
+            `${p.b ? "b" : "t"}${p.r ? "r" : "l"}`, v => { p.b = v[0] === "b" ? 1 : 0; p.r = v[1] === "r" ? 1 : 0; paint(); })),
+        field("Runs", ro ? h("span", {}, p.v ? "in columns" : "in rows")
+          : select([[0, "In rows"], [1, "In columns"]], p.v ? 1 : 0, v => { p.v = Number(v); paint(); })),
+        ro ? null : check("Serpentine", p.s, v => { p.s = v ? 1 : 0; paint(); }, "Every other row runs back the other way"),
+        ro || draft.panels.length < 2 ? null : h("button", { style: S.btn + `;color:${C.red}`, onclick: () => { draft.panels.splice(i, 1); paint(); } }, "✕"),
+      ].filter(Boolean));
+      body.appendChild(row);
+    });
+    body.appendChild(matrixPreview(draft.panels));
+    if (ro) return;
+    const bar = h("div", { style: "display:flex;gap:6px;margin-top:8px;flex-wrap:wrap" });
+    if (draft.panels.length < 18) bar.appendChild(h("button", { style: S.btn, onclick: () => {
+      const last = draft.panels[draft.panels.length - 1] || { x: 0, y: 0, w: 8, h: 8 };
+      draft.panels.push({ ...last, x: (last.x || 0) + (last.w || 8) }); paint();
+    } }, "+ Panel to the right"));
+    body.appendChild(bar);
+  };
+  paint();
+  card.appendChild(body);
+  if (!ro) card.appendChild(h("button", { style: S.btnPrimary + ";margin-top:8px", onclick: async () => {
+    if (!confirm((draft.enabled ? `Save this ${draft.panels.length}-panel matrix?` : "Turn the matrix off (a plain strip)?")
+      + "\n\nWLED rebuilds every segment after this — your segment layout starts over. The device is backed up first.")) return;
+    try {
+      await ctx.call("padspan_bright/wled_matrix", { enabled: draft.enabled, panels: draft.panels });
+      ctx.toast("Matrix saved — segments were rebuilt (backup taken first)");
+      const si = await ctx.get("json/si");
+      ctx.info = si.info || ctx.info; ctx.state = si.state || ctx.state;
+      ctx.repaint();
+    } catch (e) { ctx.toast("Couldn't save the matrix: " + errText(e), true); }
+  } }, "Save matrix"));
+  return card;
+}
+
+function matrixPreview(panels) {
+  const W = Math.max(1, ...panels.map(p => (p.x || 0) + (p.w || 1)));
+  const H = Math.max(1, ...panels.map(p => (p.y || 0) + (p.h || 1)));
+  const cell = Math.max(3, Math.min(22, Math.floor(640 / Math.max(W, H))));
+  let svg = `<svg viewBox="0 0 ${W * cell} ${H * cell}" width="100%" style="max-height:320px;background:#071008;border-radius:8px">`;
+  panels.forEach((p, i) => {
+    const ox = (p.x || 0) * cell, oy = (p.y || 0) * cell;
+    svg += `<rect x="${ox}" y="${oy}" width="${p.w * cell}" height="${p.h * cell}" fill="none" stroke="#c084fc" stroke-width="1.5" opacity=".7"/>`;
+    const path = M.panelPath(p);
+    if (path.length <= 4096) {
+      svg += `<polyline fill="none" stroke="#8ee5b4" stroke-width="1" opacity=".55" points="${path.map(([x, y]) => `${ox + (x + 0.5) * cell},${oy + (y + 0.5) * cell}`).join(" ")}"/>`;
+    }
+    const [fx, fy] = path[0], [lx, ly] = path[path.length - 1];
+    svg += `<circle cx="${ox + (fx + 0.5) * cell}" cy="${oy + (fy + 0.5) * cell}" r="${Math.max(2, cell / 3)}" fill="#22c55e"/>`;
+    svg += `<circle cx="${ox + (lx + 0.5) * cell}" cy="${oy + (ly + 0.5) * cell}" r="${Math.max(2, cell / 3)}" fill="#ef4444"/>`;
+    svg += `<text x="${ox + 4}" y="${oy + 12}" font-size="11" fill="#c084fc">${i + 1}</text>`;
+  });
+  svg += "</svg>";
+  const d = h("div", { style: "margin-top:6px" });
+  d.innerHTML = svg;
+  d.appendChild(h("div", { style: `font-size:11px;color:${C.faint}` }, "Green: the first LED of each panel · red: its last · the line is the wiring."));
+  return d;
+}
+
+function editor(ctx, cfg, hash, pins) {
+  const led = JSON.parse(JSON.stringify((cfg.hw && cfg.hw.led) || {}));
+  led.ins = Array.isArray(led.ins) ? led.ins : [];
+  Object.defineProperty(led, "_saved", { value: JSON.parse(JSON.stringify(led.ins)), enumerable: false });
+  const ro = !ctx.isAdmin;
+  const wrap = h("div");
+  const warnBox = h("div");
+  const perBus = M.has(ctx.info, "perBusCurrent");
+
+  const paintWarnings = () => {
+    warnBox.innerHTML = "";
+    const w = M.outputWarnings(led.ins, ctx.info, pins);
+    if (!w.length) return;
+    warnBox.appendChild(h("div", { style: S.card + ";border-color:rgba(251,191,36,.45)" },
+      w.map(t => h("div", { style: `font-size:12px;color:${C.amber};margin:2px 0` }, "⚠ " + t))));
+  };
+
+  // ── Power ──
+  const power = h("div", { style: S.card });
+  power.appendChild(h("div", { style: "font-weight:700;margin-bottom:6px" }, "Power"));
+  const leds = ctx.info.leds || {};
+  power.appendChild(h("div", { style: `font-size:12px;color:${C.dim};margin-bottom:6px` },
+    leds.pwr !== undefined ? `Drawing about ${leds.pwr} mA now (WLED's estimate).` : ""));
+  const txt = (v) => h("span", { style: "font-size:12px" }, String(v));
+  // The global mA-per-LED is 0.14's; 0.15+ ignores it (per output instead).
+  const globalLedma = "ledma" in led && M.wledGen(ctx.info) < 15;
+  power.appendChild(h("div", { style: "display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end" }, [
+    field("Power supply limit (mA, 0 = none)", ro ? txt(led.maxpwr ?? 0) : numberBox(led.maxpwr ?? 0, v => { led.maxpwr = v; }, { max: 65000, width: 90 }),
+      "WLED dims everything to stay under this — set it to your supply's rating, less a margin"),
+    globalLedma ? field("mA per LED", ro ? txt(led.ledma) : numberBox(led.ledma ?? 55, v => { led.ledma = v; }, { max: 255 })) : null,
+    field("Frame rate limit (0 = none)", ro ? txt(led.fps ?? 42) : numberBox(led.fps ?? 42, v => { led.fps = v; }, { max: 250 })),
+  ].filter(Boolean)));
+  const whites = h("div", { style: "margin-top:8px" });
+  if ("cct" in led) whites.appendChild(ro ? txt(`White balance correction: ${led.cct ? "on" : "off"}  `) : check("Correct white balance", led.cct, v => { led.cct = v; }));
+  if ("cr" in led) whites.appendChild(ro ? txt(`White from RGB: ${led.cr ? "on" : "off"}`) : check("White from RGB (CCT)", led.cr, v => { led.cr = v; }));
+  if (whites.childNodes.length) power.appendChild(whites);
+
+  // ── Outputs ──
+  const outputs = h("div");
+  const paintOutputs = () => {
+    outputs.innerHTML = "";
+    led.ins.forEach((b, i) => outputs.appendChild(busCard(ctx, led, b, i, perBus, ro, () => { paintWarnings(); paintOutputs(); })));
+    if (!ro && led.ins.length < 10) outputs.appendChild(h("button", { style: S.btn, onclick: () => {
+      const last = led.ins[led.ins.length - 1];
+      const start = last ? (last.start || 0) + (Number(last.len) || 0) : 0;
+      led.ins.push({ start, len: 30, pin: [-1], order: 0, rev: false, skip: 0, type: 22, ref: false, rgbwm: 0, freq: 0 });
+      paintWarnings(); paintOutputs();
+    } }, "+ Add an output"));
+  };
+  paintOutputs();
+  paintWarnings();
+
+  wrap.appendChild(warnBox);
+  wrap.appendChild(power);
+  wrap.appendChild(h("div", { style: "font-weight:700;margin:4px 0 6px" }, `LED outputs (${led.ins.length})`));
+  wrap.appendChild(outputs);
+  if (ro) {
+    wrap.appendChild(h("div", { style: `font-size:12px;color:${C.faint};margin-top:6px` }, "An administrator can change the LED outputs."));
+    return wrap;
+  }
+  wrap.appendChild(h("button", { style: S.btnPrimary + ";margin-top:8px", onclick: async () => {
+    const blockers = M.outputBlockers(led.ins, led._saved);
+    if (blockers.length) { ctx.toast(blockers[0], true); return; }
+    const w = M.outputWarnings(led.ins, ctx.info, pins);
+    const summary = led.ins.map((b, i) => `${i + 1}: ${M.typeName(b.type)}, ${b.len} LEDs from ${b.start}, `
+      + (M.busKind(b.type) === "network" ? `to ${(b.pin || []).join(".")}` : `GPIO ${(b.pin || []).slice(0, M.busPinCount(b.type)).join("+")}`)
+      + `, ${M.orderName(b.order)}`).join("\n");
+    if (!confirm(`Save these LED outputs?\n\n${summary}${w.length ? "\n\n⚠ " + w.join("\n⚠ ") : ""}\n\nThe device is backed up first.`)) return;
+    const patch = { hw: { led: { ...led, ins: led.ins.map(({ _i, ...b }) => b) } } };
+    delete patch.hw.led.total;               // informational only
+    try {
+      const r = await ctx.call("padspan_bright/wled_cfg", { patch, base_hash: hash });
+      reportCfg(ctx, r, "LED outputs saved");
+      const si = await ctx.get("json/si");
+      ctx.info = si.info || ctx.info; ctx.state = si.state || ctx.state;
+      ctx.repaint();
+    } catch (e) { ctx.toast("Couldn't save: " + errText(e), true); }
+  } }, "Save LED outputs"));
+  return wrap;
+}
+
+function busCard(ctx, led, b, i, perBus, ro, changed) {
+  const kind = M.busKind(b.type);
+  const card = h("div", { style: S.card });
+  const cur = b.type & 0x7f;
+  const types = Object.entries(M.BUS_TYPES).map(([id, name]) => [Number(id), name])
+    .filter(([id]) => M.busKind(id) !== "hub75")               // HUB75 needs its own panel values: not offered
+    .sort((a, b) => a[1].localeCompare(b[1]));
+  if (!types.some(([id]) => id === cur)) types.unshift([cur, M.typeName(cur)]);   // keep what the device has
+  const set = (patch) => { Object.assign(b, patch); changed(); };
+  card.appendChild(h("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px" }, [
+    h("b", {}, `Output ${i + 1}`),
+    h("span", { style: `font-size:11px;color:${C.dim}` }, `LEDs ${b.start || 0}–${(b.start || 0) + (Number(b.len) || 0) - 1}`),
+    ro ? null : h("button", { style: S.btn + `;margin-left:auto;color:${C.red}`, onclick: () => {
+      if (confirm(`Remove output ${i + 1}?`)) { led.ins.splice(i, 1); changed(); }
+    } }, "Remove"),
+  ].filter(Boolean)));
+  const grid = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px" });
+  // A new kind of type starts with fresh pins — never leftover GPIOs read
+  // as IP octets or the other way round (rounds 5-6: M.retypedOutput).
+  grid.appendChild(field("LED type", ro || kind === "hub75" ? h("span", {}, M.typeName(b.type))
+    : select(types, cur, v => {
+      const nb = M.retypedOutput(b, v);
+      for (const k of Object.keys(b)) if (!(k in nb)) delete b[k];
+      set(nb);
+    }, "100%")));
+  grid.appendChild(field("First LED", ro ? h("span", {}, String(b.start || 0)) : numberBox(b.start || 0, v => set({ start: v }), { max: 16384 })));
+  grid.appendChild(field("How many LEDs", ro ? h("span", {}, String(b.len))
+    : numberBox(b.len || 0, v => set({ len: v }), { min: 1, max: kind === "network" ? 16384 : M.MAX_LEDS_PER_BUS })));
+  const pinN = M.busPinCount(b.type);
+  if (pinN) {
+    const labels = kind === "network" ? ["IP", "", "", ""] : kind === "2pin" ? ["Data GPIO", "Clock GPIO"] : pinN > 1 ? Array.from({ length: pinN }, (_, k) => `GPIO ${k + 1}`) : ["Data GPIO"];
+    const pinsRow = h("div", { style: "display:flex;gap:4px;align-items:center" });
+    for (let k = 0; k < pinN; k++) {
+      if (ro) pinsRow.appendChild(h("span", {}, String((b.pin || [])[k] ?? "–") + (k < pinN - 1 && kind === "network" ? "." : " ")));
+      else pinsRow.appendChild(numberBox((b.pin || [])[k] ?? -1, v => { b.pin = [...(b.pin || [])]; b.pin[k] = v; changed(); }, { min: -1, max: 255, width: 48 }));
+    }
+    grid.appendChild(field(kind === "network" ? "Send to (IP)" : labels.slice(0, pinN).join(" / "), pinsRow));
+  }
+  if (kind === "digital" || kind === "2pin") {
+    grid.appendChild(field("Colour order", ro ? h("span", {}, M.orderName(b.order))
+      : select(M.ORDERS.map(o => [o, o]), M.orderName(b.order), v => set({ order: M.orderCode(v, M.wSwapOf(b.order)) }))));
+    grid.appendChild(field("White channel swap", ro ? h("span", {}, M.W_SWAPS[M.wSwapOf(b.order)])
+      : select(M.W_SWAPS.map((n, k) => [k, n]), M.wSwapOf(b.order), v => set({ order: M.orderCode(M.orderName(b.order), Number(v)) }))));
+    grid.appendChild(field("Skip first LEDs", ro ? h("span", {}, String(b.skip || 0)) : numberBox(b.skip || 0, v => set({ skip: v }), { max: 255 }),
+      "For a sacrificial first LED used as a level shifter"));
+  }
+  if (perBus && kind !== "network" && kind !== "onoff" && kind !== "pwm") {
+    grid.appendChild(field("This output's limit (mA)", ro ? h("span", {}, String(b.maxpwr ?? 0)) : numberBox(b.maxpwr ?? 0, v => set({ maxpwr: v }), { max: 65000, width: 80 })));
+    grid.appendChild(field("mA per LED", ro ? h("span", {}, String(b.ledma ?? 55)) : numberBox(b.ledma ?? 55, v => set({ ledma: v }), { max: 255, width: 60 }),
+      "55 for most 5 V strips; lower for 12 V"));
+  }
+  card.appendChild(grid);
+  const opts = h("div", { style: "margin-top:8px" });
+  if (!ro) {
+    opts.appendChild(check("Reversed", b.rev, v => set({ rev: v }), "The strip is wired from the far end"));
+    if (kind === "digital") opts.appendChild(check("Refresh when off", !!(b.type & 0x80) || b.ref, v => set({ ref: v })));
+  } else {
+    opts.appendChild(h("span", { style: `font-size:12px;color:${C.dim}` }, b.rev ? "Reversed" : "Not reversed"));
+  }
+  card.appendChild(opts);
+  if (!ro && (kind === "digital" || kind === "2pin") && !(ctx.info.leds && ctx.info.leds.matrix)) {
+    card.appendChild(h("button", { style: S.btn + ";margin-top:6px", title: "Lights this output red, green then blue — tap what you see", onclick: () => {
+      // The wizard lights what the DEVICE has; unsaved edits to this output
+      // would make its answer about the wrong thing (round 5).
+      const saved = (led._saved || [])[i];
+      if (!saved || saved.start !== b.start || saved.len !== b.len || saved.order !== b.order || saved.type !== b.type) {
+        ctx.toast("Save this output's changes first — the wizard works on what the device is running", true); return;
+      }
+      colourWizard(ctx, led, b, i, changed);
+    } }, "🎨 Colour-order wizard"));
+  }
+  return card;
+}
+
+// Show pure R, G, B on this output; the person taps what they actually see.
+async function colourWizard(ctx, led, bus, i, changed) {
+  // What the lights are doing NOW — the tab's copy may be minutes old, and
+  // HA or an automation may have changed them since (round 6).
+  let saved;
+  try { saved = (await ctx.get("json/si")).state || ctx.state; }
+  catch (e) { ctx.toast("Couldn't read the device: " + errText(e), true); return; }
+  saved = JSON.parse(JSON.stringify(saved));
+  const start = bus.start || 0, stop = start + (Number(bus.len) || 0);
+  const answers = {};
+  const overlay = h("div", { style: "position:fixed;inset:0;z-index:10001;background:rgba(3,8,5,.7);display:flex;align-items:center;justify-content:center" });
+  const box = h("div", { style: "background:#101f15;border:1px solid " + C.line + ";border-radius:14px;padding:18px;width:320px;max-width:92vw;color:" + C.text });
+  overlay.appendChild(box); document.body.appendChild(overlay);
+  const show = async (rgb) => ctx.post({ on: true, bri: 128, tt: 0, seg: [
+    { id: 0, start, stop, on: true, bri: 255, fx: 0, frz: false, col: [rgb, [0, 0, 0], [0, 0, 0]] },
+    ...(saved.seg || []).filter(s => s.id !== 0).map(s => ({ id: s.id, on: false })),
+  ] });
+  // Put the lights back WITHOUT repainting the tab: a repaint would re-read
+  // the device and throw away the wizard's answer before Save (round 5).
+  const restore = async () => {
+    overlay.remove();
+    try {
+      // Split to fit the device's buffer, like the backend's identify restore.
+      for (const body of M.restoreBodies(saved, ctx.info)) ctx.state = await ctx.post(body) || ctx.state;
+      if (Number(saved.pl) > 0) await ctx.post({ ps: saved.pl });       // resume a running playlist
+    } catch (e) { ctx.toast("Couldn't put the lights back: " + errText(e), true); }
+  };
+  const ask = (label, rgb) => new Promise(async (resolve) => {
+    box.innerHTML = "";
+    box.appendChild(h("div", { style: "font-weight:700;margin-bottom:8px" }, `Output ${i + 1} — step ${Object.keys(answers).length + 1} of 3`));
+    box.appendChild(h("div", { style: "font-size:13px;margin-bottom:10px" }, `The LEDs on this output should now be pure ${label}. What colour are they?`));
+    try { await show(rgb); } catch (e) { box.appendChild(h("div", { style: `color:${C.red}` }, errText(e))); }
+    const row = h("div", { style: "display:flex;gap:8px" });
+    for (const [ch, name, col] of [["R", "Red", "#ef4444"], ["G", "Green", "#22c55e"], ["B", "Blue", "#3b82f6"]]) {
+      row.appendChild(h("button", { style: S.btn + `;flex:1;border-color:${col};color:${col};font-weight:700`, onclick: () => resolve(ch) }, name));
+    }
+    box.appendChild(row);
+    box.appendChild(h("button", { style: S.btn + ";margin-top:10px;width:100%", onclick: () => resolve(null) }, "Cancel"));
+  });
+  try {
+    for (const [ch, label, rgb] of [["R", "red", [255, 0, 0]], ["G", "green", [0, 255, 0]], ["B", "blue", [0, 0, 255]]]) {
+      const seen = await ask(label, rgb);
+      if (!seen) { await restore(); return; }
+      answers[ch] = seen;
+    }
+    const order = M.orderFromObservation(bus.order, answers);
+    await restore();
+    if (!order) { ctx.toast("Those answers don't add up to a colour order — try again, one colour each", true); return; }
+    if (order === M.orderName(bus.order)) { ctx.toast(`${order} is already right for output ${i + 1}`); return; }
+    bus.order = M.orderCode(order, M.wSwapOf(bus.order));
+    changed();
+    ctx.toast(`Output ${i + 1} should be ${order} — press "Save LED outputs" to keep it`);
+  } catch (e) {
+    await restore();
+    ctx.toast("The wizard stopped: " + errText(e), true);
+  }
+}

@@ -12,7 +12,7 @@
 // what an interaction does (sidebar: control the light — tab: place it).
 
 const { buildIsoSVG, shapeSvg, fabricFrame, sampleSceneField, pointInPolygon, offsetPolygonInward,
-        lightClassOf, SHOWCASE_THEMES, AUTOMORPH_STYLE_LABELS, floodLatchActive } =
+        lightClassOf, SHOWCASE_THEMES, AUTOMORPH_STYLE_LABELS, floodLatchActive, barrierNoReading } =
   await import(`./iso_lights.js${new URL(import.meta.url).search}`);
 const { assignLightCodes, resolveLightShape, LIGHT_SHAPES, LIGHT_TYPE_OVERRIDES,
         TEMP_BORDER, healthOf,
@@ -408,10 +408,18 @@ export function floodIsAlarming(l, floodLatches){
 // two hosts build that button in genuinely different DOM idioms (mk() vs
 // el()) — unifying the WORD and the SORT VALUE retires the actual
 // duplicated logic; the markup stays each host's own.
-export function stateWordOf(l, floodLatches){
+// A door or lock reads by the same rules the Atlas draws it by (round 6):
+// barrierNoReading's "no reading", and a door's own invert_state
+// (doorInvert: {entity_id: true} — doorInvertOf(model)).
+export const doorInvertOf = (model) => Object.fromEntries((model?.rf_barriers_m || [])
+  .filter(b => b.linked_entity_id).map(b => [b.linked_entity_id, !!b.invert_state]));
+export function stateWordOf(l, floodLatches, doorInvert){
   if (l.isMotion) {
     const on = l.state === "on";
     return { text: on ? "MOTION" : "clear", lit: on, sortValue: on ? 1 : 0 };
+  }
+  if ((l.isLock || l.isDoor) && barrierNoReading(l)) {
+    return { text: "NO READING", lit: false, sortValue: -1 };
   }
   if (l.isLock) {
     const jammed = l.state === "jammed";
@@ -431,7 +439,7 @@ export function stateWordOf(l, floodLatches){
     return { text: airQualityLabel(l), lit: false, sortValue: Number.isFinite(b) ? b : -Infinity };
   }
   if (l.isDoor) {
-    const on = l.state === "on";
+    const on = (l.state === "on") !== !!(doorInvert && doorInvert[l.entity_id]);
     return { text: on ? "OPEN" : "CLOSED", lit: on, sortValue: on ? 1 : 0 };
   }
   if (l.isFlood) {
@@ -964,7 +972,7 @@ export function openAggregateSheet(api, { title, sub, items, actions }){
     const col = classBorder(l, "#52b788");
     row.appendChild(mk("span", _S.code + `;color:${col}`, l.code));
     row.appendChild(mk("span", _S.name, l.friendly_name));
-    const sw = stateWordOf(l, api.floodLatches);
+    const sw = stateWordOf(l, api.floodLatches, api.doorInvertByEid);
     if (sw) {
       row.appendChild(mk("span", _S.state(sw.lit), sw.text));
       if (l.isLock) {
@@ -1228,6 +1236,18 @@ function _mkEl(tag, attrs = {}, children = []){
   }
   return n;
 }
+// What both hosts hand openControlCard about a light, from the one registry
+// fetch they share — so the sidebar and the builder can't drift (they have
+// before). `wled` is present only for a light of HA's WLED integration: it
+// turns on the card's Advanced tab (views/wled_advanced.js).
+export function controlApiFor(reg, eid, { tier, isAdmin } = {}){
+  const platform = reg && reg.platformMap ? reg.platformMap[eid] : null;
+  return {
+    ip: (reg && reg.ipMap && reg.ipMap[eid]) || null,
+    wled: platform === "wled" ? { tier: tier || null, isAdmin: !!isAdmin } : null,
+  };
+}
+
 export function openControlCard(hass, eid, api){
   if (!hass) return;
   const st = hass.states[eid];
@@ -1429,6 +1449,46 @@ export function openControlCard(hass, eid, api){
     }
   }
 
+  // ── WLED: Controls | Advanced ────────────────────────────────────────
+  // Advanced (Bright Pro / Pro) is the full WLED workbench — segments,
+  // effects from the device's own metadata, and more (wled_advanced.js),
+  // reached through PadSpan's backend, never the browser (ws_wled.py).
+  if (api && api.wled && lightingUnlocked(api.wled.tier)) {
+    const controls = el("div");
+    // Everything after the header moves into the Controls pane.
+    for (const node of Array.from(box.children).slice(1)) { box.removeChild(node); controls.appendChild(node); }
+    const advanced = el("div", { style: "display:none" });
+    const tabBtn = (active) => "flex:1;padding:6px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;"
+      + (active ? "background:rgba(192,132,252,.16);color:#c084fc;border:1px solid #c084fc"
+                : "background:rgba(255,255,255,.04);color:#94a3b8;border:1px solid rgba(120,190,155,.18)");
+    const tControls = el("button", { style: tabBtn(true) }, "Controls");
+    const tAdvanced = el("button", { style: tabBtn(false) }, "Advanced");
+    let mounted = false;
+    const show = async (adv) => {
+      tControls.setAttribute("style", tabBtn(!adv)); tAdvanced.setAttribute("style", tabBtn(adv));
+      controls.style.display = adv ? "none" : "";
+      advanced.style.display = adv ? "" : "none";
+      // The workbench needs room: a wide sheet, scrolling inside the viewport.
+      box.style.width = adv ? "min(960px,96vw)" : "300px";
+      box.style.maxHeight = adv ? "92vh" : "";
+      box.style.overflow = adv ? "auto" : "";
+      if (adv && !mounted) {
+        mounted = true;
+        try {
+          const mod = await import(`./wled_advanced.js${new URL(import.meta.url).search}`);
+          await mod.mountWledAdvanced(advanced, { hass, eid, api });
+        } catch (e) {
+          advanced.textContent = "Couldn't open the WLED workbench: " + String((e && e.message) || e);
+        }
+      }
+    };
+    tControls.addEventListener("click", () => show(false));
+    tAdvanced.addEventListener("click", () => show(true));
+    box.appendChild(el("div", { style: "display:flex;gap:6px;margin-bottom:12px" }, [tControls, tAdvanced]));
+    box.appendChild(controls);
+    box.appendChild(advanced);
+  }
+
   overlay.appendChild(box);
   document.body.appendChild(overlay);
 }
@@ -1564,12 +1624,16 @@ export function openBarrierCard(hass, bar, api){
   if (!sensorSt && !openerSt && !lockSt) return; // nothing real to show a card for
 
   // ── Open/closed reading ────────────────────────────────────────────────
+  // An offline sensor or lock reads as no reading, the same as the Atlas
+  // draws it (barrierNoReading) — not "Open", not a red "Unlocked".
   let isOpen = null;
   if (sensorSt && sensorDomain !== "lock") {
-    isOpen = sensorDomain === "cover" ? sensorSt.state === "open" : (bar.invert_state ? sensorSt.state !== "on" : sensorSt.state === "on");
-  } else if (openerSt && openerDomain === "cover" && openerEid !== sensorEid) {
+    if (!barrierNoReading(sensorSt))
+      isOpen = sensorDomain === "cover" ? sensorSt.state === "open" : (bar.invert_state ? sensorSt.state !== "on" : sensorSt.state === "on");
+  } else if (openerSt && openerDomain === "cover" && openerEid !== sensorEid && !barrierNoReading(openerSt)) {
     isOpen = openerSt.state === "open";
   }
+  const lockRead = lockSt && !barrierNoReading(lockSt) ? lockSt : null;
 
   const overlay = document.createElement("div");
   overlay.style.cssText = "position:fixed;inset:0;background:rgba(3,8,5,.62);z-index:10000;"
@@ -1596,13 +1660,13 @@ export function openBarrierCard(hass, bar, api){
   if (isOpen === true) {
     stateLabel = "Open"; isAlert = true;
   } else if (isOpen === false) {
-    if (lockSt) {
-      stateLabel = lockSt.state === "locked" ? "Closed & Locked" : lockSt.state === "jammed" ? "Closed — Lock Jammed" : "Closed, Unlocked";
-      isAlert = lockSt.state !== "locked";
+    if (lockRead) {
+      stateLabel = lockRead.state === "locked" ? "Closed & Locked" : lockRead.state === "jammed" ? "Closed — Lock Jammed" : "Closed, Unlocked";
+      isAlert = lockRead.state !== "locked";
     } else { stateLabel = "Closed"; isAlert = false; }
-  } else if (lockSt) {
-    stateLabel = lockSt.state === "locked" ? "Locked" : lockSt.state === "jammed" ? "Jammed" : "Unlocked";
-    isAlert = lockSt.state !== "locked";
+  } else if (lockRead) {
+    stateLabel = lockRead.state === "locked" ? "Locked" : lockRead.state === "jammed" ? "Jammed" : "Unlocked";
+    isAlert = lockRead.state !== "locked";
   } else {
     stateLabel = "No reading"; isAlert = false;
   }
@@ -3341,7 +3405,7 @@ export function buildLightsTable(host, lights){
     // openAggregateSheet and this table's own render chain below; one of
     // those three had already drifted (the flood latch was invisible to
     // this exact sort key until fixed by hand, separately, the same day).
-    ["state", "State", (l) => { const sw = stateWordOf(l, host.floodLatches); return sw ? sw.sortValue : (l.state === "on" ? 1 : 0); }],
+    ["state", "State", (l) => { const sw = stateWordOf(l, host.floodLatches, host.doorInvertByEid); return sw ? sw.sortValue : (l.state === "on" ? 1 : 0); }],
   ];
   const th = (key, label, extraStyle) => {
     if (!key || !host.onTableSort) return el("th", { style: extraStyle || "" }, label);
@@ -3469,7 +3533,7 @@ export function buildLightsTable(host, lights){
         // room/floor sheet's, and this table's own separate sort key);
         // two had already drifted into live bugs (a locked lock read "Off"
         // here once, the flood latch was invisible to the sort key).
-        const sw = stateWordOf(l, host.floodLatches);
+        const sw = stateWordOf(l, host.floodLatches, host.doorInvertByEid);
         if (!sw) return el("span", { class: `lv-state ${on ? "on" : "off"}` }, on ? "ON" : "OFF");
         const stateSpan = el("span", { class: `lv-state ${sw.lit ? "on" : "off"}` }, sw.text);
         if (l.isFlood && sw.latched && host.onFloodReset) {

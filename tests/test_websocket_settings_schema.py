@@ -41,6 +41,9 @@ _BACKEND_ONLY = {
     "vacation_mode_enabled_at",        # stamped by settings_set on the off->on transition
     "vacation_mode_periods",           # appended by settings_set on the on->off transition
     "vacation_mode_pattern_attempt",   # vacation_mode.py — last empty build, for the hourly retry
+    "vacation_mode_pattern_prev",      # vacation_mode.py — the last learned pattern, kept across vacations
+    "vacation_mode_tracked_since",     # settings_store.py — stamped once on upgrade
+    "wled_teams",                      # padspan_bright/wled_teams_set (ws_wled.py), validated there
 }
 
 

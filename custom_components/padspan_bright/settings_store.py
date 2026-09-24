@@ -18,6 +18,7 @@ preserved on load (merged onto DEFAULT_SETTINGS).
 
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -112,6 +113,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "vacation_mode_pattern_until": 0,     # backend-only: epoch-s the pattern's history window ends at (the vacation's start)
     "vacation_mode_enabled_at": 0,        # backend-only: epoch-s this vacation began; 0 while off — the pattern never learns past it
     "vacation_mode_periods": [],          # backend-only: [[start, end], ...] earlier vacations, left out of every pattern build
+    "traceback_house_focus": 0,          # Traceback's Full house activity: the Atlas floor index it opens on (its own key — overview_iso_focus indexes photo floors)
+    "wled_teams": [],                     # backend-only (padspan_bright/wled_teams_set): WLED devices that act as one light — see ws_wled.py
+    "vacation_mode_tracked_since": 0,     # backend-only: epoch-s from which every vacation span is in vacation_mode_periods (stamped once on upgrade if Vacation Mode ran before spans were recorded; 0 = always) — vacation_mode.py learned_pattern
+    "vacation_mode_pattern_prev": {},     # backend-only: the last pattern learned before a vacation — stands in while a new vacation's build finds nothing (vacation_mode.py learned_pattern)
     "vacation_mode_pattern_attempt": [0, 0],  # backend-only: [enabled_at, epoch-s] of the last build that found nothing usable — retried hourly, not every tick
     "overview_show_walls": False,   # Overview: draw RF barrier walls over the map
     "overview_show_outdoor": False, # Overview: draw outdoor areas (sheds, driveways) as an overlay
@@ -275,6 +280,13 @@ class SettingsStore:
                 _normalized = True
         except Exception:
             pass
+        # Vacation Mode spans are recorded from this code on. An install
+        # that ran Vacation Mode before has unrecorded ones in the recorder
+        # until now (vacation_mode.py learned_pattern, round 6).
+        if isinstance(loaded, dict) and "vacation_mode_tracked_since" not in loaded:
+            ran = bool(loaded.get("vacation_mode_enabled") or loaded.get("vacation_mode_pattern")
+                       or loaded.get("vacation_mode_pattern_built_at"))
+            self.data["vacation_mode_tracked_since"] = time.time() if ran else 0
         # Only re-save if new defaults were added (loaded was missing keys)
         if _normalized or not isinstance(loaded, dict) or set(self.data.keys()) != set(loaded.keys()):
             await self.store.async_save(self.data)

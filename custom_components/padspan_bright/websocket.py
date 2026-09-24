@@ -323,6 +323,9 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_traceback_objects)
     websocket_api.async_register_command(hass, ws_insights_get)
     websocket_api.async_register_command(hass, ws_vacation_log_get)
+    # The Atlas WLED card's Advanced tab — a safe proxy to the device (ws_wled.py).
+    from .ws_wled import async_register as _wled_register
+    _wled_register(hass)
     websocket_api.async_register_command(hass, ws_flood_reset)
     websocket_api.async_register_command(hass, ws_notify_services_list)
     websocket_api.async_register_command(hass, ws_notify_test)
@@ -695,14 +698,17 @@ async def ws_traceback_get(hass: HomeAssistant, connection, msg) -> None:
     if not tb:
         connection.send_result(msg["id"], {"frames": [], "range": {"start": 0, "end": 0, "count": 0}})
         return
-    frames = tb.get_frames(
+    frames, matched = tb.get_frames(
         start_ts=msg.get("start_ts"),
         end_ts=msg.get("end_ts"),
         obj_key=msg.get("obj_key"),
         max_frames=msg.get("max_frames", 4000),
+        with_count=True,
     )
     connection.send_result(msg["id"], {
         "frames": frames,
+        # Frames the window held before evenly thinning to max_frames.
+        "matched": matched,
         "range": tb.get_time_range(),
     })
 
