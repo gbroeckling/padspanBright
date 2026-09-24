@@ -335,3 +335,79 @@ def test_the_merged_object_keeps_the_key_it_was_first_known_by():
     # The Apple display classifier reads "0x.." payloads through findmy's parser.
     i = src.index("_APPLE_SUBTYPES = {")
     assert "bytes.fromhex(apple_data)" not in src[i:i + 4000] and "apple_payload(manuf)" in src[i:i + 4000]
+
+
+def test_a_moved_tags_room_follows_its_live_address():
+    """Round 9: the object keeps the address it was named by (the first);
+    the room tracker smoothed THAT — silent since the change — and the tag's
+    room froze where it was. It reads current_address now."""
+    from tests.test_poll_level import make_coordinator, run_poll
+    radios = [{"source": "kit", "area_name": "Kitchen"}, {"source": "off", "area_name": "Office"}]
+    kitchen, office = {"kit": -50.0, "off": -90.0}, {"kit": -90.0, "off": -50.0}
+    ads = lambda addr, vec, age=1.0: [{"address": addr, "source": s, "rssi": r, "age_s": age} for s, r in vec.items()]  # noqa: E731
+    snap = lambda objs, adv: {"objects": {"list": objs}, "ble": {"advertisements": adv, "radios": radios}}  # noqa: E731
+    coord = make_coordinator()
+    key = "ble:" + KEYS_1
+    for _ in range(12):
+        r = run_poll(coord, snap([{"key": key, "kind": "ble", "address": KEYS_1, "name": "Keys"}], ads(KEYS_1, kitchen)))
+    assert r[key].get("room") == "Kitchen"
+    for _ in range(40):
+        o = {"key": key, "kind": "private_ble", "address": KEYS_1, "canonical_id": KEYS_1, "all_addresses": [KEYS_2, KEYS_1],
+             "current_address": KEYS_2, "findmy": True, "bridge_match": True, "name": "Keys", "room": "Office"}
+        r = run_poll(coord, snap([o], ads(KEYS_1, kitchen, age=400) + ads(KEYS_2, office)))
+    assert r[key].get("room") == "Office"
+
+
+def test_the_bluetooth_tab_knows_a_moved_tag_by_its_live_address():
+    """Round 9: the tab indexed objects by o.address only — the moved tag drew
+    as its raw live MAC, vanished in quiet mode, and the Monitor list called
+    it IRK-resolved with no Find My badge."""
+    import json
+    import shutil
+    import subprocess
+    from pathlib import Path
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node is not installed")
+    root = Path(__file__).resolve().parents[1]
+    r = subprocess.run([node, str(root / "tests" / "js" / "bt_findmy.mjs"), str(root).replace("\\", "/")],
+                       capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out == {"named": True, "quietShown": True, "findMyBadge": True, "irk": False}, out
+
+
+def test_a_wrong_link_can_be_undone_and_never_comes_back():
+    """Round 9: a visitor's tag linked as Keys stayed Keys for days (FORGET_S)
+    and relabelling it renamed Keys itself. 'Not this tag' undoes the link."""
+    b = F.FindMyBridge()
+    k = KEYS_1
+    _change(b, KEYS_1, KEYS_2, _separated(1), _separated(1, 0x22), KITCHEN, known={KEYS_1: k})
+    assert b.tags[k]["addr"] == KEYS_2
+    assert b.unlink(k, T0 + 150) == (KEYS_2, KEYS_1)
+    assert b.unlink(k, T0 + 151) is None, "nothing left to undo"
+    for t in (160, 260, 400):
+        r = _poll(b, t, {KEYS_1: _rec(_separated(1), KITCHEN, age=t + 1), KEYS_2: _rec(_separated(1, 0x22), KITCHEN)})
+        assert r["linked"] == [] and KEYS_2 not in r["map"], t
+    assert b.identity_of(KEYS_2) is None and b.identity_of(KEYS_1) == k
+    # Kept through a restart.
+    assert F.FindMyBridge(b.to_state()).tags[k]["refused"] == [KEYS_2]
+
+
+async def test_the_unlink_command_answers_for_the_objects_key():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from custom_components.padspan_bright import ws_objects as WO
+    from custom_components.padspan_bright.const import DOMAIN
+    b = F.FindMyBridge()
+    _change(b, KEYS_1, KEYS_2, _separated(1), _separated(1, 0x22), KITCHEN, known={KEYS_1: KEYS_1})
+    store = SimpleNamespace(async_delay_save=MagicMock())
+    hass = SimpleNamespace(data={DOMAIN: {"findmy_bridge": b, "findmy_bridge_store": store}})
+    sent = {}
+    conn = SimpleNamespace(send_result=lambda i, r: sent.update(result=r), send_error=lambda i, c, m: sent.update(error=c))
+    await WO.ws_findmy_unlink(hass, conn, {"id": 1, "key": "ble:" + KEYS_1.lower()})
+    assert sent["result"] == {"unlinked": KEYS_2, "back_to": KEYS_1}
+    store.async_delay_save.assert_called_once()
+    await WO.ws_findmy_unlink(hass, conn, {"id": 2, "key": "ble:" + KEYS_1})
+    assert sent["error"] == "not_linked"

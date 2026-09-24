@@ -127,6 +127,14 @@ export function render(ctx) {
     for (const o of objModel.list) {
       if (o && o.address) objIndex.set(String(o.address).toUpperCase(), o);
     }
+    // A merged object's other addresses too — a Find My tag's object keeps
+    // the address it was named by, and its live one is only here (round 9).
+    for (const o of objModel.list) {
+      for (const a of (o && o.all_addresses) || []) {
+        const k = String(a).toUpperCase();
+        if (!objIndex.has(k)) objIndex.set(k, o);
+      }
+    }
   }
 
   // ── Persistent view state ─────────────────────────────────────────────────
@@ -1061,7 +1069,7 @@ function renderMonitor(ctx, ads, radios, objIndex) {
     const subParts = [];
     if (addr) subParts.push(addr);
     if (xr.room) subParts.push(xr.room);
-    if (xr.canonical_id) subParts.push("IRK-resolved");
+    if (xr.canonical_id) subParts.push(xr.findmy ? "Find My tag, carried across address changes" : "IRK-resolved");
     if (xr.ibeacon_uuid) subParts.push("iBeacon");
 
     // Use stable identifier for tagging — private BLE uses canonical_id (IRK-derived),
@@ -1115,6 +1123,22 @@ function renderMonitor(ctx, ads, radios, objIndex) {
       sigEl(el, a.rssi),
     ]));
     if (xr.kind) card.appendChild(el("div", { class: "bt-chips" }, [kindBadge(xr.findmy ? "findmy" : xr.kind)]));
+    // A Find My tag carried onto this address by MAC Rotation Bridging: if
+    // it's the wrong tag, undo that link here (round 9 — otherwise it lasted
+    // days).
+    if (xr.findmy && xr.key && ctx.actions && ctx.actions.wsCall) {
+      card.appendChild(el("div", { style: "margin:6px 0 2px" }, [el("button", {
+        class: "btn inline", style: "font-size:12px",
+        title: "PadSpan linked this address to the tag when its last one stopped. If this is a different tag, undo it.",
+        onclick: async () => {
+          if (typeof confirm === "function" && !confirm(`Is this not ${hdrName}? PadSpan will stop treating this address as ${hdrName} and won't link it to it again.`)) return;
+          try {
+            await ctx.actions.wsCall("padspan_bright/findmy_unlink", { key: xr.key });
+            if (ctx.toast) ctx.toast(`Unlinked — this address is its own device again`);
+          } catch (e) { if (ctx.toast) ctx.toast("Couldn't unlink: " + ((e && (e.message || e.code)) || e), true); }
+        },
+      }, `Not ${hdrName}? Unlink`)]));
+    }
 
     // Section helper — a titled definition list, empty values skipped.
     // Addresses, UUIDs and hex get the mono treatment so they can be READ.
