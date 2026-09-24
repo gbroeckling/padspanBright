@@ -11,8 +11,9 @@
 // Everything either view renders comes from here; the hosts differ only in
 // what an interaction does (sidebar: control the light — tab: place it).
 
-const { buildIsoSVG, shapeSvg, fabricFrame, sampleSceneField, pointInPolygon, offsetPolygonInward,
-        lightClassOf, SHOWCASE_THEMES, AUTOMORPH_STYLE_LABELS, floodLatchActive, barrierNoReading } =
+const { buildIsoSVG, shapeSvg, fabricFrame, floorIdAtLevel, sampleSceneField, pointInPolygon, offsetPolygonInward,
+        lightClassOf, SHOWCASE_THEMES, AUTOMORPH_STYLE_LABELS, floodLatchActive, barrierNoReading,
+        isOutdoorFloorId } =
   await import(`./iso_lights.js${new URL(import.meta.url).search}`);
 const { assignLightCodes, resolveLightShape, LIGHT_SHAPES, LIGHT_TYPE_OVERRIDES,
         TEMP_BORDER, healthOf,
@@ -204,7 +205,7 @@ export const AUTOMORPH_STYLES = Object.entries(AUTOMORPH_STYLE_LABELS);
 // (iso_lights.js) rather than a hand-copied list, so a theme added there
 // shows up here for free and can never drift out of sync on the name/label.
 export const SHOWCASE_THEME_OPTIONS = Object.entries(SHOWCASE_THEMES).map(([key, t]) => [key, t.label]);
-export { lightClassOf };
+export { lightClassOf, isOutdoorFloorId };
 export function classMatches(l, cls){ return !cls || cls === "all" || lightClassOf(l) === cls; }
 
 // The index/room-sheet text for an air-quality reading: "1450 ppm · Poor".
@@ -255,14 +256,6 @@ export function roomAggregate(lights, roomName, floodLatches){
   const here = (lights || []).filter(l => l.area_name === roomName);
   return { room: roomName, ..._aggregateCounts(here, floodLatches), all: here };
 }
-// Mirrors const.OUTDOOR_FLOOR_NAMES / presence_rules.is_outdoor_floor: the
-// fabric's "__outside__" sentinel, the registry's "outside", and the plain
-// names people give a garden. An outdoor "floor" is not a storey.
-export function isOutdoorFloorId(fid){
-  const k = String(fid || "").trim().toLowerCase().replace(/\s+/g, "_");
-  return k === "__outside__" || k === "outside" || k === "outdoor" || k === "outdoors"
-      || k === "exterior" || k === "garden" || k === "yard";
-}
 // A device's floor: the room it is in (the fabric's room → floor), else the
 // floor it was placed on. A device with neither is on no floor.
 //
@@ -286,8 +279,27 @@ export function lightFloorId(l, model){
   return roomFid;
 }
 export function floorAggregate(lights, model, floorId, floodLatches){
-  const here = (lights || []).filter(l => lightFloorId(l, model) === String(floorId));
-  return { floorId: String(floorId), ..._aggregateCounts(here, floodLatches) };
+  // One floor id, or a Set of them (a whole slab: floorIdsOnSlab).
+  const ids = floorId instanceof Set ? floorId : new Set([String(floorId)]);
+  const here = (lights || []).filter(l => ids.has(lightFloorId(l, model)));
+  return { floorId: String(floorId instanceof Set ? [...floorId][0] ?? "" : floorId), ..._aggregateCounts(here, floodLatches) };
+}
+// Every floor id the drawing puts on the plate at storey z — a floor badge or
+// chip is the whole plate (two indoor floors can share one). Not the
+// outdoor floor: fabricFrame draws it on no plate (Overview's overlay only),
+// and a badge switching porch lights nobody can see on it was wrong (review
+// rounds 14-15).
+export function floorIdsOnSlab(frame, model, floors, z){
+  const ids = new Set((floors || []).map(f => String(f.id)));
+  for (const g of Object.values((model && model.room_geometry_m) || {})) if (g && g.floor_id) ids.add(String(g.floor_id));
+  for (const p of Object.values((model && model.light_positions_m) || {})) if (p && p.floor_id) ids.add(String(p.floor_id));
+  return new Set([...ids].filter(id => id !== "outside" && id !== "__outside__" && Number(frame.levelOf(id)) === Number(z)));
+}
+// The plate's name: every registry floor on it, joined — a sheet that
+// switches two floors names both (round 15).
+function _plateName(floors, onSlab){
+  return [...onSlab].map(id => (floors || []).find(x => String(x.id) === id)).filter(Boolean)
+    .map(f => f.name || f.id).join(" + ");
 }
 // The worst air-quality badness among these sensors, NaN when none reports.
 export function airWorstOf(airLights){
@@ -1059,18 +1071,29 @@ export function openRoomSheet(api, lights, room, onlyEids){
 const _FLOOR_SHEET_ALWAYS = new Set(["door", "temp", "humidity", "lock"]);
 export function openFloorSheet(api, lights, model, z){
   const floors = (model && model.floors) || [];
-  const f = floors.find(x => Number(x.level) === Number(z));
-  const fid = f ? String(f.id) : null;
+  // The floor the drawing put at this storey (floorIdAtLevel). Matching
+  // x.level found nothing on a real install — HA floors usually have no
+  // level, Number(null) is 0 — so every badge but the lowest said "No floor
+  // record", and a floor listed first by name could open for another
+  // storey's badge, its "All lights on" switching the wrong floor (review
+  // round 13).
+  const frame = fabricFrame(model || {}, floors, 150, 0);
+  const fid = floorIdAtLevel(frame, model, floors, z);
+  const f = fid ? floors.find(x => String(x.id) === fid) : null;
   if (!fid) { api.toast("No floor record for this storey"); return; }
-  const agg = floorAggregate(lights, model, fid, api.floodLatches);
+  const onSlab = floorIdsOnSlab(frame, model, floors, z);
+  const agg = floorAggregate(lights, model, onSlab, api.floodLatches);
   // The room sheet shows every class via agg.all; this hand-typed inclusion
   // list only ever named lights/fans/active-motion/air/alarming-flood, so a
   // door, temp, humidity or lock on this floor never appeared here at all —
   // found in the Phase 2a registry audit, 2026-09-19. By class KEY, not by
   // flag, so this stays one line however many classes end up in the set.
-  const items = lights.filter(l => agg.lightEids.includes(l.entity_id) || agg.fanEids.includes(l.entity_id) || (l.isMotion && l.state === "on")
-    || (l.isAir && lightFloorId(l, model) === String(fid)) || (l.isFlood && floodIsAlarming(l, api.floodLatches) && lightFloorId(l, model) === String(fid))
-    || (_FLOOR_SHEET_ALWAYS.has(lightClassOf(l)) && lightFloorId(l, model) === String(fid)));
+  // Motion on THIS plate — every active sensor in the house was listed on
+  // every floor's sheet under a header counting only this one's (round 15).
+  const items = lights.filter(l => agg.lightEids.includes(l.entity_id) || agg.fanEids.includes(l.entity_id)
+    || (l.isMotion && l.state === "on" && onSlab.has(lightFloorId(l, model)))
+    || (l.isAir && onSlab.has(lightFloorId(l, model))) || (l.isFlood && floodIsAlarming(l, api.floodLatches) && onSlab.has(lightFloorId(l, model)))
+    || (_FLOOR_SHEET_ALWAYS.has(lightClassOf(l)) && onSlab.has(lightFloorId(l, model))));
   const parts = [`Lights ${agg.lightsOn}/${agg.lightsTotal}`];
   if (agg.fansTotal) parts.push(`Fans ${agg.fansOn}/${agg.fansTotal}`);
   if (agg.motionActive) parts.push(`Motion ×${agg.motionActive}`);
@@ -1083,7 +1106,7 @@ export function openFloorSheet(api, lights, model, z){
     actions.push({ label: "All lights on", primary: true, run: () => api.setMany(agg.lightEids, true) });
   }
   if (agg.fanEids.length) actions.push({ label: "Fans off", run: () => api.setMany(agg.fanEids, false) });
-  openAggregateSheet(api, { title: f.name || `Floor ${z}`, sub: parts.join(" · "), items, actions });
+  openAggregateSheet(api, { title: _plateName(floors, onSlab) || (f && f.name) || `Floor ${z}`, sub: parts.join(" · "), items, actions });
 }
 
 // ── Weekly activity calendar (motion sensors) ────────────────────────────────
@@ -1811,15 +1834,17 @@ export function atlasLookFromSettings(s){
     automorphSubtlety: Number(s.lights_automorph_subtlety) || 0,
   };
 }
-// buildIsoSVG's options for that look, as the Atlas panel draws it for
-// viewing: codes as chips, a room's unplaced devices collapsed to one chip
-// (the same translation buildLightsMapCard's rebuildISO makes from its host).
+// buildIsoSVG's options for that look (the same translation
+// buildLightsMapCard's rebuildISO makes from its host), codes as chips like
+// the Atlas panel. Unplaced devices are NOT folded into one chip per room as
+// the panel does to stop mis-taps: a replay has no taps, and the fold hid
+// what an unplaced lock or sensor did (round 10).
 export function atlasIsoLookOpts(look, ambient){
   return {
     showcase: !!look.showcase, showcaseTheme: look.showcaseTheme || "classic",
     fitRooms: !!look.showcase && !!look.fitRooms, ambient,
     isolux: !!look.showcase && !!look.isolux,
-    codeChip: true, collapseUnplaced: true, hideCodes: !!look.hideDeviceCodes,
+    codeChip: true, hideCodes: !!look.hideDeviceCodes,
     automorph: !!look.automorph, automorphRoomPct: look.automorphRoomPct || 0,
     automorphHardness: look.automorphHardness || 0, automorphStyle: look.automorphStyle || "glow",
     automorphSubtlety: look.automorphSubtlety || 0,
@@ -2420,7 +2445,8 @@ export function buildLightsMapCard(hostIn){
   // Floors come from the FABRIC (which floors actually contain rooms/lights),
   // never from which photos happen to be uploaded. A floor with no plan image
   // is still a floor; a plan image is not a floor.
-  const sortedLevels = fabricFrame(host.model, floors, view.floorGap, view.horizGap).levels;
+  const _frame = fabricFrame(host.model, floors, view.floorGap, view.horizGap);
+  const sortedLevels = _frame.levels;
 
   // Focus positions: All, each floor, each adjacent pair
   const isoPos = [null];
@@ -2433,7 +2459,11 @@ export function buildLightsMapCard(hostIn){
     const pos = getFocusZ(idx);
     if (pos === null) return "All floors";
     const zArr = Array.isArray(pos) ? pos : [pos];
-    return zArr.map(z => { const f = floors.find(x => x.level === z); return f ? (f.name || `L${z}`) : `L${z}`; }).join(" + ");
+    // The drawing's own level -> floor mapping (floorIdAtLevel): HA floors
+    // usually have level null, and matching x.level named them "L0 / L1"
+    // (live check 2026-09-24).
+    return zArr.map(z => { const fid = floorIdAtLevel(_frame, host.model, floors, z); const f = floors.find(x => String(x.id) === fid);
+      return f ? (f.name || `L${z}`) : `L${z}`; }).join(" + ");
   };
   view.focusIdx = Math.max(0, Math.min(view.focusIdx, isoPos.length - 1));
 
@@ -3229,10 +3259,14 @@ export function buildLightsMapCard(hostIn){
       };
       bar.appendChild(mk("All", 0, null));
       for (const z of sortedLevels) {
-        const f = floors.find(x => Number(x.level) === z);
-        const fid = f ? String(f.id) : null;
-        const agg = fid ? floorAggregate(allLights, host.model, fid) : { lightsOn: 0, fansOn: 0, motionActive: 0 };
-        bar.appendChild(mk(f ? (f.name || `L${z}`) : `L${z}`, floorIdx(z),
+        // The same floor the slider names (floorIdAtLevel) — matching x.level
+        // gave "L1 · 0 on" on a real install (review round 13).
+        const fid = floorIdAtLevel(_frame, host.model, floors, z);
+        const f = fid ? floors.find(x => String(x.id) === fid) : null;
+        const onSlab = floorIdsOnSlab(_frame, host.model, floors, z);
+        const agg = fid ? floorAggregate(allLights, host.model, onSlab)
+          : { lightsOn: 0, fansOn: 0, motionActive: 0 };
+        bar.appendChild(mk(_plateName(floors, onSlab) || (f ? (f.name || `L${z}`) : `L${z}`), floorIdx(z),
           { on: agg.lightsOn + agg.fansOn, motion: agg.motionActive }));
       }
       // Find active — scroll the drawing to the first device that is doing

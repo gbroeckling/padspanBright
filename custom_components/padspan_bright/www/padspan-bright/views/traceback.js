@@ -217,6 +217,15 @@ export function render(ctx) {
   // PadSpan Pro specifically — below Pro the switch is not offered at all.
   const _houseOK = tierAtLeast(currentTier(ctx.state.settings), "pro");
   const _houseActive = () => _houseOK && tb.house.on && tb.mode === "playback";
+  // Full house activity has two modes (Garry, 2026-09-24: "split it in two,
+  // devices, and no devices"): the Atlas map with the tracked beacons — or,
+  // with 💡 Devices on, every device the Atlas shows played back through its
+  // state over the chosen period.
+  const _houseDevices = () => _houseActive() && !!tb.house.devices;
+  // The changes a frame SHOWS (houseActivity.atlasShownEids): not an
+  // unplaced reading, a hidden device or an unlinked door (review round 16).
+  const _devEvents = () => houseActivity.shownHouseEvents(tb.house);
+  const _framesKeyOf = (hs) => `${hs.version}|${hs.shownKey || ""}`;
 
   // ── Clear stale timer from previous render ──────────────────────────
   // If we're re-rendering while a timer is running, kill it so it doesn't
@@ -315,11 +324,12 @@ export function render(ctx) {
     const raw = tb.rawFrames || tb.frames || [];
     const hs = tb.house;
     const win = tb._loadedRange;
-    const ready = _houseOK && hs.on && hs.timeline && win && hs.window
+    const ready = _houseOK && hs.on && hs.devices && hs.timeline && win && hs.window
       && hs.window[0] === win[0] && hs.window[1] === win[1];
-    const next = ready ? houseActivity.mergeHouseFrames(raw, hs.events, tb._rawThinFactor || 1) : raw;
-    if (tb._framesFrom === (ready ? hs.version : -1) && tb._framesRaw === raw) return;
-    tb._framesFrom = ready ? hs.version : -1;
+    const from = ready ? _framesKeyOf(hs) : -1;
+    if (tb._framesFrom === from && tb._framesRaw === raw) return;
+    const next = ready ? houseActivity.mergeHouseFrames(raw, _devEvents(), tb._rawThinFactor || 1) : raw;
+    tb._framesFrom = from;
     tb._framesRaw = raw;
     const wasPlaying = tb.playing;
     if (wasPlaying) _stopPlayback();
@@ -951,38 +961,57 @@ export function render(ctx) {
 
   function _renderHouseFrame() {
     const hs = tb.house;
+    const devices = !!hs.devices;
     const win = tb._loadedRange;
     const stale = win && (!hs.window || hs.window[0] !== win[0] || hs.window[1] !== win[1]);
     if (hs.loading && hs.pending && _chainedPending !== hs.pending) {
       _chainedPending = hs.pending;
       hs.pending.then(_houseLoaded);
     }
-    // The entity list comes from the live house (filled by renderHouseFrame);
-    // start the fetch BEFORE the status is written, so it says "Loading".
-    if (!hs.eids.length) houseActivity.renderHouseFrame(ctx, hs, [], 0, {}, () => {});
-    if (stale && !hs.loading && hs.eids.length) _startHouseLoad();
-    const errLine = hs.error ? `House history unavailable: ${_esc(hs.error.substring(0, 80))} ${_retryHtml}` : null;
+    // The house's history is only for the devices (no-devices mode draws the
+    // Atlas and the beacons). The entity list comes from the live house
+    // (filled by renderHouseFrame); start the fetch BEFORE the status is
+    // written, so it says "Loading".
+    if (devices && !hs.eids.length) houseActivity.refreshHouseDevices(ctx, hs, () => {});
+    if (devices && stale && !hs.loading && hs.eids.length) _startHouseLoad();
+    const errLine = devices && hs.error ? `House history unavailable: ${_esc(hs.error.substring(0, 80))} ${_retryHtml}` : null;
 
     if (!tb.frames.length) {
       mapDiv.innerHTML = `<div style="text-align:center;padding:40px;color:#64748b;font-size:14px">${
-        hs.loading ? "Loading house history…" : errLine || "No beacon or house activity in this time range. Try a longer range."}</div>`;
+        !devices ? "No beacon activity in this time range. Try a longer range — or turn on 💡 Devices to play the house back."
+        : hs.loading ? "Loading house history…" : errLine || "No beacon or house activity in this time range. Try a longer range."}</div>`;
       _wireRetry();
       _renderHouseEvents();
       return;
     }
     const scanners = new Set(((ctx.state.live?.snapshot?.ble?.radios) || [])
       .flatMap(r => [r.source, r.name]).filter(Boolean).map(v => String(v).toUpperCase()));
+    const frame = tb.frames[tb.frameIdx];
+    const ts = frame.ts;
+    // What changed at this very moment (a frame of its own —
+    // mergeHouseFrames): ringed on the map and named here.
+    const events = devices ? _devEvents() : [];
+    const changed = events.filter(e => Math.abs(e.t - ts * 1000) < 1);
     const svg = houseActivity.renderHouseFrame(ctx, hs, tb.frames, tb.frameIdx, {
       keep: (o) => !scanners.has(String(o.k || "").toUpperCase()),
       colorOf: _houseFrameColor,
       labelOf: (o) => String(o.n || o.k || "?").replace(/^(entity:|ble:|sensor\.|device_tracker\.)/, "").replace(/_/g, " ").substring(0, 16),
-    }, () => {});
-    const frame = tb.frames[tb.frameIdx];
-    const ts = frame.ts;
+    }, () => {}, { changedEids: changed.map(e => e.eid), devices });
+    // Which devices the map shows may have just become known (the entity
+    // registry landed): the frames follow — once.
+    if (devices && hs.timeline && !hs.loading && tb._framesFrom !== _framesKeyOf(hs)) {
+      _applyHouseFrames();
+      if (tb._framesFrom === _framesKeyOf(hs)) { _renderHouseFrame(); return; }
+    }
     let done = 0;
-    for (const e of hs.events) { if (e.t <= ts * 1000) done++; else break; }
-    const status = hs.loading ? "Loading house history…"
-      : errLine || (`${done} of ${hs.events.length} house events so far`
+    for (const e of events) { if (e.t <= ts * 1000) done++; else break; }
+    const changedTxt = changed.length
+      ? " · " + changed.slice(0, 3).map(e => `${_esc(e.name)} → ${_esc(e.to)}`).join(", ")
+        + (changed.length > 3 ? ` +${changed.length - 3} more` : "")
+      : "";
+    const status = !devices ? "Beacons on your Atlas map"
+      : hs.loading ? "Loading house history…"
+      : errLine || (`${done} of ${events.length} device changes so far` + changedTxt
         + (houseActivity.inVacation(hs.vacationPeriods, ts * 1000) ? " · 🌴 Vacation Mode on" : "")
         + (frame.house && !(frame.o || []).length ? " · no tracked beacon home" : ""));
     mapDiv.innerHTML =
@@ -1009,15 +1038,16 @@ export function render(ctx) {
   let _evBuilt = null, _evRows = [], _evFrom = 0;
   function _renderHouseEvents(force) {
     const hs = tb.house;
+    const events = _devEvents();
     const nowMs = tb.frames[tb.frameIdx] ? tb.frames[tb.frameIdx].ts * 1000 : Infinity;
     let at = 0;
-    while (at < hs.events.length && hs.events[at].t <= nowMs) at++;
-    const key = `${hs.version || 0}|${hs.loading}|${hs.events.length}|${hs.error || ""}`;
+    while (at < events.length && events[at].t <= nowMs) at++;
+    const key = `${hs.version || 0}|${hs.shownKey || ""}|${hs.loading}|${events.length}|${hs.error || ""}`;
     // A window clamped to either end of the list stays put while the playhead
     // is inside it (re-review: rebuilt every frame near the start and end).
     const inRange = (at >= _evFrom + 50 || _evFrom === 0)
-      && (at <= _evFrom + EVENTS_SHOWN - 50 || _evFrom + EVENTS_SHOWN >= hs.events.length);
-    if (!force && _evBuilt === key && (inRange || hs.events.length <= EVENTS_SHOWN)) {
+      && (at <= _evFrom + EVENTS_SHOWN - 50 || _evFrom + EVENTS_SHOWN >= events.length);
+    if (!force && _evBuilt === key && (inRange || events.length <= EVENTS_SHOWN)) {
       for (const r of _evRows) {
         const op = r.t <= nowMs ? "1" : "0.4";
         if (r.el.style.opacity !== op) r.el.style.opacity = op;
@@ -1031,21 +1061,21 @@ export function render(ctx) {
     head.style.cssText = "font-weight:700;font-size:13px;margin-bottom:6px;color:#fbbf24";
     head.textContent = "🏠 House activity";
     houseEventsCard.appendChild(head);
-    if (!hs.events.length) {
+    if (!events.length) {
       const m = document.createElement("div");
       m.className = "muted";
       m.textContent = hs.loading ? "Loading…" : hs.error ? "House history unavailable — see Retry above the map."
-        : "No lights, doors, locks or motion changed in this window.";
+        : "Nothing on the Atlas changed in this window.";
       houseEventsCard.appendChild(m);
       return;
     }
-    _evFrom = Math.max(0, Math.min(at - EVENTS_SHOWN / 2, hs.events.length - EVENTS_SHOWN));
-    const shown = hs.events.slice(_evFrom, _evFrom + EVENTS_SHOWN);
-    if (shown.length < hs.events.length) {
+    _evFrom = Math.max(0, Math.min(at - EVENTS_SHOWN / 2, events.length - EVENTS_SHOWN));
+    const shown = events.slice(_evFrom, _evFrom + EVENTS_SHOWN);
+    if (shown.length < events.length) {
       const note = document.createElement("div");
       note.className = "muted";
       note.style.cssText = "font-size:11px;margin-bottom:4px";
-      note.textContent = `Showing ${shown.length} of ${hs.events.length} changes, around the playhead — scrub to see others.`;
+      note.textContent = `Showing ${shown.length} of ${events.length} changes, around the playhead — scrub to see others.`;
       houseEventsCard.appendChild(note);
     }
     for (const e of shown) {
@@ -2046,7 +2076,8 @@ export function render(ctx) {
     analyticsPane.style.display = onMap ? "none" : "";
     if (_distCardRef) _distCardRef.style.display = onMap ? "" : "none";
     houseBtn.style.display = mode === "playback" ? "" : "none";
-    houseEventsCard.style.display = _houseActive() ? "" : "none";
+    devicesBtn.style.display = _houseActive() ? "" : "none";
+    houseEventsCard.style.display = _houseDevices() ? "" : "none";
     _syncFocusSlider();
     // Mount an analytics module only when its mode is newly chosen — a second
     // tap on the active mode keeps what is on screen.
@@ -2124,6 +2155,44 @@ export function render(ctx) {
   });
   _paintHouseBtn();
   if (_houseOK) modeRow.appendChild(houseBtn);
+
+  // 💡 Devices — shown only with Full house activity on: the playback then
+  // follows every device the Atlas shows through its state over the chosen
+  // period, with every tracked object, and rings what changed.
+  const devicesBtn = document.createElement("button");
+  devicesBtn.className = "btn inline";
+  devicesBtn.title = "Play every device the Atlas shows back through its state over the chosen period — lights, doors, "
+    + "locks, motion, temperature, humidity and air — with every tracked object; what changed is ringed on the map";
+  const _paintDevicesBtn = () => {
+    devicesBtn.textContent = tb.house.devices ? "💡 Devices: on" : "💡 Devices";
+    devicesBtn.style.cssText = "font-size:12px;padding:4px 14px;" + (tb.house.devices
+      ? "font-weight:700;background:#fbbf2422;color:#fbbf24;border-color:#fbbf24"
+      : "color:#94a3b8;border-color:#1b3526");
+  };
+  devicesBtn.addEventListener("click", async () => {
+    const on = !tb.house.devices;
+    // Stopped, and switched only once the new window is in: a playback tick
+    // during the reload fetched the whole house's history for the old,
+    // one-object window (review round 16).
+    _stopPlayback();
+    // All the house's activity is every tracked object's too: a chosen one
+    // would keep the beacons to that one.
+    if (on && tb.filterKey) {
+      tb.filterKey = null;
+      tb.filterName = "All objects";
+      await _loadTracebackData();
+    }
+    tb.house.devices = on;
+    if (mapDiv.isConnected === false) return;
+    _paintDevicesBtn();
+    _applyHouseFrames();
+    _applyModeVisibility(tb.mode);
+    _buildControls();
+    _renderHouseEvents(true);
+    _renderFrame();
+  });
+  _paintDevicesBtn();
+  if (_houseOK) modeRow.appendChild(devicesBtn);
 
   // ── Assemble ───────────────────────────────────────────────────────────
   outer.appendChild(modeRow);
@@ -2480,5 +2549,6 @@ export function render(ctx) {
   _applyModeVisibility(tb.mode);
   _paintHouseBtn();
   houseBtn.style.display = tb.mode === "playback" ? "" : "none";
+  devicesBtn.style.display = _houseActive() ? "" : "none";
   return outer;
 }

@@ -364,3 +364,108 @@ def test_help_content_has_a_complete_entry_for_every_control_in_the_row(tmp_path
     for label in ["ROOM %", "HARDNESS", "STYLE", "SUBTLETY", "FLOOR", "SPACING", "L / R", "ZOOM", "SAVE VIEW", "RESET VIEW",
                   "SHOWCASE", "UNTOUCHED", "CODES"]:
         assert label in entry, f"lights_build_controls never mentions {label!r}, but the row renders it"
+
+
+def test_the_floor_slider_names_floors_whose_level_is_unset(tmp_path):
+    """Live check 2026-09-24: Home Assistant floors usually have no level, and
+    the Atlas slider matched x.level — it read "L0" / "L1"."""
+    model = {"floors": [{"id": "upper", "name": "Upstairs", "level": None},
+                        {"id": "main", "name": "Main floor", "level": None}],
+             "room_geometry_m": _MODEL["room_geometry_m"]}
+    out = _run(_EL_JS + (
+        f"const MODEL={json.dumps(model)};\n"
+        "const host = { el, floors: MODEL.floors, model: MODEL, tier: 'pro', byRoom: {}, lightsByEid: {},\n"
+        "  lightsLoading: false, hiddenEids: new Set(), view: { floorGap: 150, horizGap: 0, focusIdx: 1, zoom: 1 },\n"
+        "  saveView: async () => {}, callWS: async () => ({}), toast: () => {},\n"
+        "  onHexesBuilt: () => {}, onRowClick: () => {}, onToggleHidden: () => {}, afterAssign: () => {} };\n"
+        "const card = LM.buildLightsMapCard(host);\n"
+        "out.vals = [...card.querySelectorAll('.lv-val')].map(n => n.textContent);\n"
+    ))
+    assert "Main floor" in out["vals"], out
+    assert not any(v in ("L0", "L1", "L0 + L1") for v in out["vals"]), out
+
+
+_HOUSE = {
+    # As the backend sends them: by name, no levels. The attic has no rooms.
+    "floors": [{"id": "attic", "name": "Attic", "level": None}, {"id": "basement", "name": "Basement", "level": None},
+               {"id": "main", "name": "Main", "level": None}, {"id": "outside", "name": "Outside", "level": None},
+               {"id": "upper", "name": "Upper", "level": None}],
+    "room_geometry_m": {
+        "Den":     {"type": "poly", "floor_id": "basement", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]},
+        "Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]},
+        "Garden":  {"type": "poly", "floor_id": "outside", "points_m": [[5, 0], [9, 0], [9, 4], [5, 4]]},
+        "Bed":     {"type": "poly", "floor_id": "upper", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]},
+    },
+}
+_HOUSE_LIGHTS = [
+    {"entity_id": "light.den", "area_name": "Den", "state": "on", "isFan": False, "isMotion": False},
+    {"entity_id": "light.kitchen", "area_name": "Kitchen", "state": "on", "isFan": False, "isMotion": False},
+    {"entity_id": "light.bed", "area_name": "Bed", "state": "off", "isFan": False, "isMotion": False},
+    {"entity_id": "light.patio", "area_name": "Garden", "state": "on", "isFan": False, "isMotion": False},
+    {"entity_id": "binary_sensor.bed_motion", "area_name": "Bed", "state": "on", "isFan": False, "isMotion": True},
+]
+
+
+def test_the_floor_chips_and_floor_sheet_name_the_floor_the_drawing_put_there(tmp_path):
+    """Review round 13: the floor chips and the floor sheet still matched
+    x.level — on a real install (no levels) the chips read "L1 · 0 on", a
+    badge above the lowest said "No floor record", and a floor listed first
+    by name (the attic) opened for the ground floor's badge, its "All lights
+    on" switching the wrong floor."""
+    out = _run(_EL_JS + (
+        f"const MODEL={json.dumps(_HOUSE)};\n"
+        f"const LIGHTS={json.dumps(_HOUSE_LIGHTS)};\n"
+        "const host = { el, floors: MODEL.floors, model: MODEL, tier: 'pro', byRoom: {},\n"
+        "  lightsByEid: Object.fromEntries(LIGHTS.map(l => [l.entity_id, l])),\n"
+        "  lightsLoading: false, hiddenEids: new Set(), view: { floorGap: 150, horizGap: 0, focusIdx: 0, zoom: 1 },\n"
+        "  saveView: async () => {}, callWS: async () => ({}), toast: () => {},\n"
+        "  onHexesBuilt: () => {}, onRowClick: () => {}, onToggleHidden: () => {}, afterAssign: () => {} };\n"
+        "const card = LM.buildLightsMapCard(host);\n"
+        "out.chips = [...card.querySelectorAll('.lv-chipbtn')].map(b => b.textContent);\n"
+        "const sheet = (z) => { const sent = []; const toasts = [];\n"
+        "  const before = document.body.children.length;\n"
+        "  LM.openFloorSheet({ toast: (m) => toasts.push(m), setMany: (e, on) => sent.push([e, on]), floodLatches: {},\n"
+        "    controlsFor: () => null }, LIGHTS, MODEL, z);\n"
+        "  const o = document.body.children[before];\n"
+        "  const on = o ? [...o.querySelectorAll('button')].find(b => b.textContent === 'All lights on') : null;\n"
+        "  if (on) on.click();\n"
+        "  if (o) document.body.removeChild(o);\n"
+        "  return { text: o ? o.textContent : null, toasts, sent }; };\n"
+        "out.ground = sheet(1);\n"
+        "out.lowest = sheet(0);\n"
+    ))
+    assert any(c.startswith("Basement") for c in out["chips"]), out
+    assert any(c.startswith("Main") for c in out["chips"]), out
+    assert any(c.startswith("Upper") for c in out["chips"]), out
+    assert not any(c.startswith(("L0", "L1", "L2", "Attic", "Outside")) for c in out["chips"]), out
+    assert out["ground"]["toasts"] == [] and out["ground"]["text"].startswith("Main"), out
+    # The outside floor is on no plate: its patio light is neither counted
+    # nor switched with Main's (round 15).
+    assert out["ground"]["sent"] == [[["light.kitchen"], True]], out
+    assert "Main1" in out["chips"], out
+    # Only this plate's motion: the bedroom sensor upstairs is not listed.
+    assert "bed_motion" not in out["lowest"]["text"] and "bed_motion" not in out["ground"]["text"], out
+    assert out["lowest"]["text"].startswith("Basement"), out
+
+
+def test_a_plate_two_floors_share_is_named_and_switched_as_both(tmp_path):
+    """Round 15: two indoor floors on one storey (explicit levels both 0) —
+    the sheet switched both but was titled after one."""
+    model = {"floors": [{"id": "garage", "name": "Garage", "level": 0}, {"id": "main", "name": "Main", "level": 0}],
+             "room_geometry_m": {"Bay": {"type": "poly", "floor_id": "garage", "points_m": [[0, 0], [4, 0], [4, 4], [0, 4]]},
+                                 "Kitchen": {"type": "poly", "floor_id": "main", "points_m": [[5, 0], [9, 0], [9, 4], [5, 4]]}}}
+    lights = [{"entity_id": "light.bay", "area_name": "Bay", "state": "off", "isFan": False, "isMotion": False},
+              {"entity_id": "light.kitchen", "area_name": "Kitchen", "state": "off", "isFan": False, "isMotion": False}]
+    out = _run(
+        f"const MODEL={json.dumps(model)};\n"
+        f"const LIGHTS={json.dumps(lights)};\n"
+        "const sent = [];\n"
+        "const before = document.body.children.length;\n"
+        "LM.openFloorSheet({ toast: () => {}, setMany: (e, on) => sent.push([e, on]), floodLatches: {}, controlsFor: () => null }, LIGHTS, MODEL, 0);\n"
+        "const o = document.body.children[before];\n"
+        "[...o.querySelectorAll('button')].find(b => b.textContent === 'All lights on').click();\n"
+        "out.text = o.textContent; out.sent = sent;\n"
+    )
+    assert out["text"].startswith("Garage + Main"), out
+    assert out["sent"] == [[["light.bay", "light.kitchen"], True]], out
+

@@ -304,10 +304,31 @@ class BluetoothLive:
             if not addr:
                 return
             seen = _now()
+            # When the advertisement was actually received (service_info.time,
+            # monotonic — the same clock the reseed's scanner stamps use).
+            # Registering a callback makes HA replay its cached history into
+            # it; stamped "now", a minutes-old address looked live again and
+            # a Find My tag's correct link was undone on every restart
+            # (review round 11).
+            # A stamp from before this boot is NEGATIVE (habluetooth restores
+            # its stored history as unix - (time() - monotonic())), and those
+            # replay too — so any non-zero stamp counts (round 12).
+            _t = getattr(service_info, "time", None)
+            _age = 0.0
+            if isinstance(_t, (int, float)) and _t != 0:
+                _age = (time.time() if float(_t) > 1e9 else time.monotonic()) - float(_t)
+                if _age > 0:
+                    seen = seen - dt.timedelta(seconds=_age)
             rec = _service_info_to_record(service_info, seen=seen)
             src = rec.get("source") or "_unknown"
             if addr not in self._seen_by_source:
                 self._seen_by_source[addr] = {}
+            # A REPLAYED (old) report never replaces a newer one. A live advert
+            # (age ~0) always lands: comparing wall-clock stamps alone froze
+            # live readings for as long as a backward clock step (round 12).
+            _prev_adv = self._seen_by_source[addr].get(src)
+            if _age > 2.0 and _prev_adv is not None and _prev_adv.seen > seen:
+                return
             self._seen_by_source[addr][src] = _Adv(record=rec, seen=seen)
             # Sample history for median-of-N (real callbacks only — the
             # reseed path replays cached readings and must not multiply them)
@@ -317,7 +338,7 @@ class BluetoothLive:
                     src, deque(maxlen=32)
                 ).append((seen, float(_rs)))
             # Track when each radio last sent us anything (independent of age filtering)
-            if src != "_unknown":
+            if src != "_unknown" and (src not in self._radio_last_heard or self._radio_last_heard[src] < seen):
                 self._radio_last_heard[src] = seen
         except Exception as e:
             _LOGGER.debug("BLE adv parse failed: %s", e)
@@ -376,11 +397,37 @@ class BluetoothLive:
                                     _age = max(0.0, _mono_now - float(_stamp))
                                 dev_seen = seen - dt.timedelta(seconds=_age)
                             else:
-                                # No real timestamp for this device: keep the
-                                # existing record's age rather than refreshing
-                                # it; only brand-new entries get stamped now.
-                                _prev = self._seen_by_source.get(addr, {}).get(str(src))
-                                dev_seen = _prev.seen if _prev else seen
+                                # No stamp from this scanner — HA's own adapter
+                                # keeps none when HA runs it through bleak
+                                # (Bluetooth "degraded mode": no kernel mgmt
+                                # socket), and HA passes an unchanged advert
+                                # to no callback, so a steady device heard
+                                # there aged from its first report while still
+                                # advertising (review rounds 13-14). The
+                                # manager's last advert for the address —
+                                # overall, or among connectable scanners, where
+                                # the host adapter still counts when a passive
+                                # proxy holds the overall record — is updated
+                                # on every one, unchanged or not: its time,
+                                # when THIS scanner is the one it came from.
+                                # Otherwise keep the existing record's age
+                                # rather than refreshing it; only brand-new
+                                # entries get stamped now.
+                                _lt = None
+                                for _conn in (False, True):
+                                    try:
+                                        _last = manager.async_last_service_info(addr, _conn)
+                                    except Exception:  # noqa: BLE001
+                                        _last = None
+                                    if _last is not None and str(getattr(_last, "source", "")) == str(src):
+                                        _lt = getattr(_last, "time", None)
+                                        break
+                                if isinstance(_lt, (int, float)) and _lt != 0:
+                                    _age = max(0.0, (time.time() if float(_lt) > 1e9 else _mono_now) - float(_lt))
+                                    dev_seen = seen - dt.timedelta(seconds=_age)
+                                else:
+                                    _prev = self._seen_by_source.get(addr, {}).get(str(src))
+                                    dev_seen = _prev.seen if _prev else seen
                             rec = _service_info_to_record_from_adv(
                                 addr, src, rssi, ble_device, adv_data, dev_seen
                             )

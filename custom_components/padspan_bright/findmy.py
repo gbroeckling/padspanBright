@@ -64,6 +64,7 @@ each poll and persists its state.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 APPLE_COMPANY_ID = 76
@@ -97,6 +98,10 @@ UNSHARED_PENALTY_DB = 20.0
 # The addresses a tag used before its current one, kept so a lingering one
 # is recognised as that tag's.
 PAST_MAX = 16
+# An address a tag used before, heard this recently and this long after the
+# tag's last link: the tag is on it again — a Find My key never comes back
+# to another device (rounds 10-11).
+RETURN_FRESH_S = 10.0
 # A tracked tag not heard for this long is dropped from the bridge state.
 FORGET_S = 3 * 86400.0
 
@@ -200,6 +205,10 @@ class FindMyBridge:
         # Until the first poll, every address in range counts as there all
         # along — after a restart nothing looks newly arrived (round 8).
         self._primed = False
+        # (tag, earlier address) -> (when it was first heard again, the link
+        # it was heard after): a return is acted on only when a LATER report
+        # confirms it (round 11), and only for that same link (round 13).
+        self._returning: dict[tuple[str, str], tuple[float, float]] = {}
 
     def to_state(self) -> dict[str, Any]:
         return {"tags": {k: dict(v) for k, v in self.tags.items()}}
@@ -211,20 +220,41 @@ class FindMyBridge:
                 return key
         return None
 
-    def unlink(self, key: str, now_ts: float) -> tuple[str, str] | None:
+    def unlink(self, key: str, now_ts: float, address: str | None = None) -> tuple[str, str] | None:
         """A person's "not this tag": undo the tag's last link. Its current
         address goes back to being its own device and is never linked to this
         tag again; the tag waits on its earlier address (not re-linked by
-        itself — it's named again, or heard again). None if it never moved
-        (round 9: a wrong link otherwise lasted until FORGET_S)."""
+        itself — it's named again, or heard again). `address`: the address
+        the person is looking at — only that one is ever refused (round 10:
+        the button refused whatever was current). None if the tag never
+        moved, or `address` isn't its current one (round 9: a wrong link
+        otherwise lasted until FORGET_S)."""
         t = self.tags.get(key)
-        if not t or not t.get("past"):
+        if not t or not t.get("past") or (address is not None and t.get("addr") != address):
             return None
         wrong = t["addr"]
         t["refused"] = ([a for a in (t.get("refused") or []) if a != wrong] + [wrong])[-PAST_MAX:]
         t["addr"] = t["past"].pop()
         t["last_ts"] = now_ts - HANDOVER_WINDOW_S - 1      # not waiting for a hand-over, not forgotten
+        t.pop("linked_ts", None)
         return wrong, t["addr"]
+
+    def _move_back(self, key: str, x: str, seen_ts: float) -> list[str]:
+        """The tag is on its earlier address `x` again: every address it was
+        linked to after `x` was a dead key of its own or another device —
+        dropped from it and kept from it. Returns those addresses."""
+        t = self.tags[key]
+        past = list(t.get("past") or [])
+        if x in past:
+            i = len(past) - 1 - past[::-1].index(x)
+            later, past = past[i + 1:] + [t["addr"]], past[:i]
+        else:                                    # its first address
+            later, past = past + [t["addr"]], []
+        later = [a for a in dict.fromkeys(later) if a != x]
+        t["refused"] = ([a for a in (t.get("refused") or []) if a not in later] + later)[-PAST_MAX:]
+        t["past"], t["addr"], t["last_ts"] = past, x, seen_ts
+        t.pop("linked_ts", None)
+        return later
 
     def addresses_of(self, key: str) -> list[str]:
         t = self.tags.get(key) or {}
@@ -247,12 +277,65 @@ class FindMyBridge:
                 continue
             age = rec.get("age_s")
             age = float(age) if isinstance(age, (int, float)) else 0.0
-            fm[addr] = {"adv": adv, "age": age, "rssi": rssi_vector(rec), "seen_ts": now_ts - age}
+            # When it was last heard: the record's own absolute stamp when it
+            # has one — now minus age is measured at a different moment each
+            # build, and that jitter made one unchanged report look like a
+            # newer one (round 12).
+            seen_ts = now_ts - age
+            ls = rec.get("last_seen")
+            if isinstance(ls, str) and ls:
+                try:
+                    seen_ts = datetime.fromisoformat(ls.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    pass
+            fm[addr] = {"adv": adv, "age": age, "rssi": rssi_vector(rec), "seen_ts": seen_ts}
 
         if not self._primed:
             for addr in fm:
                 self.first_seen[addr] = float("-inf")
             self._primed = True
+
+        # An address a tag used before, on the air again after its last link:
+        # a Find My key never comes back to another device, so the tag is on
+        # it now — a separated tag returns to its day key; a wrong link's own
+        # tag reappears — and every address linked since is dropped from it.
+        # Only on a SECOND, newer report: HA replays cached history into a
+        # new callback, and one fresh-looking report is not proof (round 11).
+        unlinked: list[tuple[str, str, str]] = []
+        # A pending return belongs to the link it was heard after: once the
+        # tag is unlinked, moved back, re-linked or forgotten it is void — a
+        # stale one let ONE report confirm a return (review round 13).
+        self._returning = {ck: v for ck, v in self._returning.items()
+                           if (self.tags.get(ck[0]) or {}).get("linked_ts") == v[1]}
+        for key, t in list(self.tags.items()):
+            linked_ts = t.get("linked_ts")
+            if not linked_ts:
+                continue
+            earlier = [a for a in reversed(t.get("past") or []) if a != t["addr"]]
+            if key not in earlier and key != t["addr"]:
+                earlier.append(key)
+            for x in earlier:
+                c, ck = fm.get(x), (key, x)
+                # Waiting for the confirming report while the address is still
+                # heard (up to LIVE_S — a passive proxy's repeats come only at
+                # each 30-60 s reseed); dropped once it has been quiet.
+                if c is None or c["age"] > LIVE_S or c["seen_ts"] <= float(linked_ts) + RETURN_FRESH_S:
+                    self._returning.pop(ck, None)
+                    continue
+                pending = self._returning.get(ck)
+                if pending is None:
+                    if c["age"] <= RETURN_FRESH_S:
+                        self._returning[ck] = (c["seen_ts"], linked_ts)
+                    continue
+                first = pending[0]
+                # Confirmed only by a fresh report heard at least a second
+                # after the first one.
+                if c["age"] > RETURN_FRESH_S or c["seen_ts"] < first + 1.0:
+                    continue
+                for dropped in self._move_back(key, x, c["seen_ts"]):
+                    unlinked.append((key, dropped, x))
+                self._returning = {k: v for k, v in self._returning.items() if k[0] != key}
+                break
 
         # A known address starts a tag — never one that is already a tag's
         # (a lingering old address would pull the identity back: round 8).
@@ -315,7 +398,7 @@ class FindMyBridge:
             self.tags[key] = {"addr": addr, "type": fresh[addr]["adv"]["device_type"],
                               "rssi": fresh[addr]["rssi"], "last_ts": fresh[addr]["seen_ts"],
                               "past": (self.tags[key].get("past", []) + [old])[-PAST_MAX:],
-                              "refused": self.tags[key].get("refused", [])}
+                              "refused": self.tags[key].get("refused", []), "linked_ts": now_ts}
             linked.append((key, old, addr))
             waiting.pop(key)
             fresh.pop(addr)
@@ -323,4 +406,4 @@ class FindMyBridge:
 
         for key in [k for k, t in self.tags.items() if now_ts - float(t.get("last_ts") or 0) > FORGET_S]:
             self.tags.pop(key)
-        return {"map": {t["addr"]: k for k, t in self.tags.items()}, "linked": linked}
+        return {"map": {t["addr"]: k for k, t in self.tags.items()}, "linked": linked, "unlinked": unlinked}

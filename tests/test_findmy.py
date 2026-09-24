@@ -375,7 +375,8 @@ def test_the_bluetooth_tab_knows_a_moved_tag_by_its_live_address():
                        capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert r.returncode == 0, r.stderr[-2000:]
     out = json.loads(r.stdout.strip().splitlines()[-1])
-    assert out == {"named": True, "quietShown": True, "findMyBadge": True, "irk": False}, out
+    assert out == {"named": True, "quietShown": True, "findMyBadge": True, "irk": False,
+                   "unlinkOnLive": True, "unlinkOnNamed": False}, out
 
 
 def test_a_wrong_link_can_be_undone_and_never_comes_back():
@@ -411,3 +412,192 @@ async def test_the_unlink_command_answers_for_the_objects_key():
     store.async_delay_save.assert_called_once()
     await WO.ws_findmy_unlink(hass, conn, {"id": 2, "key": "ble:" + KEYS_1})
     assert sent["error"] == "not_linked"
+
+
+def test_a_replayed_advert_keeps_its_real_age(monkeypatch):
+    """Round 11: registering a callback makes HA replay its cached history;
+    _on_adv stamped those 'now', so a 400 s-old address read as live."""
+    import sys
+    import time
+    from types import SimpleNamespace
+    from custom_components.padspan_bright import bluetooth_live as BL
+    from custom_components.padspan_bright.const import DOMAIN
+    mono = time.monotonic()
+    live = SimpleNamespace(rssi=-50, manufacturer_data={76: bytes([0x12, 0x19, 0x10] + [0x22] * 22 + [1, 0])},
+                           service_data={}, service_uuids=[], tx_power=None, local_name=None)
+    scanner = SimpleNamespace(source="kit",
+                              discovered_devices_and_advertisement_data={KEYS_2: (SimpleNamespace(address=KEYS_2, name=None), live)},
+                              discovered_device_timestamps={KEYS_2: mono - 1.0})
+    monkeypatch.setitem(sys.modules, "habluetooth",
+                        SimpleNamespace(get_manager=lambda: SimpleNamespace(async_current_scanners=lambda: [scanner])))
+    bl = BL.BluetoothLive(SimpleNamespace(data={DOMAIN: {}}))
+    replayed = SimpleNamespace(address=KEYS_1, name=None, source="kit", rssi=-50, time=mono - 400.0,
+                               manufacturer_data={76: bytes([0x12, 0x19, 0x10] + [0x11] * 22 + [1, 0])},
+                               service_data={}, service_uuids=[], tx_power=None, connectable=True)
+    bl._on_adv(replayed)
+    bl._seed_from_discovered()
+    ages = {a["address"]: a["age_s"] for a in bl.get_snapshot(max_ads=5000, max_age_s=14400)["advertisements"]}
+    assert 395 <= ages[KEYS_1] <= 410, ages
+    assert ages[KEYS_2] < 5, ages
+
+
+# ── review round 12 ──────────────────────────────────────────────────────────
+
+
+def _heard(payload, place, built, heard):
+    """A record as the snapshot hands it over: last heard at `heard`, its age
+    measured when the BLE snapshot was taken (`built`), a moment before the
+    bridge's step reads it."""
+    from datetime import datetime, timezone
+    r = _rec(payload, place, age=built - heard)
+    r["last_seen"] = datetime.fromtimestamp(T0 + heard, tz=timezone.utc).isoformat()
+    return r
+
+
+def test_one_unchanged_report_never_confirms_a_return():
+    """Round 12: the return rule took 'now - age' as when an address was
+    heard. The ages are measured when the BLE snapshot is taken and the
+    bridge steps a varying moment later, so ONE report (a replayed one)
+    looked a little newer on every poll and confirmed itself."""
+    b = F.FindMyBridge()
+    k = KEYS_1
+    _change(b, KEYS_1, KEYS_2, _separated(1), _separated(1, 0x22), KITCHEN, known={KEYS_1: k})
+    for now in (202.0, 204.5, 207.0):
+        r = _poll(b, now, {KEYS_1: _heard(_separated(1), KITCHEN, 202.0, 200.0),
+                           KEYS_2: _heard(_separated(1, 0x22), KITCHEN, 202.0, 201.0)})
+        assert r["unlinked"] == [], now
+    assert b.tags[k]["addr"] == KEYS_2
+
+
+def test_a_real_return_is_confirmed_at_a_passive_proxys_pace():
+    """Round 12: a passive proxy's repeats of a steady advert reach PadSpan
+    only at each 30-60 s reseed, and the rule dropped the first report once
+    it was 10 s old — a tag back on its day key was never followed there.
+    The second report, 35 s later, confirms it."""
+    b = F.FindMyBridge()
+    k = KEYS_1
+    _change(b, KEYS_1, KEYS_2, _separated(1), _separated(1, 0x22), KITCHEN, known={KEYS_1: k})
+    for now in range(301, 346, 5):
+        heard = 300.0 if now < 335 else 335.0
+        r = _poll(b, float(now), {KEYS_1: _heard(_separated(1), KITCHEN, now, heard),
+                                  KEYS_2: _heard(_separated(1, 0x22), KITCHEN, now, 290.0)})
+        if b.tags[k]["addr"] == KEYS_1:
+            break
+    assert b.tags[k]["addr"] == KEYS_1 and r["unlinked"] == [(k, KEYS_2, KEYS_1)], (now, b.tags[k])
+    assert now == 336, "confirmed by the second report, not before"
+
+
+def _bl(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from custom_components.padspan_bright import bluetooth_live as BL
+    from custom_components.padspan_bright.const import DOMAIN
+    monkeypatch.setitem(sys.modules, "habluetooth",
+                        SimpleNamespace(get_manager=lambda: SimpleNamespace(async_current_scanners=lambda: [])))
+    return BL, BL.BluetoothLive(SimpleNamespace(data={DOMAIN: {}}))
+
+
+def _adv(addr, rssi, stamp, status=0x10, source="kit"):
+    from types import SimpleNamespace
+    return SimpleNamespace(address=addr, name=None, source=source, rssi=rssi, time=stamp,
+                           manufacturer_data={76: bytes([0x12, 0x19, status] + [0x11] * 22 + [1, 0])},
+                           service_data={}, service_uuids=[], tx_power=None, connectable=True)
+
+
+def test_a_report_from_before_this_boot_keeps_its_real_age(monkeypatch):
+    """Round 12: habluetooth restores its stored history with monotonic
+    stamps from before this boot — NEGATIVE ones when the report is older
+    than the host's uptime. Only positive stamps were aged, so those replayed
+    as heard just now."""
+    import time
+    BL, bl = _bl(monkeypatch)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)       # up 100 s
+    bl._on_adv(_adv(KEYS_1, -50, -500.0))                       # heard 600 s ago
+    age = (BL._now() - bl._seen_by_source[KEYS_1]["kit"].seen).total_seconds()
+    assert 595 <= age <= 605, age
+
+
+def test_a_live_advert_lands_after_the_clock_steps_back(monkeypatch):
+    """Round 12: 'an older report never replaces a newer one' was judged by
+    the wall clock alone — after the clock stepped back (an NTP correction)
+    every live advert was 'older' than the last and was dropped, freezing
+    the readings for as long as the step. A replayed report still never
+    replaces a newer one."""
+    import datetime as dt
+    import time
+    BL, bl = _bl(monkeypatch)
+    bl._on_adv(_adv(KEYS_1, -50, time.monotonic()))
+    real_now = BL._now
+    monkeypatch.setattr(BL, "_now", lambda: real_now() - dt.timedelta(seconds=300))
+    bl._on_adv(_adv(KEYS_1, -70, time.monotonic(), status=0x50))   # HA passes on only a changed payload
+    assert bl._seen_by_source[KEYS_1]["kit"].record["rssi"] == -70
+    bl._on_adv(_adv(KEYS_1, -90, time.monotonic() - 400.0))    # replayed history
+    assert bl._seen_by_source[KEYS_1]["kit"].record["rssi"] == -70
+
+
+# ── review round 13 ──────────────────────────────────────────────────────────
+
+
+def test_a_pending_return_does_not_outlive_its_link():
+    """Round 13: "Not this tag" left a pending return in place. After the tag
+    was re-linked, ONE fresh report of its old address confirmed against
+    that stale entry and moved the tag back — what the two-report rule
+    exists to prevent."""
+    b = F.FindMyBridge()
+    k = KEYS_1
+    A, B, C, D = KEYS_1, KEYS_2, KEYS_3, BAG_1
+    _change(b, A, B, _separated(1), _separated(1, 0x22), KITCHEN, known={A: k})
+    _change(b, B, C, _separated(1, 0x22), _separated(1, 0x33), KITCHEN, t0=200.0)
+    assert b.tags[k]["addr"] == C
+    _poll(b, 320.0, {A: _heard(_separated(1), KITCHEN, 320.0, 319.0),        # A heard once: pending
+                     C: _heard(_separated(1, 0x33), KITCHEN, 320.0, 318.0)})
+    assert b.unlink(k, T0 + 330.0, address=C) == (C, B)
+    _change(b, B, D, _separated(1, 0x22), _separated(1, 0x44), KITCHEN, t0=400.0)
+    assert b.tags[k]["addr"] == D
+    r = _poll(b, 520.0, {A: _heard(_separated(1), KITCHEN, 520.0, 519.0),    # ONE report of A
+                         D: _heard(_separated(1, 0x44), KITCHEN, 520.0, 518.0)})
+    assert r["unlinked"] == [] and b.tags[k]["addr"] == D, b.tags[k]
+    r = _poll(b, 530.0, {A: _heard(_separated(1), KITCHEN, 530.0, 529.0),    # a second, newer one
+                         D: _heard(_separated(1, 0x44), KITCHEN, 530.0, 518.0)})
+    assert b.tags[k]["addr"] == A and (k, D, A) in r["unlinked"], (r, b.tags[k])
+
+
+def test_a_steady_advert_heard_only_by_the_hosts_own_adapter_stays_fresh(monkeypatch):
+    """Rounds 13-14: when HA runs its own adapter through bleak (Bluetooth
+    "degraded mode"), that scanner keeps no per-device timestamps, and HA
+    passes an unchanged advert to no callback — so a steady device heard
+    there (a Find My tag's constant payload) aged from its first report
+    while it was still advertising, and a tag back on its day key was never
+    followed there. The manager's last advert for the address dates it —
+    overall, or among connectable scanners when a passive proxy holds the
+    overall record — only when this scanner is the one it came from."""
+    import sys
+    import time
+    from types import SimpleNamespace
+    from custom_components.padspan_bright import bluetooth_live as BL
+    from custom_components.padspan_bright.const import DOMAIN
+
+    HOST = "00:1A:7D:DA:71:13"          # a real scanner's source is its adapter's MAC
+
+    def seeded(last_source, connectable_source=None):
+        mono = time.monotonic()
+        adv = SimpleNamespace(rssi=-60, manufacturer_data={76: bytes([0x12, 0x19, 0x10] + [0x11] * 22 + [1, 0])},
+                              service_data={}, service_uuids=[], tx_power=None, local_name=None)
+        host = SimpleNamespace(source=HOST, discovered_device_timestamps={},       # as bleak's HaScanner
+                               discovered_devices_and_advertisement_data={KEYS_1: (SimpleNamespace(address=KEYS_1, name=None), adv)})
+        last = {False: SimpleNamespace(source=last_source, time=mono - 2.0),
+                True: SimpleNamespace(source=connectable_source, time=mono - 3.0) if connectable_source else None}
+        mgr = SimpleNamespace(async_current_scanners=lambda: [host],
+                              async_last_service_info=lambda a, connectable: last[connectable] if a == KEYS_1 else None)
+        monkeypatch.setitem(sys.modules, "habluetooth", SimpleNamespace(get_manager=lambda: mgr))
+        bl = BL.BluetoothLive(SimpleNamespace(data={DOMAIN: {}}))
+        bl._on_adv(_adv(KEYS_1, -60, mono - 300.0, source=HOST))                # first heard 5 min ago
+        bl._seed_from_discovered()
+        return (BL._now() - bl._seen_by_source[KEYS_1][HOST].seen).total_seconds()
+
+    assert seeded(HOST) < 5
+    # A passive proxy holds the overall record; the host adapter is the
+    # connectable one that heard it.
+    assert seeded("AA:BB:CC:DD:EE:01", connectable_source=HOST) < 5
+    assert 295 <= seeded("AA:BB:CC:DD:EE:01") <= 305, "another scanner's advert is not this one's reading"
+
