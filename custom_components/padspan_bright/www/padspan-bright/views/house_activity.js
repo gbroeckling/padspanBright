@@ -22,7 +22,7 @@
  */
 
 const _q = new URL(import.meta.url).search;
-const { buildIsoSVG, fabricFrame, floorIdAtLevel } = await import(`./iso_lights.js${_q}`);
+const { buildIsoSVG, fabricFrame, floorNameAtLevel, pointInPolygon } = await import(`./iso_lights.js${_q}`);
 const { gatherLights, ensureLightsRegistry, lightIsTouched, atlasLookFromSettings, atlasIsoLookOpts,
         sunElevationDeg, ambientFromElevation, sunAmbient } = await import(`./lights_map.js${_q}`);
 const { airQualityBadness, airQualityWord, AIR_QUALITY_CLASSES, isAirQualityEntity, readingNeedsPlacement } =
@@ -201,6 +201,26 @@ export function shownReading(eid, state, attrs) {
 }
 
 /**
+ * What a change of a reading is judged on: what the Atlas DRAWS — for an air
+ * sensor that grades itself in words, its bars (airQualityBadness): two
+ * words that draw the same ("excellent", "good") are no change (review
+ * round 17). Otherwise the shown reading itself.
+ */
+export function readingKey(eid, state, attrs) {
+  const dc = attrs && attrs.device_class;
+  if (dc === "enum" && isAirQualityEntity(eid, attrs)) {
+    const w = String(state).toLowerCase();
+    if (!w || /^(unknown|unavailable|none)$/.test(w)) return null;
+    const b = airQualityBadness({ air_level: w });
+    // A word the table doesn't know ("very_unhealthy") draws no bars — the
+    // same as "good"; skipping it as no reading lost the bars going and
+    // coming back (review round 18).
+    return Number.isFinite(b) ? b : 0;
+  }
+  return shownReading(eid, state, attrs);
+}
+
+/**
  * With `attrsOf(eid)` the sensors count too (Traceback's 💡 Devices, Garry
  * 2026-09-24: "follows all devices that atlas can see") — temperature,
  * humidity and air quality, by the reading the Atlas shows (shownReading),
@@ -213,27 +233,60 @@ export function activityEvents(timeline, nameOf, startMs, endMs, attrsOf = null)
     if (reading && !attrsOf) continue;
     const attrs = reading ? (attrsOf(eid) || {}) : null;
     const shown = reading ? (s) => shownReading(eid, s, attrs) : (s) => s;
+    const keyOf = reading ? (s) => readingKey(eid, s, attrs) : (s) => s;
     // A whole degree or percent counts once the reading has moved a clear
-    // step (0.8) from the one last counted: a sensor on a rounding edge
-    // flipped 20°/21° on every report — hundreds a day that buried the
-    // doors and lights (review round 16).
+    // step (0.8) from the one last counted, or has HELD for 10 minutes — then
+    // at the moment the map changed. A sensor on a rounding edge flipped
+    // 20°/21° on every report, hundreds a day that buried the doors and
+    // lights (round 16); a small step that stayed was never counted (17).
     const edge = reading && (attrs.device_class === "temperature" || attrs.device_class === "humidity");
+    const HOLD_MS = 10 * 60 * 1000;
     // Compare each real state with the last REAL state before it, so an
     // "off → unavailable → on" still reads as the off → on it was
     // (re-review 2026-09-23: skipping both sides of a gap lost the change).
-    let prev = null, prevNum = null;
+    let prevKey = null, prevLabel = null, prevNum = null, pend = null;
+    const commit = (c) => {
+      if (prevKey !== null && c.t >= startMs && c.t <= endMs) {
+        ev.push({ t: c.t, eid, name: nameOf(eid), from: prevLabel, to: c.label });
+      }
+      prevKey = c.k; prevLabel = c.label; prevNum = c.num;
+    };
     for (let i = 0; i < list.length; i++) {
       const r = list[i];
-      if (_NOT_A_CHANGE.has(r.state)) continue;
-      const v = shown(r.state);
-      if (v == null || v === prev) continue;
-      if (edge && prev !== null && Math.abs(Number(r.state) - prevNum) < 0.8) continue;
-      if (i > 0 && prev !== null && r.t >= startMs && r.t <= endMs) {
-        ev.push({ t: r.t, eid, name: nameOf(eid), from: prev, to: v });
+      if (_NOT_A_CHANGE.has(r.state)) {
+        // Offline: a small step waiting to hold is judged when the sensor
+        // is back (review rounds 18-19).
+        if (pend && pend.darkAt == null) pend.darkAt = r.t;
+        continue;
       }
-      prev = v;
-      prevNum = Math.round(Number(r.state));
+      const k = keyOf(r.state);
+      if (k == null) continue;
+      if (pend && pend.darkAt != null) {
+        // Back within 10 minutes: a blip, the step still stands — ESPHome
+        // reconnects are hours of blips, and dropping it at each one never
+        // counted it (round 19). Offline longer: it counts only if it had
+        // held before it went (round 18).
+        if (r.t - pend.darkAt < HOLD_MS) pend.darkAt = null;
+        else { if (pend.darkAt - pend.t >= HOLD_MS) commit(pend); pend = null; }
+      }
+      if (pend && r.t - pend.t >= HOLD_MS) { commit(pend); pend = null; }
+      // Drawn the same: no change — but the word it goes by is the latest.
+      if (k === prevKey) { pend = null; prevLabel = shown(r.state); continue; }
+      const c = { k, label: shown(r.state), num: Math.round(Number(r.state)), t: r.t };
+      if (prevKey === null) { commit(c); continue; }        // the starting value — no change
+      if (edge && Math.abs(Number(r.state) - prevNum) < 0.8) {
+        if (!pend || pend.k !== k) pend = c;                // held long enough, or a clear step later
+        continue;
+      }
+      // A clear step to the value a small one already showed: the map
+      // changed at the small one (round 18: timed one report late).
+      commit(pend && pend.k === k ? { ...c, t: pend.t } : c);
+      pend = null;
     }
+    // Held to the window's end — or to now, when the window runs past it
+    // (round 18: a step a minute old counted as held in a future window) —
+    // or to when it went offline for good.
+    if (pend && (pend.darkAt != null ? pend.darkAt : Math.min(endMs, Date.now())) - pend.t >= HOLD_MS) commit(pend);
   }
   return ev.sort((a, b) => a.t - b.t);
 }
@@ -245,18 +298,33 @@ export function activityEvents(timeline, nameOf, startMs, endMs, attrsOf = null)
  * linked wall, which no filter hides. Review round 16: unplaced, hidden and
  * unlinked ones were counted and named with nothing on the map changing.
  */
-export function atlasShownEids(model, settings, lights, shapeOverrides = {}) {
-  const placed = (model && model.light_positions_m) || {};
-  const geo = (model && model.room_geometry_m) || {};
-  const walls = new Set(((model && model.rf_barriers_m) || []).map(b => b && b.linked_entity_id).filter(Boolean).map(String));
+export function atlasShownEids(model, settings, lights, shapeOverrides = {}, frame = null) {
+  // What the frame DRAWS, from the frame's own fabric (review round 17): the
+  // outside floor's rooms and placements are drawn on no plate, and a wall
+  // on a floor with no slab is never drawn.
+  const fr = frame || fabricFrame(model || {}, (model && model.floors) || [], 150, 0);
+  const drawnLevels = new Set(fr.levels);
+  const placed = new Map(fr.lights.map(p => [String(p.eid), p]));
+  const rooms = new Set(fr.rooms.map(r => r.room));
+  // A door, window or LOCK linked to a wall is drawn as that wall, which no
+  // filter hides (a lock linked to a wall was dropped — round 17).
+  const walls = new Set(((model && model.rf_barriers_m) || [])
+    .filter(b => b && b.linked_entity_id && drawnLevels.has(fr.levelOf(String(b.floor_id || "main"))))
+    .map(b => String(b.linked_entity_id)));
   const hidden = _hiddenOnMap(settings, model, lights, shapeOverrides);
   const out = new Set();
   for (const l of lights || []) {
     const eid = String(l.entity_id);
-    if (l.isDoor) { if (walls.has(eid)) out.add(eid); continue; }
-    if (hidden.has(eid)) continue;
-    if (readingNeedsPlacement(l)) { if (placed[eid]) out.add(eid); continue; }
-    if (placed[eid] || (l.area_name && geo[l.area_name])) out.add(eid);
+    if (walls.has(eid)) { out.add(eid); continue; }
+    if (l.isDoor || hidden.has(eid)) continue;
+    const p = placed.get(eid);
+    if (readingNeedsPlacement(l)) {
+      // Digits at the placement; an air sensor's bars fill the room it is
+      // placed in — outside every room outline, nothing changes.
+      if (p && (!l.isAir || fr.rooms.some(r => r.z === p.z && pointInPolygon(r.pts, p.x, p.y)))) out.add(eid);
+      continue;
+    }
+    if (p || (l.area_name && rooms.has(l.area_name))) out.add(eid);
   }
   return out;
 }
@@ -267,7 +335,7 @@ function _hiddenOnMap(settings, model, lights, shapeOverrides) {
   for (const l of lights || []) if (!lightIsTouched(l, shapeOverrides, (model && model.light_positions_m) || {})) hidden.add(l.entity_id);
   return hidden;
 }
-/** hs.events, only the ones a frame shows (hs.shown); all while not yet known. */
+/** hs.events, only the ones a frame shows (hs.shown); all while not yet known (null). */
 export function shownHouseEvents(hs) {
   if (hs._shownEvSrc !== hs.events || hs._shownEvKey !== hs.shownKey) {
     hs._shownEvSrc = hs.events;
@@ -297,10 +365,12 @@ export function refreshHouseDevices(ctx, hs, onRegistry) {
     typeOverrides, reg.pairMap, reg.manufacturerMap, undefined, true);
   hs.eids = liveLights.map(l => l.entity_id);
   hs.regLoading = !!reg.loading;
-  if (reg.loading) { hs.shown = null; hs.shownKey = ""; return reg; }
+  // null while unknown: an EMPTY set once known is a set like any other — it
+  // shared the loading key "" and was never applied (round 17).
+  if (reg.loading) { hs.shown = null; hs.shownKey = null; return reg; }
   const shown = atlasShownEids(model, settings, liveLights, shapeOverrides);
   const key = [...shown].sort().join(",");
-  if (key !== hs.shownKey) { hs.shown = shown; hs.shownKey = key; }
+  if (!hs.shown || key !== hs.shownKey) { hs.shown = shown; hs.shownKey = key; }
   return reg;
 }
 
@@ -390,8 +460,7 @@ export function atlasFocusPositions(model, floorGap = 150, horizGap = 0) {
     const pos = positions[Math.max(0, Math.min(idx, positions.length - 1))];
     if (pos === null) return "All floors";
     return (Array.isArray(pos) ? pos : [pos])
-      .map(z => { const fid = floorIdAtLevel(frame, model, floors, z); const f = floors.find(x => String(x.id) === fid);
-        return f ? (f.name || `L${z}`) : `L${z}`; }).join(" + ");
+      .map(z => floorNameAtLevel(frame, model, floors, z) || `L${z}`).join(" + ");
   };
   return { positions, labelOf };
 }
@@ -508,10 +577,9 @@ export function renderHouseFrame(ctx, hs, frames, frameIdx, beaconOpts, onRegist
                                  { changedEids = null, devices = true } = {}) {
   const settings = ctx.state.settings || {};
   // Without devices: no registry (a multi-MB fetch for nothing), no device
-  // list, and a door's wall is just a wall — not "no reading" dashes
-  // (review round 16).
-  const model = devices ? (ctx.state.model || {}) : { ...(ctx.state.model || {}),
-    rf_barriers_m: ((ctx.state.model || {}).rf_barriers_m || []).map(b => (b && b.linked_entity_id ? { ...b, linked_entity_id: null } : b)) };
+  // list, and a door's wall drawn closed (neutralWalls) — not "no reading"
+  // dashes (round 16), nor gone (round 17).
+  const model = ctx.state.model || {};
   const floors = model.floors || [];
   const reg = devices ? refreshHouseDevices(ctx, hs, onRegistry) : { areaMap: {}, platformMap: {}, loading: false };
   const shapeOverrides = (settings.light_shapes && typeof settings.light_shapes === "object") ? settings.light_shapes : {};
@@ -554,5 +622,6 @@ export function renderHouseFrame(ctx, hs, frames, frameIdx, beaconOpts, onRegist
     nowMs: tMs,
     floodLatches: settings.flood_latches || {},
     changedEids: changedEids || [],
+    neutralWalls: !devices,
   });
 }

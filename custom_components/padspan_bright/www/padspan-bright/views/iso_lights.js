@@ -2170,8 +2170,11 @@ export function fabricFrame(model, floors, floorGap, horizGap){
     return floorList.some(f => String(f.id) === "outside") ? "outside" : s;
   };
   const fabricFloorIds = new Set();
+  // Floors that carry ROOMS: the backend keeps a floor HA dropped only while
+  // rooms remain on it (round 18).
+  const roomFloorIds = new Set();
   for (const g of Object.values((model && model.room_geometry_m) || {})) {
-    if (g && typeof g === "object") fabricFloorIds.add(canon(g.floor_id));
+    if (g && typeof g === "object") { fabricFloorIds.add(canon(g.floor_id)); roomFloorIds.add(canon(g.floor_id)); }
   }
   for (const lp of Object.values((model && model.light_positions_m) || {})) {
     if (lp && typeof lp === "object") fabricFloorIds.add(canon(lp.floor_id));
@@ -2193,44 +2196,39 @@ export function fabricFrame(model, floors, floorGap, horizGap){
     const regIds = floorList.map(f => String(f.id));
     if (floorList.length && floorList.every(f => num(f.level) !== null)) return null;  // explicit levels win
     const extra = [...fabricFloorIds].filter(id => !regIds.includes(id));
-    const ids = [...regIds, ...extra];
-    const elev = ids.map(id => num(elevations[id]));
-    const useElev = elev.some(v => v !== null) && new Set(elev).size > 1;
-    // Priority: a measured elevation, then the storey a name denotes — and
-    // outdoors sits at ground level, because it does. A floor nothing places
-    // goes above the named storeys on a slab of its own, in registry order,
-    // as ModelStore._ordered_floors / floor_stack_index do: ranked by its
-    // position in the list, its index collided with a named storey's and a
-    // room-less "Garage" shared Upstairs' slab (review round 13).
     const storeyOf = (id) => {
       const f = floorList.find(x => String(x.id) === id);
       const lvl = f ? num(f.level) : null;
       return lvl !== null ? lvl : conventionalLevel(id);
     };
-    const keyOf = (id, i) => {
-      if (!useElev) return storeyOf(id);
-      if (elev[i] !== null) return elev[i];
-      // The keys are metres here. A floor with no elevation but a storey
-      // (the fabric's "__outside__" when the registry has no outside floor)
-      // takes the elevation of the nearest floor at or below that storey,
-      // else the lowest floor's: its storey number read as metres put the
-      // garden on the basement's slab (round 14), and "on top" left it on a
-      // slab never drawn where no floor names the ground — "Home",
-      // "Downstairs"/"Upstairs" (round 15). Only a floor nothing places
-      // goes on top.
-      const s = storeyOf(id);
-      if (s === null) return null;
-      let best = null, bestStorey = -Infinity, lowest = null;
-      ids.forEach((o, k) => {
-        if (elev[k] === null) return;
-        if (lowest === null || elev[k] < lowest) lowest = elev[k];
-        const so = storeyOf(o);
-        if (so !== null && so <= s && so > bestStorey) { bestStorey = so; best = elev[k]; }
-      });
-      return best !== null ? best : lowest;
-    };
-    const order = ids.map((id, i) => ({ id, key: keyOf(id, i), i }))
-      .sort((a, b) => ((a.key === null) - (b.key === null)) || (a.key - b.key) || (a.i - b.i));
+    // The floors that make the stack: every indoor floor — the registry's,
+    // and the fabric's own (a floor HA dropped while PadSpan still has rooms
+    // on it is kept by the backend, with its elevation: round 17 drew it on
+    // another floor's plate). They take ModelStore.floor_stack_index's order:
+    // by the elevations the backend computed IN that order when every floor
+    // has one, else by the storey a level or name denotes, a floor nothing
+    // places above the named storeys on a slab of its own — among those, by
+    // elevation where one exists (the backend's creation order; this list is
+    // sorted by name), then list order. Metres for some floors and storeys
+    // for others merged floors whose elevation had not synced yet (round 16);
+    // ranking an unknown name by its list position collided with a named
+    // storey (round 13).
+    // A fabric floor stacks when it carries rooms — an outdoor-named one only
+    // when the backend kept it (it sent its elevation), and never the outside
+    // floor itself: its rooms are drawn on no plate, so a slab of its own was
+    // one no plate draws and its gates vanished (round 19). One known only
+    // from a light's placement joins a plate below: stacked, a light saved on
+    // "main" beside Downstairs/Upstairs made an empty plate (round 18).
+    const overlayOnly = (id) => id === "outside" || id === "__outside__";
+    const stackIds = [...regIds, ...extra.filter(id => roomFloorIds.has(id) && !overlayOnly(id)
+      && (!isOutdoorFloorId(id) || num(elevations[id]) !== null))];
+    const elev = stackIds.map(id => num(elevations[id]));
+    const useElev = stackIds.length > 1 && elev.every(v => v !== null) && new Set(elev).size > 1;
+    const keyOf = (id, i) => useElev ? elev[i] : storeyOf(id);
+    const tie = (e) => (e === null ? Infinity : e);
+    const order = stackIds.map((id, i) => ({ id, key: keyOf(id, i), e: elev[i], i }))
+      .sort((a, b) => ((a.key === null) - (b.key === null)) || (a.key - b.key)
+        || ((tie(a.e) - tie(b.e)) || 0) || (a.i - b.i));
     const out = {};
     // Collapse to contiguous slab indices: two floors that share a storey
     // (the garden and the ground floor) must share a slab, not be pushed apart.
@@ -2239,6 +2237,32 @@ export function fabricFrame(model, floors, floorGap, horizGap){
       if (slab < 0 || o.key === null || o.key !== prevKey) slab++;
       prevKey = o.key;
       out[o.id] = slab;
+    }
+    // Every other fabric floor — the "__outside__" sentinel when the registry
+    // has no outside floor, a floor only a light names — is no storey of the
+    // stack: it sits with the nearest floor at or below its storey, else on
+    // the lowest slab. Never a slab of its own: "on top" left the garden on
+    // a slab never drawn (round 15), and a new one drew an empty plate (18).
+    // It joins a plate that DRAWS rooms — never the outside floor's slab —
+    // else the lowest such plate (round 19: joined to Outside's undrawn slab,
+    // or to slab 0 under a room-less floor, a stray light still got a plate
+    // of its own).
+    const plated = stackIds.filter(r => !overlayOnly(r) && roomFloorIds.has(r));
+    const inside = stackIds.filter(r => !overlayOnly(r));
+    const lowest = plated.length ? Math.min(...plated.map(r => out[r])) : 0;
+    for (const id of extra) {
+      if (stackIds.includes(id)) continue;
+      const s = storeyOf(id);
+      const pick = (cands) => {
+        let best = null, bestStorey = -Infinity;
+        if (s !== null) for (const r of cands) {
+          const so = storeyOf(r);
+          if (so !== null && so <= s && so > bestStorey) { bestStorey = so; best = r; }
+        }
+        return best;
+      };
+      const best = plated.length ? pick(plated) : pick(inside);
+      out[id] = best !== null ? out[best] : lowest;
     }
     return out;
   })();
@@ -2455,13 +2479,38 @@ export function floorIdAtLevel(frame, model, floors, z){
     const fid = canon(String((lp && lp.floor_id) || ""));
     if(fid) drawn.add(fid);
   }
-  const rank = (id) => (drawn.has(id) ? 0 : 2) + (isOutdoorFloorId(id) ? 1 : 0);
+  // The outside floor is drawn on no plate: it names one only when nothing
+  // else is there (review round 17 — a lone yard's plate read "Outside").
+  const rank = (id) => (drawn.has(id) ? 0 : 2) + (isOutdoorFloorId(id) ? 1 : 0)
+    + (id === "outside" || id === "__outside__" ? 4 : 0);
   let best = null;
   for(const id of ids){
     if(Number(frame.levelOf(id)) !== Number(z)) continue;
     if(best === null || rank(id) < rank(best)) best = id;
   }
   return best;
+}
+
+// The name of the plate at storey z: every registry floor drawn on it,
+// floorIdAtLevel's first, joined by "/" ("Main/Garden") — " + " is between
+// plates on the sliders (round 17). ONE name for the slider, the legend,
+// the floor buttons and the floor sheet on the Atlas and in Traceback,
+// which had drifted apart (round 16). The outside floor is drawn on no
+// plate. null when the registry names nothing there.
+export function floorNameAtLevel(frame, model, floors, z){
+  const first = floorIdAtLevel(frame, model, floors, z);
+  const drawn = new Set();
+  for(const g of Object.values((model && model.room_geometry_m) || {})) if(g && g.floor_id) drawn.add(String(g.floor_id));
+  for(const lp of Object.values((model && model.light_positions_m) || {})) if(lp && lp.floor_id) drawn.add(String(lp.floor_id));
+  const names = [];
+  const add = (f) => { const n = f && (f.name || f.id); if(n && !names.includes(n)) names.push(n); };
+  if(first !== "outside" && first !== "__outside__") add((floors || []).find(x => String(x.id) === String(first)));
+  for(const f of floors || []){
+    const id = String(f.id);
+    if(id === "outside" || !drawn.has(id) || Number(frame.levelOf(id)) !== Number(z)) continue;
+    add(f);
+  }
+  return names.length ? names.join("/") : null;
 }
 
 // ── Isometric 3-D SVG builder ────────────────────────────────────────────────
@@ -2620,6 +2669,9 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   // Traceback's 💡 Devices: the devices that changed at the replayed moment,
   // each ringed where it is drawn.
   const CHANGED = new Set((opts.changedEids || []).map(String));
+  // Traceback's Full house activity without devices: a door's wall is drawn
+  // closed — there is no reading to show, and "no reading" is not what it is.
+  const NEUTRAL_WALLS = !!opts.neutralWalls;
   // In-progress door/window circle (maps.js's on-map circle tool, triggered
   // from the Lights table's "Place"): the circle placed so far, if any —
   // {x_m, y_m, r_m, floorId} — and whether the tool is armed at all (armed
@@ -5726,7 +5778,10 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         // dashed line — never the red "unlocked" alarm nor an open gap, which
         // is what "unknown" fell through to (review 2026-09-23; an offline
         // lock flashed red live too).
-        if(barrierNoReading(dl)){
+        if(NEUTRAL_WALLS){
+          s+=`<polyline points="${ppx}" fill="none" stroke="#94a3b8" stroke-width="2.6" `+
+            `stroke-linecap="round" opacity="${barDim.toFixed(2)}" pointer-events="none"/>`;
+        } else if(barrierNoReading(dl)){
           s+=`<polyline points="${ppx}" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="3,4" `+
             `stroke-linecap="round" opacity="${(0.7*barDim).toFixed(2)}" pointer-events="none"/>`;
         } else if(dl && dl.isLock){
@@ -6280,9 +6335,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // The floor the drawing put here (floorIdAtLevel): HA floors usually
       // have no level, and matching it read "Basement, Floor 1, Floor 2"
       // (review round 13).
-      const flId=floorIdAtLevel(frame, model, floors, z);
-      const fl=(floors||[]).find(f=>String(f.id)===flId);
-      const label=fl?(fl.name||`Floor ${z}`):`Floor ${z}`;
+      const label=floorNameAtLevel(frame, model, floors, z) || `Floor ${z}`;
       s+=`<circle cx="${lx}" cy="${ly}" r="${R}" fill="${color}" opacity="0.9"/>`;
       s+=`<text x="${lx}" y="${ly+3}" text-anchor="middle" fill="#071008" font-size="8" font-weight="700">${i+1}</text>`;
       lx+=R+5;
