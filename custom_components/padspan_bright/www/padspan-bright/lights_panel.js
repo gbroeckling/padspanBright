@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.80";
-const BUILD_ID = "20260925T012145Z";
+const APP_VERSION = "0.38.81";
+const BUILD_ID = "20260927T225112Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -27,6 +27,8 @@ const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable
         wireUseSurface, openControlCard, controlApiFor, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates, doorInvertOf,
         wireHoverHud, captureWholeHouse, applyWholeHouse } =
   await import(`./views/lights_map.js${new URL(import.meta.url).search}`);
+const { keepSubscribed } =
+  await import(`./views/push_subscription.js${new URL(import.meta.url).search}`);
 
 // ── DOM helpers ──────────────────────────────────────────────────────────────
 function el(tag, attrs={}, children=[]){
@@ -113,6 +115,17 @@ class PadSpanLightsApp extends HTMLElement {
   set hass(hass){
     this._hass = hass;
     if(!this._booted){ this._booted=true; this._boot(); }
+    // Motion sensors back from an offline blip (motion_reconnects.py), pushed
+    // on every change — one subscription per connection, kept across HA
+    // restarts (push_subscription.js). A push once settings have landed
+    // redraws (a boot draws with whatever is here), so a blip never shows
+    // for even one poll.
+    if(hass && hass.connection && this._reconnectsConn !== hass.connection){
+      if(this._reconnectsStop) this._reconnectsStop();
+      this._reconnectsConn = hass.connection;
+      this._reconnectsStop = keepSubscribed(hass.connection, { type:"padspan_bright/motion_reconnects" },
+        m => { this.state._motionReconnects = m || {}; if(this._settingsTs) this._poll(); });
+    }
   }
 
   async _boot(){
@@ -410,7 +423,7 @@ class PadSpanLightsApp extends HTMLElement {
       ? ensureLightsRegistry(this._regStore, this._hass, this.state.model.areas, ()=>this._render())
       : { areaMap:{}, platformMap:{}, loading:true };
     const lightsLoading = reg.loading;
-    const lights = gatherLights(this._hass?.states||{}, reg.areaMap, this.state._shapeOverrides, this.state._tier, reg.platformMap, this.state._typeOverrides, reg.pairMap, reg.manufacturerMap);
+    const lights = gatherLights(this._hass?.states||{}, reg.areaMap, this.state._shapeOverrides, this.state._tier, reg.platformMap, this.state._typeOverrides, reg.pairMap, reg.manufacturerMap, undefined, false, this.state._motionReconnects);
 
     if(!lights.length){
       root.appendChild(el("div",{class:"muted",style:"padding:8px"},"No light entities found."));
@@ -722,6 +735,8 @@ class PadSpanLightsApp extends HTMLElement {
 
   disconnectedCallback(){
     if(this._pollTimer){ clearInterval(this._pollTimer); this._pollTimer=null; }
+    if(this._reconnectsStop) this._reconnectsStop();
+    this._reconnectsStop = null; this._reconnectsConn = null;
   }
 }
 
