@@ -19,7 +19,7 @@ Organisation:
 
 DOMAIN = "padspan_bright"
 NAME = "PadSpan Bright"
-VERSION = "0.38.82"
+VERSION = "0.38.83"
 
 # ── Config-flow option keys ───────────────────────────────────────────────────
 CONF_ENABLE_CLOUD = "enable_cloud"
@@ -69,6 +69,7 @@ DATA_DEVICE_REGISTRY = "device_registry"     # stable device identity registry
 DATA_ESPRESENSE_MQTT = "espresense_mqtt"     # ESPresense MQTT ingestion module
 DATA_FORENSICS = "forensics"                 # presence-session recorder (opt-in)
 DATA_CAPTURE = "capture"                     # RSSI vector session recorder (opt-in)
+DATA_WLED_LOOKS = "wled_looks"               # wled_exact.WledLooksStore — each WLED device's remembered look
 
 # ── HA Storage file keys (.storage/<key>) ─────────────────────────────────────
 SETTINGS_STORE_KEY = "padspan_bright.settings"
@@ -89,6 +90,7 @@ TRACEBACK_STORE_KEY = "padspan_bright.traceback"
 FORENSICS_STORE_KEY = "padspan_bright.forensics"
 # Manifest only — session frames live in .storage/padspan_bright.capture_sessions/
 CAPTURE_STORE_KEY = "padspan_bright.capture"
+WLED_LOOKS_STORE_KEY = "padspan_bright.wled_looks"   # wled_exact.py — keyed by the MAC HA verified
 
 # ── Filesystem / map defaults ─────────────────────────────────────────────────
 DEFAULT_FLOOR_ID = "main"
