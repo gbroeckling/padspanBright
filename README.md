@@ -42,7 +42,7 @@ pick from 19 Showcase visual themes for the map itself, saved and reloaded
 from a presets bar.
 
 No key yet? **Settings → Features → PadSpan licence** has a one-time
-3-month free trial — no card required, no reinstall.
+90-day free trial — no card required, no reinstall.
 
 Every motion sensor's flash and fade run through the same normalizer no
 matter the hardware underneath — an alarm-panel PIR that self-clears in 5
@@ -81,7 +81,8 @@ Then:
 1. Install **PadSpan Bright** and restart Home Assistant.
 2. Open Settings → Devices & services → **Add integration** → PadSpan Bright.
 3. Open **PadSpan Bright** in the sidebar: draw your floors and rooms under
-   Mapping, then turn on the **Atlas** sidebar panel in Settings.
+   Mapping. The **Atlas** sidebar panel shows the result (it is on by default;
+   Settings turns it off).
 
 Home Assistant 2024.1 or newer. No hardware needed — it reads your `light.*`
 entities and their room assignments from Home Assistant.
@@ -99,7 +100,7 @@ light come across; then remove Bright.
 
 ## Privacy
 
-Once a day PadSpan Bright asks `padspan.traks.ca` whether a newer version exists, sending only its version number (turn it off under Settings → Update Check). Separately there is an **opt-in, off-by-default** usage report — **Settings → Help improve PadSpan** — that sends counts, versions and flags only (how many floors, rooms and lights; which features are on; which tabs were used; a few health flags) and never addresses, keys, names, coordinates or timestamps. **Preview what would be sent** shows the exact report before you decide; the code refuses to send anything identifier-shaped.
+Once a day PadSpan Bright asks `padspan.traks.ca` whether a newer version exists, sending only its version number (turn it off under Settings → Update Check). Separately there is an **opt-in, off-by-default** usage report — **Settings → Help improve PadSpan** — that sends counts, versions and flags only (how many floors, rooms and lights; which features are on; which tabs were used; a few health flags) and never addresses, keys, names, coordinates or timestamps. **Preview what would be sent** shows the exact report before you decide; the code refuses to send anything identifier-shaped. While the report is on, the same card offers **Become a tester** — separate from the report, and the one place PadSpan asks for contact details: sent only when you press **Send sign-up**, shown to you first, to the developer only, kept until you press **Stop being a tester**, and never shared or sold.
 
 ## Documentation, issues, licence
 

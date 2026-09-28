@@ -30,6 +30,7 @@ registers everything (async_register_websockets), so the panel sees one API.
     ws_factory_reset   the factory reset
     ws_bright_import   the PadSpan Bright → PadSpan Bright import
     ws_telemetry       the opt-in usage report
+    ws_tester          "Become a tester" — separate from the report (tester.py)
     ws_settings        settings get/set
 
 Every moved name is imported back here, so `from .websocket import ws_x`
@@ -223,6 +224,12 @@ from .ws_telemetry import (  # noqa: F401  (re-exported: registration, tests, ca
     ws_install_base,
     ws_telemetry_send_now,
 )
+from .ws_tester import (  # noqa: F401  (re-exported: registration, tests, callers)
+    ws_tester_preview,
+    ws_tester_signup,
+    ws_tester_status,
+    ws_tester_withdraw,
+)
 from .ws_fabric import (  # noqa: F401  (re-exported: registration, tests, callers)
     ws_fabric_beacon_position_set,
     ws_fabric_beacon_remove,
@@ -327,6 +334,10 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     # The Atlas WLED card's Advanced tab — a safe proxy to the device (ws_wled.py).
     from .ws_wled import async_register as _wled_register
     _wled_register(hass)
+    # The Atlas "Test emergency lighting" button (emergency_test.py).
+    from .emergency_test import WS_COMMANDS as _emergency_commands
+    for _cmd in _emergency_commands:
+        websocket_api.async_register_command(hass, _cmd)
     websocket_api.async_register_command(hass, ws_flood_reset)
     # A motion sensor's last real change across an offline blip (motion_reconnects.py).
     from .motion_reconnects import ws_motion_reconnects
@@ -368,6 +379,11 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_telemetry_send_now)
     websocket_api.async_register_command(hass, ws_telemetry_reset_id)
     websocket_api.async_register_command(hass, ws_install_base)
+    # "Become a tester": its own commands, apart from the report's (tester.py)
+    websocket_api.async_register_command(hass, ws_tester_status)
+    websocket_api.async_register_command(hass, ws_tester_preview)
+    websocket_api.async_register_command(hass, ws_tester_signup)
+    websocket_api.async_register_command(hass, ws_tester_withdraw)
     # Phase 1: positioning fabric commands
     websocket_api.async_register_command(hass, ws_fabric_scanner_remove)
     websocket_api.async_register_command(hass, ws_fabric_beacon_remove)

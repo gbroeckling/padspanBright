@@ -34,6 +34,7 @@ _BACKEND_ONLY = {
     "room_tag_map",                # tag integration / live snapshot
     "telemetry_install_id",        # minted by telemetry.py; replaced via telemetry_reset_id
     "telemetry_last_day",          # stamped by telemetry.py on an accepted send
+    "tester_signup",               # padspan_bright/tester_signup / tester_withdraw (tester.py) — never settings_set
     "flood_latches",               # flood_latch.py's state-change listener + padspan_bright/flood_reset
     "vacation_mode_pattern",           # vacation_mode.py — built from HA's own recorder history
     "vacation_mode_pattern_built_at",  # ditto — stamped alongside the pattern
@@ -43,6 +44,7 @@ _BACKEND_ONLY = {
     "vacation_mode_pattern_attempt",   # vacation_mode.py — last empty build, for the hourly retry
     "vacation_mode_pattern_prev",      # vacation_mode.py — the last learned pattern, kept across vacations
     "vacation_mode_tracked_since",     # settings_store.py — stamped once on upgrade
+    "atlas_default_v1_applied",        # settings_store.py — the one-time Atlas-on switch, stamped on load
     "wled_teams",                      # padspan_bright/wled_teams_set (ws_wled.py), validated there
 }
 

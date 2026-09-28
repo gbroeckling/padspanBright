@@ -300,5 +300,196 @@ if (Cls) {
   } catch (e) { fail("HA restart", "lifecycle", e); }
 }
 
-console.log(JSON.stringify({ scenarios, failures, blip, restart }));
+// The "Test emergency lighting" button (emergency_test.py): hidden without
+// lights, floats right after the stage, toggles through the backend, and
+// Force off shows only while a test runs.
+const emergency = { hiddenWithout: null, afterStage: null, idleForce: null, sent: [], activeForce: null,
+  activeLabel: null, endedForce: null };
+if (Cls) {
+  try {
+    const members = [{ entity_id: "light.a", name: "Closet", state: "off" },
+                     { entity_id: "switch.b", name: "PoE 7", state: "on" }];
+    let test = { active: false, started_at: null, kept_on: [] };
+    let available = false;
+    const hass = makeHass({ settings: BASE });
+    const real = hass.callWS;
+    hass.callWS = async (m) => {
+      if (m.type === "padspan_bright/emergency_status") return { available, source: "group", groups: [], members, test };
+      if (m.type === "padspan_bright/emergency_member") {
+        emergency.sent.push(`member:${m.entity_id}:${m.on}`);
+        test = { ...test, manual: [m.entity_id] };
+        return { available, source: "group", groups: [], members, test, results: [{ entity_id: m.entity_id, ok: true }] };
+      }
+      if (m.type === "padspan_bright/emergency_test" || m.type === "padspan_bright/emergency_force_off") {
+        emergency.sent.push(m.type === "padspan_bright/emergency_test" ? `test:${m.on}` : "force_off");
+        test = m.on ? { active: true, started_at: 1, kept_on: ["switch.b"], manual: [] }
+                    : { active: false, started_at: null, kept_on: [], manual: [] };
+        return { available, source: "group", groups: [], members, test,
+                 results: [{ entity_id: "light.a", ok: true }, { entity_id: "switch.b", ok: false, skipped: "unavailable" }] };
+      }
+      return real(m);
+    };
+    const el = new Cls();
+    el.connectedCallback();
+    el.hass = hass;
+    await el._boot(); await flush(); await flush();
+    const find = (cls) => el.shadowRoot.querySelector("#content")._all().filter(n => (n.className || "").split(" ").includes(cls));
+    emergency.hiddenWithout = find("lv-emerg-btn").length === 0;
+    available = true;
+    await el._loadEmergency(); el._render();
+    const anchor = find("lv-emerg-anchor")[0];
+    const stage = find("lv-stage")[0];
+    emergency.afterStage = !!(anchor && stage && stage.nextSibling === anchor);
+    emergency.idleForce = find("lv-emerg-force").length;
+    find("lv-emerg-btn")[0].click();
+    await flush(); await flush();
+    emergency.activeForce = find("lv-emerg-force").length;
+    emergency.activeLabel = find("lv-emerg-label")[0]?.textContent || null;
+    // The ring: the card of every emergency light, a switch each.
+    find("lv-emerg-ring")[0].click();
+    await flush();
+    const cardText = () => (el._emergCard ? document.body._all().map(n => n._text || "").join("|") : "");
+    emergency.cardOpen = !!el._emergCard;
+    emergency.cardNames = ["Closet", "PoE 7"].every(n => cardText().includes(n));
+    emergency.cardTag = cardText().includes("was on");
+    const turn = document.body._all().find(n => n.localName === "button" && n.textContent === "Turn on");
+    if (turn) turn.click();
+    await flush(); await flush();
+    el._render();                                   // a poll refills the open card; it must not throw
+    emergency.cardStillOpen = !!el._emergCard;
+    find("lv-emerg-force")[0].click();
+    await flush(); await flush();
+    emergency.endedForce = find("lv-emerg-force").length;
+    el.disconnectedCallback();
+  } catch (e) { fail("emergency test button", "lifecycle", e); }
+}
+
+// The review fixes (2026-09-28): a tap while switching is answered and
+// Force off queued; a real emergency makes Force off ask twice; a stale
+// status never overwrites an action's answer; the card is not rebuilt under
+// a finger or when nothing changed; polling slows when there are no lights.
+const emerg2 = { busyShown: null, stillToast: null, queuedRan: null, sent: [], armToast: null, armedLabel: null,
+  armSent: null, confirmSent: null, staleIgnored: null, cardKept: null, cardRefilled: null, cardHeld: null,
+  pollIdle: null, pollIdleLate: null, pollLive: null };
+if (Cls) {
+  try {
+    const members = [{ entity_id: "light.a", name: "Closet", state: "off" }];
+    let test = { active: true, started_at: 1, kept_on: [], manual: [] };
+    let ran = [];
+    let available = true;
+    const gates = [];                                 // held answers, released by hand
+    const hold = () => new Promise((res) => gates.push(res));
+    const status = () => ({ available, source: "group", groups: [], members, test, emergency_ran: ran, pending_off: [] });
+    let holdNext = false, statusCalls = 0;
+    const hass = makeHass({ settings: BASE });
+    const real = hass.callWS;
+    hass.callWS = async (m) => {
+      if (m.type === "padspan_bright/emergency_status") {
+        statusCalls++;
+        const snap = status();
+        if (holdNext) { holdNext = false; await hold(); }
+        return snap;
+      }
+      if (m.type === "padspan_bright/emergency_test" || m.type === "padspan_bright/emergency_force_off") {
+        emerg2.sent.push(m.type === "padspan_bright/emergency_test" ? `test:${m.on}` : "force_off");
+        if (holdNext) { holdNext = false; await hold(); }
+        test = m.on ? { active: true, started_at: 1, kept_on: [], manual: [] }
+                    : { active: false, started_at: null, kept_on: [], manual: [] };
+        return { ...status(), results: [] };
+      }
+      return real(m);
+    };
+    const toasts = () => document.body._all().map(n => n._text || "").filter(Boolean).join("|");
+    const el = new Cls();
+    el.connectedCallback();
+    el.hass = hass;
+    await el._boot(); await flush(); await flush();
+    const find = (cls) => el.shadowRoot.querySelector("#content")._all().filter(n => (n.className || "").split(" ").includes(cls));
+
+    // 2. End the test (held), tap again, tap Force off: told, and queued.
+    holdNext = true;
+    find("lv-emerg-btn")[0].click();
+    await flush();
+    emerg2.busyShown = find("lv-emerg").some(n => n.classList.contains("busy"));
+    find("lv-emerg-btn")[0].click();
+    emerg2.stillToast = toasts().includes("Still switching…");
+    find("lv-emerg-force")[0].click();
+    find("lv-emerg-force")[0].click();                // repeated taps: one Force off
+    gates.shift()();
+    for (let i = 0; i < 6; i++) await flush();
+    emerg2.queuedRan = emerg2.sent.join(",") === "test:false,force_off";
+
+    // 9. A real emergency ran during the test: Force off asks twice.
+    test = { active: true, started_at: 1, kept_on: [], manual: [] };
+    ran = ["Emergency Lights - Power Failure"];
+    emerg2.sent.length = 0;
+    await el._loadEmergency(); el._render();
+    // No flush() between the taps: the shim's flush fires every timer at
+    // once, which would be the 3 s window running out.
+    find("lv-emerg-force")[0].click();
+    await Promise.resolve();
+    emerg2.armSent = emerg2.sent.length;
+    emerg2.armToast = toasts().includes("Tap again to turn off every emergency light");
+    emerg2.armedLabel = find("lv-emerg-force")[0]?.textContent || null;
+    find("lv-emerg-force")[0].click();
+    for (let i = 0; i < 4; i++) await flush();
+    emerg2.confirmSent = emerg2.sent.join(",");
+    // …and a tap after the window closed asks again.
+    test = { active: true, started_at: 1, kept_on: [], manual: [] };
+    await el._loadEmergency(); el._render();
+    emerg2.sent.length = 0;
+    find("lv-emerg-force")[0].click();
+    await flush();                                    // the window runs out
+    find("lv-emerg-force")[0].click();
+    await Promise.resolve();
+    emerg2.rearmSent = emerg2.sent.length;
+    await flush();
+    ran = [];
+
+    // 6. A status request that left before an action lands after it: ignored.
+    test = { active: false, started_at: null, kept_on: [], manual: [] };
+    await el._loadEmergency(); el._render();
+    holdNext = true;
+    const stale = el._loadEmergency();                // answers "not active", held
+    await flush();
+    find("lv-emerg-btn")[0].click();                  // start: answers "active"
+    for (let i = 0; i < 4; i++) await flush();
+    gates.shift()();
+    await stale; await flush();
+    emerg2.staleIgnored = !!(el.state._emerg && el.state._emerg.test && el.state._emerg.test.active);
+
+    // 5. The card: not rebuilt when nothing changed, nor under a finger.
+    find("lv-emerg-ring")[0].click();
+    await flush();
+    const card = el._emergCard;
+    const first = card && card.sheet.children[0];
+    el._render();
+    emerg2.cardKept = !!card && card.sheet.children[0] === first;
+    card.overlay.dispatchEvent({ type: "pointerdown" });
+    el.state._emerg = { ...el.state._emerg, members: [{ ...members[0], name: "Closet 2" }] };
+    el._render();
+    emerg2.cardHeld = card.sheet.children[0] === first;
+    card.overlay.dispatchEvent({ type: "pointerup" });
+    el._render();
+    emerg2.cardRefilled = card.sheet.children[0] !== first;
+    card.close();
+
+    // 11. Polling: 10 s with lights, 5 min without.
+    available = false;
+    await el._loadEmergency();
+    statusCalls = 0;
+    el._emergTs = Date.now() - 20_000; await el._poll();
+    emerg2.pollIdle = statusCalls;
+    el._emergTs = Date.now() - 301_000; await el._poll();
+    emerg2.pollIdleLate = statusCalls;
+    available = true;
+    await el._loadEmergency();
+    statusCalls = 0;
+    el._emergTs = Date.now() - 11_000; await el._poll();
+    emerg2.pollLive = statusCalls;
+    el.disconnectedCallback();
+  } catch (e) { fail("emergency review fixes", "lifecycle", e); }
+}
+
+console.log(JSON.stringify({ scenarios, failures, blip, restart, emergency, emerg2 }));
 process.exit(failures.length ? 1 : 0);

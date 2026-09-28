@@ -23,6 +23,7 @@ def _make_store() -> LostAndFoundStore:
     store.store = AsyncMock()
     store.store.async_load = AsyncMock(return_value=None)
     store.store.async_save = AsyncMock()
+    store.store.async_delay_save = MagicMock()
     store.records = {}
     return store
 
@@ -37,10 +38,29 @@ async def test_record_stores_room_and_a_timestamp():
 
 
 @pytest.mark.asyncio
-async def test_record_persists_to_the_backing_store():
+async def test_record_persists_to_the_backing_store_coalesced_not_inline():
     store = _make_store()
     await store.record("ble:AA", "Kitchen")
-    store.store.async_save.assert_awaited_once_with(store.records)
+    store.store.async_delay_save.assert_called_once()
+    assert store.store.async_delay_save.call_args[0][0]() is store.records
+    store.store.async_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_same_room_again_is_not_a_new_record_and_writes_nothing():
+    """ws_live_snapshot sees every away object on every poll (a fresh copy
+    of the shared snapshot each time). Re-recording the same room rewrote the
+    whole file per object per poll, and live_snapshot never answered."""
+    store = _make_store()
+    await store.record("ble:AA", "Kitchen", label="Keys")
+    ts = store.get_all()["ble:AA"]["ts"]
+    store.store.async_delay_save.reset_mock()
+    for _ in range(50):
+        await store.record("ble:AA", "Kitchen", label="Keys")
+    store.store.async_delay_save.assert_not_called()
+    assert store.get_all()["ble:AA"]["ts"] == ts, "an unchanged room keeps its time"
+    await store.record("ble:AA", "Garage", label="Keys")
+    store.store.async_delay_save.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -70,6 +90,7 @@ async def test_an_empty_key_or_room_is_a_no_op():
     await store.record("ble:AA", "")
     assert store.get_all() == {}
     store.store.async_save.assert_not_awaited()
+    store.store.async_delay_save.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -114,3 +135,19 @@ async def test_async_load_tolerates_corrupt_or_missing_data():
     result = await store.async_load()
     assert result == {}
     assert store.records == {}
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_same_room_again_later_is_a_new_record_with_its_own_time():
+    """Monday it left the Kitchen; it came back and left the Kitchen again on
+    Wednesday. "Last seen in the Kitchen" must say Wednesday, not Monday."""
+    store = _make_store()
+    monday, wednesday = 1_790_000_000.0, 1_790_172_800.0
+    await store.record("ble:AA", "Kitchen", seen_at=monday)
+    for _ in range(5):                                   # the same departure, every poll
+        await store.record("ble:AA", "Kitchen", seen_at=monday + 3)
+    assert store.get_all()["ble:AA"]["ts"] == monday
+    store.store.async_delay_save.reset_mock()
+    await store.record("ble:AA", "Kitchen", seen_at=wednesday)
+    assert store.get_all()["ble:AA"]["ts"] == wednesday
+    store.store.async_delay_save.assert_called_once()

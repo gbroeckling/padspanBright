@@ -42,6 +42,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "whatsnew_seen_version": "",
     "telemetry_install_id": "",
     "telemetry_last_day": "",       # UTC day of the last accepted report (one per day)
+    # "Become a tester" (tester.py) — NOT part of the usage report. What the
+    # person typed, so they can update it; backend-only (padspan_bright/tester_*),
+    # never in settings_get (ws_common._get_settings takes it out). {} = none.
+    "tester_signup": {},
     "vendor_lookup_enabled": True,  # Sends MAC prefixes to vendor lookup APIs when requested from UI
     "ref_power":      -59.0,   # dBm RSSI at 1 m (distance formula)
     "path_loss_exp":   2.5,    # path-loss exponent n (distance formula)
@@ -115,6 +119,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "vacation_mode_periods": [],          # backend-only: [[start, end], ...] earlier vacations, left out of every pattern build
     "traceback_house_focus": 0,          # Traceback's Full house activity: the Atlas floor index it opens on (its own key — overview_iso_focus indexes photo floors)
     "wled_teams": [],                     # backend-only (padspan_bright/wled_teams_set): WLED devices that act as one light — see ws_wled.py
+    "emergency_entities": [],             # the Atlas emergency lighting test's lights, when set; [] = HA's "emergency" groups, else the default rule — see emergency_test.py
     "vacation_mode_tracked_since": 0,     # backend-only: epoch-s from which every vacation span is in vacation_mode_periods (stamped once on upgrade if Vacation Mode ran before spans were recorded; 0 = always) — vacation_mode.py learned_pattern
     "vacation_mode_pattern_prev": {},     # backend-only: the last pattern learned before a vacation — stands in while a new vacation's build finds nothing (vacation_mode.py learned_pattern)
     "vacation_mode_pattern_attempt": [0, 0],  # backend-only: [enabled_at, epoch-s] of the last build that found nothing usable — retried hourly, not every tick
@@ -175,8 +180,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # cost payload size and poll time: 7 days measured 16.4k objects / 19.5MB
     # / 2-7s per poll, 1 day 2.8k / 3.8MB / sub-second.  Allowed: 1, 2, 7, 14.
     "object_history_days": 1,
-    # Lights sidebar panel (off by default — requires HA restart to take effect)
-    "lights_panel_enabled": False,
+    # The Atlas sidebar panel (panel.py registers it at setup, so a change
+    # takes a Home Assistant restart). On by default (Garry, 2026-09-28): off, it
+    # was the one place the lighting product lives and almost nobody found it.
+    "lights_panel_enabled": True,
+    # One-time: installs from before that default had it off only because it
+    # WAS the default — nobody chose it. async_load turns it on once for them,
+    # records that here, and never touches it again (off stays off after).
+    "atlas_default_v1_applied": False,
     "ha_entity_occupancy_enabled": False,  # expose occupancy estimate sensors to HA
     "bermuda_ignore": False,  # experimental: ignore all Bermuda integration data
     # HA Tags integration
@@ -289,6 +300,14 @@ class SettingsStore:
             ran = bool(loaded.get("vacation_mode_enabled") or loaded.get("vacation_mode_pattern")
                        or loaded.get("vacation_mode_pattern_built_at") or loaded.get("vacation_mode_periods"))
             self.data["vacation_mode_tracked_since"] = time.time() if ran else 0
+        # Atlas on by default, once. Runs before panel.py reads the
+        # setting — settings are a critical store, loaded before the panel is
+        # registered — so the sidebar entry appears on the restart the update
+        # itself needs. A fresh install lands here too and just records it.
+        if not self.data.get("atlas_default_v1_applied"):
+            self.data["lights_panel_enabled"] = True
+            self.data["atlas_default_v1_applied"] = True
+            _normalized = True
         # Only re-save if new defaults were added (loaded was missing keys)
         if _normalized or not isinstance(loaded, dict) or set(self.data.keys()) != set(loaded.keys()):
             await self.store.async_save(self.data)

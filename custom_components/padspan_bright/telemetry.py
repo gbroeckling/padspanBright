@@ -18,8 +18,9 @@ that will go. What goes out is COUNTS and VERSIONS, never things:
     whether the building is described at all: floors carrying a real
         storey height, scanners carrying a mounting height, calibration
         points that never got a floor, whether any map is measured
-    uncaught panel errors by view — the half of PadSpan the Python log
-        cannot see (see UI_ERRORS)
+    uncaught panel errors by the PadSpan module that threw, and the tab
+        that was open — the half of PadSpan the Python log cannot see
+        (see UI_ERRORS)
     Apple Find My: how many Find My addresses are on the air now by type
         (and how many of those are away from their owner), how many tags
         PadSpan follows, and how its hand-overs went — followed, missed by
@@ -35,11 +36,14 @@ this is how features that only exist elsewhere (an iPhone with an IRK, a
 Bermuda install, twelve floors, a lighting-only house) get seen at all.
 
 Never: MAC addresses, IRKs or licence keys, device or room or floor NAMES,
-coordinates, entity ids, timestamps finer than the day. `assert_shareable`
-walks every value before a send and refuses the whole report if anything
-identifier-shaped is in it — belt on top of the design's braces — and
-tests/test_telemetry.py builds a payload from a house full of names and MACs
-and proves none of them are in it.
+coordinates, entity ids, email addresses, timestamps finer than the day.
+`assert_shareable` walks every value before a send and refuses the whole
+report if anything identifier-shaped is in it — belt on top of the design's
+braces — and tests/test_telemetry.py builds a payload from a house full of
+names and MACs and proves none of them are in it.
+
+"Become a tester" (tester.py) is a separate channel — its own consent,
+button, address, id and storage — and never part of this report.
 
 The install id is a random UUID minted the first time the switch goes on. It
 exists so installs can be counted rather than pings; "New anonymous ID" in
@@ -188,6 +192,9 @@ EVENTS: frozenset[str] = frozenset({
     "findmy_linked", "findmy_linked_slow",
     "findmy_missed_ambiguous", "findmy_missed_late", "findmy_missed_elsewhere", "findmy_missed_no_candidate",
     "findmy_moved_back", "findmy_moved_back_addrs", "findmy_back_on_day_key", "findmy_not_this_tag",
+    # The Atlas emergency lighting test (emergency_test.py): a test started,
+    # ended (the lights already on left on), or ended with Force off.
+    "emergency_test_on", "emergency_test_off", "emergency_force_off",
 })
 # The panel's views (panel.js _VIEW_PATHS — tests/test_telemetry.py asserts
 # equality) and the sub-tabs of the two views that have them.
@@ -204,13 +211,57 @@ SUBTABS: dict[str, frozenset[str]] = {
 TAB_EVENTS: frozenset[str] = frozenset(
     {f"tab:{v}" for v in VIEWS} | {f"tab:{v}/{s}" for v, subs in SUBTABS.items() for s in subs}
 )
-# Uncaught panel errors, counted by the view that was open when one landed.
-# The panel is the half of PadSpan the Python log cannot see: v0.35.0 shipped
-# a Mapping tab that threw before it re-rendered, so the previous tab stayed
-# on screen and it read as a hang. Nothing moved in `errors`, and it took a
-# user describing it in prose to find. A COUNT per view — never the message,
-# never a stack, never anything the page happened to be holding.
-UI_ERRORS: frozenset[str] = frozenset({f"ui_error:{v}" for v in VIEWS})
+# Uncaught panel errors, counted by the PadSpan MODULE that threw
+# (www/padspan-bright/views/ui_error.js). The panel is the half of PadSpan the
+# Python log cannot see: v0.35.0 shipped a Mapping tab that threw before it
+# re-rendered, so the previous tab stayed on screen and it read as a hang.
+# A COUNT per module — never the message, never a stack, never anything the
+# page happened to be holding.
+#
+# Before this, the name was the view that was OPEN, and every error on the
+# page counted — Home Assistant's own, other cards', browser extensions' — so
+# ui_error:overview meant "something threw while Overview was showing". Now
+# only a throw with PadSpan code on its stack counts, as
+#   ui_error:<view id>        a view module (views/<id>.js, id in VIEWS)
+#   ui_error:<helper>         a shared helper in views/ (UI_ERROR_HELPERS)
+#   ui_error:panel            panel.js, the shell around the views
+#   ui_error:atlas_panel      lights_panel.js, the Atlas sidebar panel
+#   ui_error:lib              the vendored Preact/htm, nothing of ours below it
+#   ui_error:other            any other PadSpan file (help_content, sample_data)
+# and, counted beside it, the tab that was on screen:
+#   ui_error_while:<view id> | ui_error_while:atlas
+# A report carrying ui_error:* WITHOUT any ui_error_while:* is from a build
+# before the change (server/telemetry_summary.py splits them on that).
+# tests/test_telemetry.py holds UI_ERROR_HELPERS to the files in views/.
+UI_ERROR_HELPERS: frozenset[str] = frozenset({
+    "busy_times", "calibration_matrix", "editions", "evidence_diagram", "house_activity",
+    "insights", "iso_lights", "iso_motion", "light_codes", "lights_map", "locate",
+    "pan_zoom", "path_loss", "plan_viewer", "push_subscription", "radio_map",
+    "room_color", "setup_status", "stack_transform", "tune_save_plan", "ui_error",
+    "wall_geom", "whatif_placement", "wled_advanced", "wled_model", "wled_tab_backup",
+    "wled_tab_leds", "wled_tab_look", "wled_tab_presets", "wled_tab_settings",
+    "wled_tab_sync", "wled_ui", "trial_offer",
+})
+UI_ERROR_SHELLS: frozenset[str] = frozenset({"panel", "atlas_panel", "lib", "other"})
+UI_ERRORS: frozenset[str] = frozenset(
+    {f"ui_error:{m}" for m in VIEWS | UI_ERROR_HELPERS | UI_ERROR_SHELLS}
+    | {f"ui_error_while:{v}" for v in VIEWS | {"atlas"}}
+)
+# The 90-day trial offer (views/trial_offer.js) and the Overview's Getting
+# started card — a funnel, like the wizards above: where the offer was SEEN
+# (once per surface per page), where it was STARTED, and where the licence
+# server said no. The email never comes near this: an event is a surface's
+# name, from this closed list, and nothing else. TRIAL_SURFACES is
+# trial_offer.js's own list; GETTING_STARTED_STEPS is the card's step ids
+# (panel.js), plus "trial" for its last line (tests/test_conversion.py
+# holds both to the frontend's).
+TRIAL_SURFACES: tuple[str, ...] = ("overview", "atlas", "placement", "maps", "locate", "busy_times", "settings")
+GETTING_STARTED_STEPS: tuple[str, ...] = ("upload", "scale", "rooms", "scanners", "calibrate", "positioned", "trial")
+OFFER_EVENTS: frozenset[str] = frozenset(
+    {f"{what}:{s}" for what in ("trial_offer_shown", "trial_started", "trial_failed") for s in TRIAL_SURFACES}
+    | {f"getting_started_step:{s}" for s in GETTING_STARTED_STEPS}
+    | {"getting_started_shown", "getting_started_dismissed"}
+)
 
 # The switches whose ON/OFF is reported (booleans only, by name). Every name
 # here must be READ by something outside the settings plumbing — a switch
@@ -272,6 +323,8 @@ _KEY_RE = re.compile(r"\bPSPAN-[A-Z0-9-]{8,}\b", re.I)
 _IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 _IPV6_RE = re.compile(r"\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\b")
 _ENTITY_RE = re.compile(r"\b[a-z_]{2,}\.[a-z0-9_]{2,}\b")          # light.kitchen_valance, sensor.x
+# Contact details belong to "Become a tester" (tester.py), never to this report.
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 
 
 # ── counting ─────────────────────────────────────────────────────────────────
@@ -282,7 +335,7 @@ def enabled(hass: HomeAssistant) -> bool:
 
 
 def event_allowed(name: str) -> bool:
-    return name in EVENTS or name in TAB_EVENTS or name in UI_ERRORS
+    return name in EVENTS or name in TAB_EVENTS or name in UI_ERRORS or name in OFFER_EVENTS
 
 
 def bump(hass: HomeAssistant, event: str, n: int = 1) -> bool:
@@ -887,7 +940,8 @@ def assert_shareable(payload: dict[str, Any]) -> None:
             # UUID's tail is also twelve hex digits).
             for name, rx in (("UUID", _UUID_RE), ("32-hex", _HEX32_RE), ("licence key", _KEY_RE),
                              ("MAC address", _MAC_RE), ("IP address", _IPV4_RE),
-                             ("IPv6 address", _IPV6_RE), ("entity id", _ENTITY_RE)):
+                             ("IPv6 address", _IPV6_RE), ("email address", _EMAIL_RE),
+                             ("entity id", _ENTITY_RE)):
                 if rx.search(node):
                     raise ValueError(f"{name} in {path}")
             if len(node) > 64:

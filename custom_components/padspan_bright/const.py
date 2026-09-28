@@ -19,7 +19,7 @@ Organisation:
 
 DOMAIN = "padspan_bright"
 NAME = "PadSpan Bright"
-VERSION = "0.38.84"
+VERSION = "0.38.85"
 
 # ── Config-flow option keys ───────────────────────────────────────────────────
 CONF_ENABLE_CLOUD = "enable_cloud"
@@ -91,6 +91,7 @@ FORENSICS_STORE_KEY = "padspan_bright.forensics"
 # Manifest only — session frames live in .storage/padspan_bright.capture_sessions/
 CAPTURE_STORE_KEY = "padspan_bright.capture"
 WLED_LOOKS_STORE_KEY = "padspan_bright.wled_looks"   # wled_exact.py — keyed by the MAC HA verified
+EMERGENCY_TEST_STORE_KEY = "padspan_bright.emergency_test"   # emergency_test.py — a running test and its kept-on tags
 
 # ── Filesystem / map defaults ─────────────────────────────────────────────────
 DEFAULT_FLOOR_ID = "main"

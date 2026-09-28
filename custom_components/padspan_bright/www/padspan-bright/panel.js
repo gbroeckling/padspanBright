@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.84";
-const RELEASE_BUILD_ID = "20260928T045116Z";
+const APP_VERSION = "0.38.85";
+const RELEASE_BUILD_ID = "20260928T223144Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -39,7 +39,7 @@ const BUILD_ID = (() => {
     return RELEASE_BUILD_ID;
   }
 })();
-const CHANNEL = "beta";
+const CHANNEL = "stable";
 
 // ── Editions and tiers ───────────────────────────────────────────────────────
 // Which surfaces this build shows (views/editions.js). Loaded with the same
@@ -49,6 +49,20 @@ let EDITIONS = null;
 const _editionsPromise = import(`./views/editions.js?b=${BUILD_ID}`)
   .then(m => { EDITIONS = m; })
   .catch(err => console.warn("PadSpan: editions module failed to load", err));
+// The 90-day trial card (views/trial_offer.js), offered from the Getting
+// started card. Optional in the same way: if it fails to load, that line of
+// the checklist simply is not there.
+let TRIAL = null;
+import(`./views/trial_offer.js?b=${BUILD_ID}`)
+  .then(m => { TRIAL = m; })
+  .catch(err => console.warn("PadSpan: trial_offer module failed to load", err));
+
+// Which PadSpan module an uncaught error came from (views/ui_error.js). Until
+// it lands, or if it never does, uncaught errors simply go uncounted.
+let UI_ERROR = null;
+import(`./views/ui_error.js?b=${BUILD_ID}`)
+  .then(m => { UI_ERROR = m; })
+  .catch(err => console.warn("PadSpan: ui_error module failed to load", err));
 
 // ── Dynamic view imports ─────────────────────────────────────────────────────
 // Two-phase loading for fast first paint:
@@ -1166,28 +1180,25 @@ class PadSpanHaApp extends HTMLElement {
     // Counted, never described. v0.35.0 shipped a Mapping tab that threw
     // before it re-rendered: the previous tab stayed on screen, the panel read
     // as a hang, and nothing anywhere recorded that anything had happened —
-    // the Python log cannot see a throw in the browser. What goes out is the
-    // name of the view that was open, from the closed list in telemetry.py.
-    // The message and the stack stay here, in the console, where they can name
-    // rooms and entities freely.
+    // the Python log cannot see a throw in the browser.
     //
-    // Throttled per view: a throw inside a render loop fires as fast as the
-    // loop does, and the signal worth having is "maps threw today", not how
-    // many times. Nothing is sent unless the report is switched on.
+    // A window listener hears every error on the page, Home Assistant's and
+    // other cards' included, so views/ui_error.js counts only a throw with
+    // PadSpan's own code on its stack, and names the module that threw
+    // (ui_error:<module>) plus, separately, the tab that was open
+    // (ui_error_while:<view>) — names from the closed lists in telemetry.py.
+    // The message and the stack stay here, in the console, where they can
+    // name rooms and entities freely. At most once a minute per module;
+    // nothing is sent unless the report is switched on.
     if(!this._uiErrorHandler){
-      this._uiErrorSeen = {};
-      const _report = ()=>{
+      const _report = (ev)=>{
         try{
-          const view = String(this.state.view || "");
-          if(!view) return;
-          const now = Date.now();
-          if(now - (this._uiErrorSeen[view] || 0) < 60000) return;
-          this._uiErrorSeen[view] = now;
-          this._telemetryEvent("ui_error:" + view);
+          if(!UI_ERROR) return;
+          UI_ERROR.reportUiError(ev, this.state.view, (name)=>this._telemetryEvent(name));
         }catch(_e){ /* the error reporter must never be the error */ }
       };
-      this._uiErrorHandler = ()=> _report();
-      this._uiRejectionHandler = ()=> _report();
+      this._uiErrorHandler = _report;
+      this._uiRejectionHandler = _report;
       window.addEventListener("error", this._uiErrorHandler);
       window.addEventListener("unhandledrejection", this._uiRejectionHandler);
     }
@@ -3376,36 +3387,71 @@ class PadSpanHaApp extends HTMLElement {
       const _hasModel = !!(this.state.calibration && this.state.calibration.model && Object.keys(this.state.calibration.model).length > 0);
       const _hasFabricScanners = !!(this.state.model && this.state.model.scanner_positions_m && Object.keys(this.state.model.scanner_positions_m).length > 0);
       const _hasCal = _calPoints >= 5 || _hasModel || _hasFabricScanners;
+      // Someone on the map NOW: what the steps above are for. An object the
+      // engine counts as the house's own (presence_coordinator
+      // is_identified_object: labelled, identified, or an IRK phone) with a
+      // real position in the LIVE snapshot. Sample data never counts, and
+      // until a live snapshot has arrived the answer is unknown, not "no":
+      // the card waits for it (_posKnown), the same rule as _setupKnown.
+      const _liveSnap = this.state.dataMode === "live" && this.state.live && this.state.live.snapshot !== SAMPLE_SNAPSHOT
+        ? this.state.live.snapshot : null;
+      const _posKnown = !!this.state._dataModeKnown && (this.state.dataMode !== "live" || !!_liveSnap);
+      const _hasPositioned = !!_liveSnap && ((_liveSnap.objects && _liveSnap.objects.list) || []).some(o => o
+        && !o._stale && !o._ghost && (o.user_label || o.identified || o.kind === "private_ble")
+        && typeof o.x_m === "number" && Number.isFinite(o.x_m) && typeof o.y_m === "number" && Number.isFinite(o.y_m));
       const _steps = [
         { id: "upload",   label: "Upload Floor Plan",  done: _hasMaps,      wizardStep: 1, view: "maps",        mapsTab: "upload", hint: "Maps \u2192 Upload a floor plan image" },
         { id: "scale",    label: "Set Scale",           done: _hasScale,     wizardStep: 2, view: "maps",        mapsTab: "edit",   hint: "Maps \u2192 Edit \u2192 Measure tool" },
         { id: "rooms",    label: "Draw Rooms",          done: _hasRooms,     wizardStep: 3, view: "maps",        mapsTab: "edit",   hint: "Maps \u2192 Edit \u2192 draw room boundaries" },
         { id: "scanners", label: "Place Scanners",      done: _hasReceivers, wizardStep: 4, view: "maps",        mapsTab: "edit",   hint: "Maps \u2192 Edit \u2192 drag scanners onto the plan" },
         { id: "calibrate",label: "Calibrate",           done: _hasCal,       calibWizard: true,   view: "calibration", calibTab: "beacon", hint: "Calibration \u2192 guided walk-through" },
+        { id: "positioned", label: "See someone on the map", done: _hasPositioned, view: "follow",
+          hint: this.state.dataMode === "live" ? "Follow \u2192 pick your phone or a tag" : "Switch the top bar to Live first" },
       ];
       const _completedCount = _steps.filter(s => s.done).length;
-      const _allDone = _completedCount === _steps.length;
+      // Setup is the map-building steps. "See someone on the map" depends on
+      // who is home right now (and on sample mode), so it is shown as a step
+      // but never decides "done": a house set up long ago must not get the
+      // card back on the day nobody is in.
+      const _allDone = _steps.every(s => s.done || s.id === "positioned");
+      // Persisted per install (settings.onboarding_completed), straight to
+      // the wire: `this.actions` is never assigned on the element, so the
+      // settingsSet these two used to optional-chain was never called and
+      // neither "done" nor "Skip setup" survived a settings reload.
+      const _markOnboarded = () => {
+        if (this._onboardingSaving) return;
+        this._onboardingSaving = true;
+        this._callWS({ type: "padspan_bright/settings_set", onboarding_completed: true })
+          .then(res => { if (res && res.settings) this.state.settings = res.settings; })
+          .catch(() => {})
+          .finally(() => { this._onboardingSaving = false; });
+      };
 
-      // Auto-mark completed when all steps done
-      if (_allDone && !_onboardingDone && this.state.settings && this.actions?.settingsSet) {
-        try { this.actions.settingsSet({ onboarding_completed: true }).catch(() => {}); } catch(e) {}
+      // Auto-mark completed when all steps done \u2014 tried once per page, so a
+      // save that fails is not re-sent on every render.
+      if (_allDone && !_onboardingDone && this.state.settings && !this._onboardingAutoTried) {
+        this._onboardingAutoTried = true;
+        _markOnboarded();
       }
 
       // Do not answer "is setup done?" before the stores that answer it have
       // arrived. A new install still sees the card the moment they settle -
       // an empty maps list is an answer; an unfetched one is not.
       const _setupKnown = this.state._mapsLoaded && this.state._modelLoaded;
-      if (_setupKnown && !_onboardingDone && !_allDone && !this.state._onboardingDismissed && this.state.view === "overview") {
-        const bar = el("div",{style:"background:#0a1f14;border:1px solid #1a4228;border-radius:8px;padding:10px 14px;margin-bottom:12px"});
+      if (_setupKnown && !_onboardingDone && !_allDone && _posKnown && !this.state._onboardingDismissed && this.state.view === "overview") {
+        // Opt-in usage report: the card was seen, once per page.
+        if (!this._gettingStartedCounted) { this._gettingStartedCounted = true; this._telemetryEvent("getting_started_shown"); }
+        const bar = el("div",{"data-getting-started":"card",style:"background:#0a1f14;border:1px solid #1a4228;border-radius:8px;padding:10px 14px;margin-bottom:12px"});
         // Header
         const hdr = el("div",{style:"display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"});
-        hdr.appendChild(el("div",{style:"font-weight:700;font-size:13px;color:#52b788"}, `Setup Progress \u2014 ${_completedCount}/${_steps.length}`));
-        const skipBtn = el("span",{style:"cursor:pointer;font-size:10px;color:#64748b;text-decoration:underline"}, "Skip setup");
+        hdr.appendChild(el("div",{style:"font-weight:700;font-size:13px;color:#52b788"}, `Getting started \u2014 ${_completedCount}/${_steps.length}`));
+        const skipBtn = el("span",{"data-getting-started":"dismiss",style:"cursor:pointer;font-size:10px;color:#64748b;text-decoration:underline"}, "Skip setup");
         skipBtn.addEventListener("click", () => {
           this.state._onboardingDismissed = true;
           if (this.state.settings) this.state.settings.onboarding_completed = true;
           bar.remove();
-          try { this.actions?.settingsSet?.({ onboarding_completed: true })?.catch?.(() => {}); } catch(e) {}
+          this._telemetryEvent("getting_started_dismissed");
+          _markOnboarded();
           this._scheduleRender();
         });
         hdr.appendChild(skipBtn);
@@ -3427,7 +3473,9 @@ class PadSpanHaApp extends HTMLElement {
           row.appendChild(el("span",{style:`font-size:14px`}, s.done ? "\u2705" : isNext ? "\u25b6\ufe0f" : "\u2b1c"));
           row.appendChild(el("span",{style:`color:${s.done ? "#52b788" : isNext ? "#5eead4" : "#64748b"};font-weight:${isNext ? "700" : "400"}`}, s.label));
           if (isNext) row.appendChild(el("span",{style:"font-size:10px;color:#94a3b8;margin-left:auto"}, s.hint));
+          row.setAttribute("data-getting-started", "step-" + s.id);
           row.addEventListener("click", () => {
+            this._telemetryEvent("getting_started_step:" + s.id);
             // The four map-building steps launch the Setup Wizard AT that
             // step, on whatever map is already active (or the first one, or
             // none yet — the wizard's own Upload step handles that) — rather
@@ -3460,10 +3508,36 @@ class PadSpanHaApp extends HTMLElement {
             // Route to the correct sub-tab
             if (s.mapsTab) this.state.mapsTab = s.mapsTab;
             if (s.calibTab && this.state._calib) this.state._calib.tab = s.calibTab;
+            // A view reached from here is highlighted like one picked from
+            // the menu, and loads if the background load has not reached it.
+            this._renderNav();
+            if (!VIEWS[s.view] && _VIEW_PATHS[s.view]) _loadView(s.view).then(() => this._scheduleRender());
             if (this.actions?.renderRooms) this.actions.renderRooms();
             else this._scheduleRender();
           });
           list.appendChild(row);
+        }
+        // Last line: the 90-day trial (views/trial_offer.js) — an offer, not a
+        // step, so it is not counted above. Only while there is no key; the
+        // card opens in place, under the list.
+        let _trialOffer = false;
+        try { _trialOffer = !!(TRIAL && TRIAL.trialOfferable(this.state.settings)); } catch(e) { /* no offer */ }
+        if (TRIAL && (_trialOffer || this.state._gettingStartedTrialOpen)) {
+          const row = el("div",{"data-getting-started":"step-trial",style:"display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:4px;font-size:12px;cursor:pointer;margin-top:2px;border-top:1px solid #1a4228"});
+          row.appendChild(el("span",{style:"font-size:14px"}, "💡"));
+          row.appendChild(el("span",{style:"color:#8ee5b4"}, "See your lights on your floor plan — 90-day free trial, no card"));
+          row.addEventListener("click", () => {
+            this.state._gettingStartedTrialOpen = !this.state._gettingStartedTrialOpen;
+            if (this.state._gettingStartedTrialOpen) this._telemetryEvent("getting_started_step:trial");
+            this._scheduleRender();
+          });
+          list.appendChild(row);
+          if (this.state._gettingStartedTrialOpen) {
+            try {
+              const card = TRIAL.trialOfferFromCtx(this._ctx(), "overview");
+              if (card) list.appendChild(card);
+            } catch(e) { console.warn("PadSpan: trial offer failed", e); }
+          }
         }
         bar.appendChild(list);
         const _ask = this._telemetryAskCard(true);
