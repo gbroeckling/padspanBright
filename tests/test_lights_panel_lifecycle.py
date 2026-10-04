@@ -54,6 +54,16 @@ def test_the_harness_actually_drew_the_house(result) -> None:
         assert s["svcCalls"] > 0, f"{s['name']}: no toggle ever reached hass.callService — the harness is not exercising the action path"
 
 
+def test_the_panel_draws_the_outdoor_weather_only_when_it_should(result) -> None:
+    """Atlas outdoor weather through the panel's own settings read and host:
+    pouring outside draws the overlay (animated on Pro, still on the free
+    map); before the weather settings exist, nothing."""
+    got = {s["name"]: s.get("weather") for s in result["scenarios"]}
+    assert got["pro, pouring outside"] == "animated", got
+    assert got["free tier, snowing outside"] == "still", got
+    assert all(v is None for k, v in got.items() if "outside" not in k), got
+
+
 def test_a_motion_sensor_back_from_a_blip_redraws_quiet(result) -> None:
     """Live 2026-09-27: a sensor back "off" from a 29 s offline blip pulsed,
     then wore the 6-hour ring. The sidebar subscribes to
@@ -91,12 +101,12 @@ def test_both_panels_subscribe_through_keep_subscribed() -> None:
 
 def test_the_emergency_test_button(result) -> None:
     """Garry, 2026-09-28: a "Test emergency lighting" button at the map's
-    bottom-right, out of the way — shown only when the backend finds lights,
-    placed right after the stage (a zero-height anchor: nothing moves), with
+    top-right, out of the way — shown only when the backend finds lights,
+    placed right before the stage (a zero-height anchor: nothing moves), with
     Force off beside it only while a test runs."""
     e = result["emergency"]
     assert e["hiddenWithout"], e
-    assert e["afterStage"], e
+    assert e["beforeStage"], e      # top-right of the map: the anchor sits right before the stage
     assert e["idleForce"] == 0 and e["activeForce"] == 1 and e["endedForce"] == 0, e
     assert e["activeLabel"] == "Test on — tap to end", e
     assert e["sent"] == ["test:true", "member:light.a:true", "force_off"], e
@@ -110,6 +120,9 @@ def test_the_emergency_ring_opens_the_card_of_every_light(result) -> None:
     survives the poll's re-render."""
     e = result["emergency"]
     assert e["cardOpen"] and e["cardNames"] and e["cardTag"] and e["cardStillOpen"], e
+    # A light has a "⋯", a switch does not: a blank of the same width keeps
+    # the columns straight (design pass 2026-09-28).
+    assert e["cardRows"] == 2 and e["cardAligned"], e
 
 
 def test_a_tap_while_switching_is_answered_and_force_off_queued(result) -> None:
@@ -142,9 +155,26 @@ def test_emergency_polling_slows_without_lights(result) -> None:
     assert e["pollIdle"] == 0 and e["pollIdleLate"] == 1 and e["pollLive"] == 1, e
 
 
+def test_the_hidden_button_hides_only_while_idle(result) -> None:
+    """Review 2026-09-28: Settings' "Show the Test emergency lighting button"
+    off hid a RUNNING test too, and stopped asking the backend altogether, so
+    a test started from the wall kiosk never showed here. Hidden now means
+    idle only: no button and a 5-minute poll (never the 10 s one), the button
+    back the moment a test runs, and back when switched on again."""
+    e = result["emerg3"]
+    assert e["hiddenAnchor"] == 0, e
+    assert e["hiddenPollFast"] == 0 and e["hiddenPollSlow"] == 1, f"hidden must poll slowly, not never: {e}"
+    assert e["activeWhileHidden"] == 1 and e["activePollFast"] == 1, e
+    assert e["backWhenReEnabled"] == 1, e
+
+
+def test_a_failed_settings_fetch_keeps_the_hidden_button_hidden(result) -> None:
+    assert result["emerg3"]["keptOnFailedFetch"] is True, result["emerg3"]
+
+
 def test_the_emergency_toast_shows_above_the_card() -> None:
     src = (_WWW / "lights_panel.js").read_text(encoding="utf-8")
-    toast = src.split("_toast(msg, isError=false){", 1)[1].split("\n  }\n", 1)[0]
+    toast = src.split("_toast(msg, isError=false, durationMs=null){", 1)[1].split("\n  }\n", 1)[0]
     assert "z-index:10001" in toast and "z-index:10000" in src.split("_openEmergencyCard(){", 1)[1]
 
 
@@ -155,3 +185,36 @@ def test_the_emergency_ring_and_narrow_row_css() -> None:
     assert "container-type:inline-size" in css.split(".lv-emerg-anchor{", 1)[1].split("}", 1)[0]
     narrow = css.split("@container (max-width:440px){", 1)[1].split("\n}", 1)[0]
     assert ".lv-emerg-label-tx{display:none}" in narrow
+    # Review 2026-09-28: no scale on a phone — it shrank the ring band, the
+    # centre and Force off back below the touch sizes set above.
+    assert "scale(" not in narrow and "transform" not in narrow, narrow
+
+
+def test_the_emergency_button_sits_above_the_rail_drawers() -> None:
+    """An open rail drawer (z 4) covered the button (z 3). The button is
+    above it now, and a drawer keeps its controls out from under the dial."""
+    css = (_WWW / "styles.css").read_text(encoding="utf-8")
+    emerg = css.split(".lv-emerg{position:absolute;", 1)[1].split("}", 1)[0]
+    drawer = css.split(".lv-drawer{position:absolute;", 1)[1].split("}", 1)[0]
+    z = lambda block: int(block.split("z-index:", 1)[1].split(";", 1)[0])
+    assert z(emerg) > z(drawer), (emerg, drawer)
+    assert ".lv-mapcard:has(.lv-emerg) .lv-drawer{padding-right:96px}" in css
+    # ...and a running test's label and Force off stack into that strip.
+    assert ".lv-mapcard:has(.lv-drawer.open) .lv-emerg{flex-direction:column;align-items:flex-end}" in css
+
+
+def test_emergency_toasts_stay_long_enough_to_read() -> None:
+    """The "a real emergency ran during the test" message is four lines; it
+    was on screen 3.5 s like a one-word toast, and a second toast landed on
+    top of the first."""
+    src = (_WWW / "lights_panel.js").read_text(encoding="utf-8")
+    toast = src.split("_toast(msg, isError=false, durationMs=null){", 1)[1].split("\n  }\n", 1)[0]
+    assert "String(msg).length * 60" in toast and "Math.min(10000" in toast
+    # Re-review: the armed Force-off message is tied to its 3 s window, so it
+    # passes that as its own duration instead of outlasting the window.
+    assert "durationMs ||" in toast
+    assert "Tap again to turn off every emergency light`, true, 3000);" in src
+
+
+def test_a_new_toast_replaces_the_last(result) -> None:
+    assert result["emerg3"]["toastsOnScreen"] == 1, result["emerg3"]

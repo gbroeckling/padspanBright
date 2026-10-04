@@ -40,6 +40,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # The version the what's-new card last reported. Seeded silently the first
     # time the panel sees it, so a FRESH install is never told it "updated".
     "whatsnew_seen_version": "",
+    # When this install first ran PadSpan (epoch seconds), stamped once by
+    # async_load. The Overview's one-time trial milestone card waits 7 days
+    # from it. An install from before the key existed is stamped on its first
+    # load of this version, so its 7 days count from the update, not from
+    # when it was really installed — nobody is told on update day.
+    "first_seen_ts": 0,
+    # The Overview's one-time trial milestone card was answered: "No thanks",
+    # its ✕, or a trial started from it. Per install; it never shows again.
+    "trial_nudge_done": False,
     "telemetry_install_id": "",
     "telemetry_last_day": "",       # UTC day of the last accepted report (one per day)
     # "Become a tester" (tester.py) — NOT part of the usage report. What the
@@ -119,6 +128,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "vacation_mode_periods": [],          # backend-only: [[start, end], ...] earlier vacations, left out of every pattern build
     "traceback_house_focus": 0,          # Traceback's Full house activity: the Atlas floor index it opens on (its own key — overview_iso_focus indexes photo floors)
     "wled_teams": [],                     # backend-only (padspan_bright/wled_teams_set): WLED devices that act as one light — see ws_wled.py
+    "atlas_emergency_button": True,       # show the Atlas "Test emergency lighting" button (Settings → UI Structure → Atlas)
+    # Atlas outdoor weather (docs/IDEA_ATLAS_WEATHER.md, views/atlas_weather.js) — rain or snow outside the floor
+    # plates while it is actually raining or snowing. On by default in both editions (Pro animates, free is still).
+    "atlas_weather_enabled": True,        # master on/off; off = nothing drawn at all
+    "atlas_weather_rain_entity": "",      # optional binary_sensor (on = wet) or numeric sensor (> 0 = wet); "" = none
+    "atlas_weather_condition_entity": "", # weather.* for the fallback trigger and rain vs snow; "" = the first weather.*
+    "atlas_weather_warning_entity": "",   # a weather-warning sensor; "" = detect (env_canada, meteoalarm, dwd, nina, meteo_france, weatheralerts, nws_alerts)
+    "atlas_weather_strength": 1.0,        # 0.5-1.5 x opacity
     "emergency_entities": [],             # the Atlas emergency lighting test's lights, when set; [] = HA's "emergency" groups, else the default rule — see emergency_test.py
     "vacation_mode_tracked_since": 0,     # backend-only: epoch-s from which every vacation span is in vacation_mode_periods (stamped once on upgrade if Vacation Mode ran before spans were recorded; 0 = always) — vacation_mode.py learned_pattern
     "vacation_mode_pattern_prev": {},     # backend-only: the last pattern learned before a vacation — stands in while a new vacation's build finds nothing (vacation_mode.py learned_pattern)
@@ -238,6 +255,35 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 
+def trial_state_kept(live: dict[str, Any] | None, other: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The trial milestone's two per-install facts, kept through a settings
+    restore, a factory reset and a Bright import (`other` is the settings
+    coming in; none for a reset). Like the licence, neither is house
+    configuration: an answer given anywhere stays given (trial_nudge_done),
+    and the install is as old as its earliest real sighting (first_seen_ts,
+    the smaller positive value) — so an older backup can neither bring the
+    card back nor restart its week."""
+    a, b = live or {}, other or {}
+    out: dict[str, Any] = {"trial_nudge_done": bool(a.get("trial_nudge_done") or b.get("trial_nudge_done"))}
+    seen = [v for v in (a.get("first_seen_ts"), b.get("first_seen_ts"))
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0]
+    if seen:
+        out["first_seen_ts"] = min(seen)
+    # The code running here did not change with a restore, so there is no new
+    # update to announce: the later "what's new" version stands, or the update
+    # banner (and its one-time trial line) would show again.
+    def _ver(v: Any) -> tuple[int, ...] | None:
+        try:
+            parts = tuple(int(p) for p in str(v).split("."))
+        except (TypeError, ValueError):
+            return None
+        return parts if len(parts) == 3 else None
+    versions = [v for v in (a.get("whatsnew_seen_version"), b.get("whatsnew_seen_version")) if _ver(v)]
+    if versions:
+        out["whatsnew_seen_version"] = max(versions, key=_ver)
+    return out
+
+
 @dataclass
 class SettingsStore:
     # The three field annotations below do NOT get their usual @dataclass
@@ -300,6 +346,11 @@ class SettingsStore:
             ran = bool(loaded.get("vacation_mode_enabled") or loaded.get("vacation_mode_pattern")
                        or loaded.get("vacation_mode_pattern_built_at") or loaded.get("vacation_mode_periods"))
             self.data["vacation_mode_tracked_since"] = time.time() if ran else 0
+        # First sight of this install, once (see first_seen_ts above).
+        _fs = self.data.get("first_seen_ts")
+        if isinstance(_fs, bool) or not isinstance(_fs, (int, float)) or _fs <= 0:
+            self.data["first_seen_ts"] = time.time()
+            _normalized = True
         # Atlas on by default, once. Runs before panel.py reads the
         # setting — settings are a critical store, loaded before the panel is
         # registered — so the sidebar entry appears on the restart the update

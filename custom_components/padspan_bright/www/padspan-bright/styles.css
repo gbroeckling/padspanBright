@@ -1,6 +1,7 @@
 :host{--accent:#52b788;--accent2:#5eead4;--accent3:#f59e0b;display:block;color:#e2e8f0;--bg:#0a150e;--panel:#0f1a12;--line:#1b3526;--text:#e2e8f0;--pad:14px;font-family:Inter,system-ui,Arial,sans-serif}
 .app{display:grid;grid-template-columns:300px 1fr;height:calc(100vh - var(--header-height,56px));background:var(--bg);overflow:hidden}
 .app.mini{grid-template-columns:92px 1fr}
+.app.mini #navTrial{display:none}
 .left{background:linear-gradient(180deg,#2d1a0a 0%,#1a0d05 100%);border-right:1px solid var(--line);padding:var(--pad);overflow-y:auto;overflow-x:hidden;height:100%;position:sticky;top:0}
 .left::before{content:"";display:block;height:4px;border-radius:999px;margin-bottom:12px;background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent3))}
 .brand{display:flex;gap:10px;align-items:center;font-weight:700;margin-bottom:10px;padding:10px;border-radius:14px;background:linear-gradient(90deg,rgba(82,183,136,.18),rgba(94,234,212,.10));border:1px solid #1a4228;}
@@ -255,6 +256,46 @@
 .modal .close {
   margin-left:auto;
 }
+/* Finger-sized wherever there is a touchscreen: a wall panel has no Escape
+   key, so Close (or a tap outside) is the only way out. */
+@media (any-pointer:coarse){.modal .close{min-height:44px;min-width:64px}}
+
+/* Release notes over the panel (views/release_notes.js), from the Overview's
+   "PadSpan Bright updated" card. Wall screens are touch only: ✕ and Close are
+   48px targets, and the list scrolls between a fixed header and footer. */
+.modal .panel.notes-panel{width:min(860px,96vw);max-height:92vh;max-height:92dvh}
+.notes-title{flex:1;min-width:0;font-size:17px}
+.notes-x{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:48px;height:48px;
+  margin:0;padding:0;border-radius:12px;border:1px solid #2d6a4f;background:#152a1a;color:#e2e8f0;
+  font-size:22px;line-height:1;cursor:pointer}
+.notes-x:active,.btn.notes-close:active{filter:brightness(1.5)}
+.modal .body.notes-body{flex:1 1 auto;min-height:0;overscroll-behavior:contain;padding:14px 20px;
+  font-size:15px;line-height:1.6;color:#dbe4ee;overflow-wrap:anywhere}
+.notes-status{padding:28px 0;color:#94a3b8;text-align:center}
+.notes-rel + .notes-rel{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}
+.notes-relhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.notes-ver{font-size:17px;font-weight:800;color:#52b788}
+.notes-date{font-size:13px;color:#94a3b8}
+.notes-reltitle{margin:2px 0 6px;font-weight:700;color:#e2e8f0}
+.notes-h{margin:14px 0 4px;font-weight:700;color:#8ee5b4}
+.notes-ul{margin:4px 0;padding-left:22px}
+.notes-ul li{margin:5px 0}
+.notes-p{margin:8px 0}
+.notes-md strong{color:#f1f5f9}
+.notes-md code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em;padding:0 4px;
+  border-radius:5px;border:1px solid var(--line);background:#0c1a0e;box-decoration-break:clone;
+  -webkit-box-decoration-break:clone}
+.notes-foot{flex:0 0 auto;display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 20px;
+  border-top:1px solid var(--line)}
+.notes-history{font-size:13px;color:#52b788;text-decoration:none}
+.btn.notes-close{width:auto;min-width:160px;min-height:48px;margin:0 0 0 auto;text-align:center;
+  font-size:16px;font-weight:700;border-color:#52b788;color:#e2e8f0}
+@media(max-width:900px){
+  .modal .panel.notes-panel{width:100%}
+  .modal .body.notes-body{padding:12px 14px;font-size:14px}
+  .notes-foot{padding:10px 14px calc(10px + env(safe-area-inset-bottom, 0px))}
+  .btn.notes-close{flex:1 1 100%;margin:0}
+}
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -445,6 +486,9 @@
 }
 .mobile-topbar-pill.live{border-color:rgba(82,183,136,.6);background:rgba(82,183,136,.18);color:#52b788}
 .mobile-topbar-pill.basic{border-color:rgba(94,234,212,.5);background:rgba(94,234,212,.12);color:#5eead4}
+/* The `all:unset` above undoes .hidden (same weight, later), which left the
+   flood-alarm pill showing "🚨 0" on every phone with nothing latched. */
+.mobile-topbar-pill.hidden{display:none}
 
 /* ── Sidebar close button (mobile-only, inside drawer) ───────────── */
 .sidebar-mobile-header{
@@ -1129,6 +1173,53 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 .lv-stage::-webkit-scrollbar{height:9px;width:9px}
 .lv-stage::-webkit-scrollbar-thumb{background:rgba(120,190,155,.25);border-radius:999px;border:2px solid #040a05}
 
+/* ── Atlas outdoor weather (views/atlas_weather.js) ─────────────────────────
+   Rain or snow everywhere outside the floor plates, never over a room. An
+   overlay right after the SVG in the stage: the same width and centring
+   (atlas_weather.js fit()), its height from padding-top and pulled back up
+   over the drawing by the same negative margin, so it pans with the map and
+   adds nothing to the scroll area. Clipped by an ALPHA mask of the plates.
+   Below every drawer, rail, dial and card; never takes a tap. Motion is
+   transform-only and nothing but the falling layers asks for a layer of
+   its own. .still (the free map, and reduced motion): no motion at all. */
+.lv-wx{display:block;position:relative;z-index:0;height:0;box-sizing:content-box;overflow:hidden;
+  pointer-events:none;-webkit-mask-size:100% 100%;mask-size:100% 100%;-webkit-mask-repeat:no-repeat;
+  mask-repeat:no-repeat;-webkit-mask-position:0 0;mask-position:0 0;
+  --wxcap:100000%;width:min(var(--wxz,100%),var(--wxcap));
+  padding-top:calc(min(var(--wxz,100%),var(--wxcap)) * var(--wxa,0));
+  margin-top:calc(-1 * min(var(--wxz,100%),var(--wxcap)) * var(--wxa,0))}
+/* The phone rule above ("SVG maps: prevent overflow", max-width:900px) holds
+   the map's SVG to the stage width whatever the zoom; the overlay follows. */
+@media(max-width:900px){.lv-wx{--wxcap:100%}}
+.lv-wx *{pointer-events:none}
+/* Four sides, not `inset`: older wall-tablet WebViews lack the shorthand. The
+   tilted field reaches past the drawing by what the steepest wind needs for
+   this drawing's shape (--wxlr / --wxtb, from fit()). */
+.lv-wx-tilt{position:absolute;left:calc(-1 * var(--wxlr,35%));right:calc(-1 * var(--wxlr,35%));
+  top:calc(-1 * var(--wxtb,35%));bottom:calc(-1 * var(--wxtb,35%));transform:rotate(var(--a1,3deg))}
+.lv-wx-sway,.lv-wx-haze,.lv-wx-ripples,.lv-wx-rim{position:absolute;left:0;top:0;right:0;bottom:0}
+.lv-wx-layer{position:absolute;left:0;right:0;top:calc(-1 * var(--th));bottom:0;background-repeat:repeat;
+  background-size:var(--tw) var(--th);will-change:transform}
+/* Haze and ripple alphas are 1.5x the look (.05, .55): the overlay's opacity
+   (strength / 1.5) brings them back, as it does the baked tiles. */
+.lv-wx-haze{background:radial-gradient(120% 90% at 50% 40%,rgba(190,215,225,0) 35%,rgba(190,215,225,.075) 100%)}
+.lv-wx-rp{position:absolute;width:16px;height:8px;margin:-4px 0 0 -8px;border-radius:50%;
+  border:1px solid var(--rp,rgba(220,238,228,.825));opacity:0}
+.lv-wx-rim svg{display:block;width:100%;height:100%}
+@keyframes lv-wx-fall{to{transform:translateY(var(--th))}}
+@keyframes lv-wx-sway{from{transform:translateX(calc(-1 * var(--sa)))}to{transform:translateX(var(--sa))}}
+@keyframes lv-wx-ripple{0%{transform:scale(.15);opacity:0}12%{opacity:.5}100%{transform:scale(1);opacity:0}}
+@keyframes lv-wx-in{from{opacity:0}}
+@keyframes lv-wx-out{from{opacity:1}}
+@keyframes lv-wx-wind{from{transform:rotate(var(--a0,3deg))}}
+.lv-wx.still,.lv-wx.still *{animation:none !important}
+.lv-wx.still .lv-wx-ripples{display:none !important}
+.lv-wx.still .lv-wx-layer{will-change:auto}
+@media (prefers-reduced-motion:reduce){
+  .lv-wx,.lv-wx *{animation:none !important}
+  .lv-wx-ripples{display:none !important}
+  .lv-wx-layer{will-change:auto}}
+
 /* ── Layout v2 (Garry, 2026-09-21) ──────────────────────────────────────────
    Reversible trial, gated entirely by .lv-v2 on .lv-mapcard (host.layoutV2 —
    see layoutTierFor in views/lights_map.js). Nothing here ever applies to
@@ -1182,17 +1273,29 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 
 /* ── Emergency lighting test (the Atlas sidebar; lights_panel.js) ─────────
    Garry, 2026-09-28: "out of the way, takes up no new real estate, and looks
-   like an emergency type button". Floats over the map's bottom-right corner
-   from a zero-height anchor after the stage (no row, nothing moves), clear
-   of the stage's scrollbars and under the drawers. A red round centre
-   (start/end the test) inside a ring that is its own button (the card of
-   every emergency light — Garry: "a breakout button as a ring around the
-   emergency button"), a list notch on the ring so the two never read as one.
-   The label opens on hover and stays while a test runs, the ring pulsing,
-   Force off beside it. Laid out right to left: dial, label, Force off. */
+   like an emergency type button". Floats over the map's top-right corner
+   from a zero-height anchor right before the stage (no row, nothing moves),
+   above the rail's drawers. A red round centre (start/end the test) inside
+   a ring that is its own button (the card of every emergency light — Garry:
+   "a breakout button as a ring around the emergency button"), a list notch
+   on the ring so the two never read as one. The label opens on hover and
+   stays while a test runs, the ring pulsing, Force off beside it. Laid out
+   right to left: dial, label, Force off. */
 .lv-emerg-anchor{position:relative;height:0;container-type:inline-size}
-.lv-emerg{position:absolute;right:14px;bottom:14px;z-index:3;display:flex;flex-direction:row-reverse;
+/* Top-right corner of the map: its top is on screen when the Atlas opens
+   (the bottom of a tall house map often is not). Above an open drawer
+   (z 4), and the drawers keep their controls out from under the dial. */
+.lv-emerg{position:absolute;right:14px;top:14px;z-index:6;display:flex;flex-direction:row-reverse;
   align-items:center;gap:6px;pointer-events:none}
+.lv-mapcard:has(.lv-emerg) .lv-drawer{padding-right:96px}
+/* While a drawer is open, the running test's label and Force off stack
+   under the dial, in that same clear strip, rather than over the chips. */
+.lv-mapcard:has(.lv-drawer.open) .lv-emerg{flex-direction:column;align-items:flex-end}
+/* ...and the running label is its 32px icon at every width, so the stacked
+   column stays inside the drawer's clear strip on the right (re-review). */
+.lv-mapcard:has(.lv-drawer.open) .lv-emerg-label.on{max-width:32px;width:32px;padding:0;justify-content:center}
+.lv-mapcard:has(.lv-drawer.open) .lv-emerg-label.on .lv-emerg-label-tx{display:none}
+.lv-mapcard:has(.lv-drawer.open) .lv-emerg-label.on .lv-emerg-label-ic{display:inline-flex}
 .lv-emerg button{pointer-events:auto}
 /* The ring band is 16 px (was 12): easy to hit on a phone, and the centre
    keeps its 40 px. */
@@ -1236,11 +1339,14 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 @media (prefers-reduced-motion:reduce){.lv-emerg.busy .lv-emerg-btn::after{animation:none;border-color:#fff}}
 .lv-emerg-label-ic{display:none}
 /* A narrow map (a phone): the running label shrinks to a stop icon, so the
-   row (dial, label, Force off) stays clear of the 44 px rail. */
+   row (dial, label, Force off) stays clear of the 44 px rail. Closer to the
+   corner, but full size: the ring band, the centre and Force off keep the
+   touch sizes above. */
 @container (max-width:440px){
   .lv-emerg-label.on{max-width:32px;width:32px;padding:0;justify-content:center}
   .lv-emerg-label.on .lv-emerg-label-tx{display:none}
   .lv-emerg-label.on .lv-emerg-label-ic{display:inline-flex}
+  .lv-emerg{right:8px;top:8px}
 }
 
 /* The builder's own columns (Garry, 2026-09-21: "get it done" — the rest of
@@ -1271,8 +1377,11 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 .lv-tablecard{background:linear-gradient(180deg,#101d14 0%,#0d1811 100%);
   border:1px solid rgba(120,190,155,.16);border-radius:16px;padding:12px;
   box-shadow:0 1px 0 rgba(255,255,255,.03) inset}
-.lv-tbl-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.lv-tbl-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px}
 .lv-tbl-title{font-weight:700;font-size:13px;letter-spacing:.01em;color:#e8f0ea}
+/* The index header stays on one line; the builder's light inspector reuses
+   .lv-tbl-title for "code · name", which must still wrap. */
+.lv-index .lv-tbl-title{white-space:nowrap}
 .lv-count{font-size:10px;font-weight:700;padding:1px 8px;border-radius:999px;
   border:1px solid rgba(120,190,155,.25);background:rgba(82,183,136,.1);
   color:#8ee5b4;font-variant-numeric:tabular-nums}
@@ -1283,6 +1392,38 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 .lv-table tbody tr{transition:background .12s ease}
 .lv-table tbody tr:hover{background:rgba(255,255,255,.03)}
 .lv-table tbody tr:last-child td{border-bottom:none}
+/* On a phone the panel-wide `.card{word-break:break-word}` let every cell
+   shrink to one letter ("Ligh t Index", "COD E"). The index card sizes by its
+   own width, not the screen's, because the builder puts it in a 440px column
+   on a desktop too. Words break at spaces and headers stay on one line.
+   Under 900px a row that is still too wide scrolls inside the card, never the
+   page (wider, the page's sticky header row is kept). Under 480px the
+   lv-narrow columns step aside (Brand, and Type where it is empty),
+   a light or room name breaks inside a word only past 76/60px, the Assign
+   room list takes the column's width and a row's buttons stack; under 360px
+   (a phone: the builder's desktop side column is ~394-414px and keeps them)
+   Health and the Pro Type pulldown step aside too: the Atlas sidebar's index
+   fits a 390px phone. The ≤900px
+   `svg{max-width:100%}` let the code column forget its shape icon, which
+   then overlapped the name. */
+.lv-index{container:lv-index/inline-size;word-break:normal;overflow-wrap:break-word}
+.lv-table th,.lv-table td.lv-map,.lv-table td.lv-map .lv-act{white-space:nowrap}
+.lv-table td svg{max-width:none}
+@container lv-index (max-width:900px){
+  .lv-tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .lv-table{min-width:0}
+}
+@container lv-index (max-width:480px){
+  .lv-table .lv-narrow{display:none}
+  .lv-table th,.lv-table td{padding:7px 3px}
+  .lv-table td.lv-map .lv-act{padding:3px 7px}
+  .lv-table td.lv-name{min-width:76px;overflow-wrap:anywhere}
+  .lv-table .lv-state{padding:2px 6px}
+  .lv-table td.lv-room{min-width:60px;overflow-wrap:anywhere}
+  .lv-table td.lv-room .lv-select{width:100%;min-width:0}
+  .lv-table td.lv-map{white-space:normal}
+}
+@container lv-index (max-width:360px){.lv-table .lv-phone,.lv-table .lv-slim{display:none}}
 .lv-state{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;
   font-size:10px;font-weight:700;letter-spacing:.06em}
 .lv-state::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}

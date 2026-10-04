@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.85";
-const RELEASE_BUILD_ID = "20260928T223144Z";
+const APP_VERSION = "0.38.94";
+const RELEASE_BUILD_ID = "20261004T145853Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -39,7 +39,7 @@ const BUILD_ID = (() => {
     return RELEASE_BUILD_ID;
   }
 })();
-const CHANNEL = "stable";
+const CHANNEL = "beta";
 
 // ── Editions and tiers ───────────────────────────────────────────────────────
 // Which surfaces this build shows (views/editions.js). Loaded with the same
@@ -50,10 +50,11 @@ const _editionsPromise = import(`./views/editions.js?b=${BUILD_ID}`)
   .then(m => { EDITIONS = m; })
   .catch(err => console.warn("PadSpan: editions module failed to load", err));
 // The 90-day trial card (views/trial_offer.js), offered from the Getting
-// started card. Optional in the same way: if it fails to load, that line of
-// the checklist simply is not there.
+// started card, the update banner, the milestone card and the sidebar entry.
+// Optional in the same way: if it fails to load, those lines simply are not
+// there. The sidebar is built before it lands, so it waits on the promise.
 let TRIAL = null;
-import(`./views/trial_offer.js?b=${BUILD_ID}`)
+const _trialPromise = import(`./views/trial_offer.js?b=${BUILD_ID}`)
   .then(m => { TRIAL = m; })
   .catch(err => console.warn("PadSpan: trial_offer module failed to load", err));
 
@@ -627,6 +628,7 @@ class PadSpanHaApp extends HTMLElement {
 
           <div style="margin-top:12px;margin-bottom:8px" class="muted" id="navLabel">Menu</div>
           <div class="nav" id="nav"></div>
+          <div id="navTrial" style="margin-top:10px"></div>
         </aside>
 
         <main class="main">
@@ -902,34 +904,212 @@ class PadSpanHaApp extends HTMLElement {
     // The import above is deliberately allowed to fail, and this call site has
     // to honour that same contract: editions.js is optional, so neither its
     // absence NOR a throw inside it may cost the reader the Overview tab.
+    // One offer per banner: when the trial line below will show, it is the
+    // offer, and the older Pro pitch steps aside (two sales lines in a "what
+    // changed" note reads as nagging). The trial line is news once — only in
+    // the banner for the update that brought it (trialNewsDue) — so every
+    // later banner has the Pro pitch exactly as before.
+    let trialLine = false;
+    try {
+      trialLine = !!(TRIAL && (this.state._bannerTrialOpen || TRIAL.trialNewsDue(st, seen, this.state.kioskMode)));
+    } catch (_) { trialLine = false; }
     let pitch = null;
-    try { if (EDITIONS && EDITIONS.proPitch) pitch = EDITIONS.proPitch(st); }
+    try { if (!trialLine && EDITIONS && EDITIONS.proPitch) pitch = EDITIONS.proPitch(st); }
     catch (e) { console.warn("PadSpan: proPitch failed", e); }
     if (pitch) {
       const line = el("div", { style: "font-size:12px;color:#94a3b8;line-height:1.55;margin-bottom:8px" });
       line.appendChild(document.createTextNode(pitch.text));
-      line.appendChild(el("a", { href: pitch.url, target: "_blank", rel: "noopener",
-        style: "color:#52b788;font-weight:600;text-decoration:none" }, pitch.cta));
+      // A wall screen (kiosk / full screen) can't close the tab a link
+      // opens, so there it names the site instead of linking to it.
+      let tabOk = true;
+      try { tabOk = !TRIAL || !TRIAL.newTabOk || TRIAL.newTabOk(this.state.kioskMode); } catch (_) { tabOk = true; }
+      line.appendChild(tabOk
+        ? el("a", { href: pitch.url, target: "_blank", rel: "noopener",
+            style: "color:#52b788;font-weight:600;text-decoration:none" }, pitch.cta)
+        : el("span", { style: "color:#52b788;font-weight:600" }, `${pitch.cta} (padspan.traks.ca)`));
       card.appendChild(line);
     }
 
-    // Read at render time, not import time: a top-level await here would turn
-    // the survivable "editions failed to load" case above into a blank panel.
-    // The literal is the same URL release.py writes into the update manifest.
-    const notesUrl = (EDITIONS && EDITIONS.WHATSNEW_URL) || "https://padspan.traks.ca/#whatsnew";
-    const notes = el("a", { class: "btn inline", href: notesUrl, target: "_blank", rel: "noopener",
-      style: "background:#0a2a1a;border-color:#52b788;color:#52b788;font-weight:700;text-decoration:none" },
+    // The 90-day trial (views/trial_offer.js): one line, in the one banner
+    // trialNewsDue picks (the update from before the trial, no key, below
+    // bright, not answered, not a kiosk). It is part of this banner, and
+    // dismissing the banner dismisses it. "Try it" opens the shared card
+    // inline; after a start it stays open to say it worked. Optional like
+    // editions: a missing or throwing trial module costs this line, never
+    // the banner.
+    try {
+      const open = !!this.state._bannerTrialOpen;
+      if (trialLine) {
+        const row = el("div", { "data-trial-line": "update_banner",
+          style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:#8ee5b4;line-height:1.55;margin-bottom:8px" });
+        row.appendChild(el("span", {}, TRIAL.TRIAL_NEWS_LINE + " "));
+        row.appendChild(el("span", { style: "color:#94a3b8" }, TRIAL.TRIAL_HONESTY));
+        const tryIt = el("button", { class: "btn inline", "data-trial-open": "update_banner",
+          style: "font-size:11px;padding:2px 8px;border-color:#52b788;color:#52b788" }, open ? "Hide" : "Try it");
+        tryIt.addEventListener("click", () => { this.state._bannerTrialOpen = !open; this._scheduleRender(); });
+        row.appendChild(tryIt);
+        card.appendChild(row);
+        TRIAL.trialOfferSeen("update_banner", (n) => this._telemetryEvent(n));
+        if (open) {
+          const offer = TRIAL.trialOfferFromCtx(this._ctx(), "update_banner", { honesty: false });
+          if (offer) card.appendChild(offer);
+        }
+      }
+    } catch (e) { console.warn("PadSpan: trial line failed", e); }
+
+    // The notes open over the panel (_openReleaseNotes). This was a link to
+    // padspan.traks.ca in a new tab, and a wall screen (Chrome --kiosk, touch
+    // only) has no way to close one: the screen was stuck on the website.
+    const notes = el("button", { class: "btn inline", "data-whatsnew-notes": "open",
+      style: "background:#0a2a1a;border-color:#52b788;color:#52b788;font-weight:700" },
       "See what changed");
-    notes.addEventListener("click", () => remember(null));
+    notes.addEventListener("click", () => { remember(null); this._openReleaseNotes(); });
     const dismiss = el("button", { class: "btn inline", style: "color:#94a3b8" }, "Dismiss");
     dismiss.addEventListener("click", () => remember(`Hidden until the next update.`));
     card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [notes, dismiss]));
     return card;
   }
 
+  // ── Release notes, over the panel ───────────────────────────────────────
+  // views/release_notes.js shows assets/whatsnew.json (written from
+  // CHANGELOG.md by release.py, shipped with the integration) in #modal, so
+  // the notes work offline and close with ✕, Close, a tap outside or Escape.
+  // Loaded on first use; if it can't load, a toast says so.
+  _openReleaseNotes(){
+    // Read at call time, not import time: editions.js is allowed to fail.
+    // The literal is the same URL release.py writes into the update manifest.
+    const historyUrl = (EDITIONS && EDITIONS.WHATSNEW_URL) || "https://padspan.traks.ca/#whatsnew";
+    import(`./views/release_notes.js?b=${BUILD_ID}`)
+      .then(m => m.openReleaseNotes(this.$modal, {
+        url: `/padspan_bright_static/padspan-bright/assets/whatsnew.json?v=${APP_VERSION}&b=${BUILD_ID}`,
+        history: m.notesHistoryLink(historyUrl, this.state.kioskMode),
+      }))
+      .catch(err => {
+        console.warn("PadSpan: release notes failed to open", err);
+        this._toast("The release notes couldn't be opened. Refresh the page and try again.", true);
+      });
+  }
+
+  // ── The trial's milestone card, once per install ─────────────────────────
+  // A free install that never meets a paid wall never meets the trial either.
+  // This tells it once, at a moment the free product has just proved itself:
+  // the first time someone real is on the map in live data (Getting started's
+  // own "positioned" rule, passed in), or after a week of PadSpan running here
+  // (first_seen_ts — an install from before that key is stamped on its first
+  // load of this version, so its week counts from the update).
+  //
+  // ONCE means once: the per-install flag (trial_nudge_done) is saved the
+  // moment the card first appears, so a reload never brings it back whether
+  // or not anyone answered; "No thanks" / ✕ just take it away for this page.
+  // For that reason it is shown only to an administrator — the one person who
+  // can start the trial — and never on a kiosk or in sample mode. Never
+  // beside the Getting started card or another Overview card (the caller).
+  _trialMilestoneCard(positioned){
+    const st = this.state.settings;
+    if (!TRIAL || !st || this.state.kioskMode) return null;
+    if (!this.state._dataModeKnown || this.state.dataMode !== "live") return null;
+    if (!(this._hass && this._hass.user && this._hass.user.is_admin)) return null;
+    const m = this._trialMilestone || (this._trialMilestone = { visible: false, hidden: false, open: false, saved: false });
+    if (m.hidden) return null;
+    if (!m.visible) {
+      // One offer per page load: after the update banner, the usage-report
+      // ask or Getting started showed on this load, the card waits for the
+      // next one rather than following them onto the screen (_overviewCardShown).
+      if (this._overviewCardShown) return null;
+      if (!TRIAL.trialMilestoneDue(st, positioned)) return null;
+      m.visible = true;
+    }
+    // A key that arrives from elsewhere (Settings) takes the card away; a
+    // trial started from it keeps it open to say so.
+    if (!m.open && !TRIAL.trialOfferable(st)) return null;
+    const markDone = () => {
+      this._callWS({ type: "padspan_bright/settings_set", trial_nudge_done: true })
+        .then(res => { if (res && res.settings) this.state.settings = res.settings; })
+        .catch(() => {});
+    };
+    if (!m.saved) { m.saved = true; markDone(); }
+    TRIAL.trialOfferSeen("milestone", (n) => this._telemetryEvent(n));
+    const hide = () => {
+      m.hidden = true;
+      // ✕ after a trial was started here closes a "started" note: nothing
+      // was dismissed, and the flag was saved when the card first showed.
+      if (!TRIAL.trialStartedHere("milestone")) {
+        this._telemetryEvent("trial_nudge_dismissed");
+        markDone();
+      }
+      this._scheduleRender();
+    };
+
+    const card = el("div", { "data-trial-milestone": "card",
+      style: "background:#0a1f14;border:1px solid #1a4228;border-radius:8px;padding:10px 14px;margin-bottom:12px" });
+    const close = el("button", { class: "btn inline", "data-trial-milestone": "close", title: "Hide this",
+      style: "margin-left:auto;font-size:12px;padding:0 8px;color:#94a3b8" }, "✕");
+    close.addEventListener("click", hide);
+    card.appendChild(el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:4px" }, [
+      el("div", { style: "font-weight:700;font-size:13px;color:#52b788" }, TRIAL.TRIAL_MILESTONE_TITLE), close]));
+    card.appendChild(el("div", { style: "font-size:12px;color:#cbd5e1;line-height:1.55" }, TRIAL.TRIAL_MILESTONE_BODY));
+    card.appendChild(el("div", { style: "font-size:12px;color:#94a3b8;line-height:1.55;margin-bottom:8px" }, TRIAL.TRIAL_HONESTY));
+    if (m.open) {
+      const offer = TRIAL.trialOfferFromCtx(this._ctx(), "milestone", { honesty: false });
+      if (offer) card.appendChild(offer);
+    } else {
+      const tryIt = el("button", { class: "btn inline", "data-trial-milestone": "try",
+        style: "background:#0a2a1a;border-color:#52b788;color:#52b788;font-weight:700" }, "Try it");
+      tryIt.addEventListener("click", () => { m.open = true; this._scheduleRender(); });
+      const no = el("button", { class: "btn inline", "data-trial-milestone": "no", style: "color:#94a3b8" }, "No thanks");
+      no.addEventListener("click", hide);
+      card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [tryIt, no]));
+    }
+    return card;
+  }
+
+  // ── The trial's quiet sidebar entry ──────────────────────────────────────
+  // Muted text under the PadSpan menu while the install could be offered the
+  // trial (no key, below bright); a tap opens the shared card right there.
+  // No badge, no count, no animation. It is the one placement a Bright build
+  // keeps (its Overview does not exist). Administrators only (the one person
+  // who can start it), and gone once the milestone card has been SHOWN
+  // (trial_nudge_done is saved when it first appears, answered or not): the
+  // offer has been made once, and that is enough. Built by _renderNav; the
+  // trial module may land after the first nav, so that waits for it once.
+  _renderSidebarTrial(){
+    const box = this.$ && this.$("#navTrial");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!TRIAL) {
+      if (!this._sidebarTrialWaiting) {
+        this._sidebarTrialWaiting = true;
+        _trialPromise.then(() => { if (TRIAL) this._renderSidebarTrial(); });
+      }
+      return;
+    }
+    try {
+      const open = !!this._sidebarTrialOpen;
+      const st = this.state.settings;
+      const admin = !!(this._hass && this._hass.user && this._hass.user.is_admin);
+      if (!open && (!admin || (st && st.trial_nudge_done === true) || !TRIAL.trialOfferable(st))) return;
+      // #8391a7: still quieter than the menu above it, but readable — at
+      // least 5:1 on either skin's sidebar (#64748b was 3.9:1).
+      const link = el("div", { "data-trial-sidebar": "entry", role: "button", tabindex: "0",
+        style: "cursor:pointer;font-size:11px;color:#8391a7;padding:4px 8px" }, TRIAL.TRIAL_SIDEBAR_LABEL);
+      const toggle = () => { this._sidebarTrialOpen = !open; this._renderSidebarTrial(); };
+      link.addEventListener("click", toggle);
+      link.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+      box.appendChild(link);
+      if (open) {
+        const host = TRIAL.trialHostFromCtx(this._ctx());
+        host.rerender = () => this._renderSidebarTrial();
+        const offer = TRIAL.trialOfferCard(host, "sidebar");
+        if (offer) box.appendChild(offer);
+      }
+    } catch (e) { console.warn("PadSpan: sidebar trial entry failed", e); }
+  }
+
   _telemetryAskCard(compact){
     const st = this.state.settings;
-    if (!st || st.telemetry_enabled || st.telemetry_asked) return null;
+    // Settings not loaded yet ({} at start) is not "never asked": no flash of
+    // the question before the answer arrives.
+    if (!st || !("telemetry_enabled" in st) || st.telemetry_enabled || st.telemetry_asked) return null;
     const decide = async (on) => {
       try {
         // Straight to the wire: `this.actions` is never assigned on the
@@ -949,7 +1129,7 @@ class PadSpanHaApp extends HTMLElement {
     card.appendChild(el("div", { style: "font-size:12px;color:#cbd5e1;line-height:1.55;margin-bottom:8px" },
       "PadSpan is bleeding edge. Metre-level BLE positioning in an ordinary house is not a solved problem, and this one is developed against exactly one house. " +
       "It needs all the help it can find, and the biggest help is being able to see what other houses look like. " +
-      "Opt in and once a day it sends counts only: scanners, floors, rooms, calibration points, which features are on, whether positioning and identity resolution are actually working, and how many warnings each part logged. " +
+      "Opt in and once a day it sends counts only: scanners, floors, rooms, calibration points, which features are on, whether positioning and identity resolution are actually working, how hard the machine works and what class of machine it is, and how many warnings each part logged. " +
       "Never addresses, keys, names, coordinates or timestamps. Off until you say yes, and Settings → Presence turns it off again any time."));
     const out = el("pre", { class: "pre", style: "display:none;margin:0 0 8px;max-height:260px;overflow:auto;font-size:11px" });
     const yes = el("button", { class: "btn inline", style: "background:#0a2a1a;border-color:#52b788;color:#52b788;font-weight:700" }, "Share usage report");
@@ -2159,6 +2339,7 @@ class PadSpanHaApp extends HTMLElement {
       mobileModePill.textContent = isBasic ? "Basic" : this.state.complexity === "development" ? "Dev" : "Adv";
       mobileModePill.className = "mobile-topbar-pill" + (isBasic ? " basic" : "");
     }
+    this._renderSidebarTrial();
   }
 
   /** Open a help modal for the given key (content loaded from help_content.js). */
@@ -3441,6 +3622,7 @@ class PadSpanHaApp extends HTMLElement {
       if (_setupKnown && !_onboardingDone && !_allDone && _posKnown && !this.state._onboardingDismissed && this.state.view === "overview") {
         // Opt-in usage report: the card was seen, once per page.
         if (!this._gettingStartedCounted) { this._gettingStartedCounted = true; this._telemetryEvent("getting_started_shown"); }
+        this._overviewCardShown = true;   // the trial milestone waits for another page load
         const bar = el("div",{"data-getting-started":"card",style:"background:#0a1f14;border:1px solid #1a4228;border-radius:8px;padding:10px 14px;margin-bottom:12px"});
         // Header
         const hdr = el("div",{style:"display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"});
@@ -3551,6 +3733,18 @@ class PadSpanHaApp extends HTMLElement {
         if (_new) frag.appendChild(_new);
         const _ask = this._telemetryAskCard(false);
         if (_ask) frag.appendChild(_ask);
+        if (_new || _ask) this._overviewCardShown = true;
+        // The trial's one-time milestone card — one card at a time, so never
+        // beside the two above (the update banner carries its own trial line),
+        // nor right after them on the same page load (_overviewCardShown, read
+        // in _trialMilestoneCard), and never before the stores and the live
+        // answer are in (no flash).
+        if (!_new && !_ask && _setupKnown && _posKnown) {
+          try {
+            const _ms = this._trialMilestoneCard(_hasPositioned);
+            if (_ms) frag.appendChild(_ms);
+          } catch(e) { console.warn("PadSpan: trial milestone failed", e); }
+        }
       }
     }
 

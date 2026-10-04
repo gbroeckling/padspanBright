@@ -22,6 +22,10 @@ const { assignLightCodes, resolveLightShape, LIGHT_SHAPES, LIGHT_TYPE_OVERRIDES,
   await import(`./light_codes.js${new URL(import.meta.url).search}`);
 const { tierAtLeast } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
+// Atlas outdoor weather (atlas_weather.js). Optional: a module that fails to
+// load must not take the house map with it — the map just has no weather.
+const WX = await import(`./atlas_weather.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: atlas_weather failed to load", err); return null; });
 
 // ── What a tier is shown ─────────────────────────────────────────────────────
 // Below `bright` — PadSpan Bright with no key, PadSpan Bright with no key — the
@@ -2715,6 +2719,29 @@ export function buildLightsMapCard(hostIn){
     view.scrollTop = isoDiv.scrollTop;
   });
 
+  // Outdoor weather (docs/IDEA_ATLAS_WEATHER.md): rain or snow outside the
+  // floor plates, as an overlay laid over the SVG — never inside it, so the
+  // drawing is byte-for-byte what it was. host.weather is the host's
+  // {slot, settings (the settings payload), states, entities, telemetry}; no
+  // host.weather (settings not in yet), no overlay. Both editions get it; a
+  // paid tier animates it, the free map shows it still — the same licence
+  // line as placement.
+  const wxSlot = WX && host.weather && host.weather.settings ? WX.atlasWeatherSlot(host.weather.slot) : null;
+  let wxOutdoorZ = null;
+  if (wxSlot) {
+    try { wxOutdoorZ = WX.outdoorPlateLevels(_frame, isOutdoorFloorId); } catch (_) { wxOutdoorZ = null; }
+  }
+  const mountWeather = (svgStr) => {
+    if (!wxSlot) return;
+    try {
+      const w = host.weather;
+      const theme = host.showcase ? (SHOWCASE_THEMES[host.showcaseTheme] || SHOWCASE_THEMES.classic) : SHOWCASE_THEMES.classic;
+      wxSlot.attach(isoDiv, { settings: WX.weatherSettingsFrom(w.settings), states: w.states, entities: w.entities, svg: svgStr,
+        animate: lightingUnlocked(host.tier), colour: WX.weatherColourOf(theme), outdoorZ: wxOutdoorZ,
+        zoom: view.zoom || 1, centred: V2, telemetry: w.telemetry });
+    } catch (_) { /* attach counts its own failures; the map never sees one */ }
+  };
+
   // Semantic zoom (use surface): the codes leave the drawing below 100% and
   // come back above it, so a zoom change across that line is a rebuild, not
   // just a CSS width. The builder always shows codes (host.codeChip unset).
@@ -2760,6 +2787,8 @@ export function buildLightsMapCard(hostIn){
       svg.style.display = "block";
       svg.style.margin = "0 auto";
     }
+    // The weather overlay takes the same width and centring as the SVG.
+    if (wxSlot) wxSlot.fit(view.zoom, V2);
     if (host.codeChip && codesShown !== null && codesShown !== codesVisibleAtZoom(view.zoom)) rebuildISO();
   };
   // Zoom about a point (pinch midpoint / wheel): keep what is under the
@@ -2778,7 +2807,7 @@ export function buildLightsMapCard(hostIn){
     // filter on the drawing, not the persisted hidden set, so the table still
     // lists every light and stays the way to reach one that is filtered out.
     codesShown = host.codeChip ? codesVisibleAtZoom(view.zoom) : true;
-    isoDiv.innerHTML = buildIsoSVG(host.model, host.byRoom, host.hiddenEidsMap || host.hiddenEids, getFocusZ(view.focusIdx),
+    const svgStr = buildIsoSVG(host.model, host.byRoom, host.hiddenEidsMap || host.hiddenEids, getFocusZ(view.focusIdx),
       view.floorGap, view.horizGap, host.lightsByEid, host.lightsLoading, floors,
       { showcase: !!host.showcase, showcaseTheme: host.showcaseTheme || "classic",
         fitRooms: !!host.showcase && !!host.fitRooms,
@@ -2816,6 +2845,8 @@ export function buildLightsMapCard(hostIn){
         automorphHardness: view.automorphLiveHardness !== undefined ? view.automorphLiveHardness : (host.automorphHardness || 0),
         automorphStyle: host.automorphStyle || "glow",
         automorphSubtlety: view.automorphLiveSubtlety !== undefined ? view.automorphLiveSubtlety : (host.automorphSubtlety || 0) });
+    isoDiv.innerHTML = svgStr;
+    mountWeather(svgStr);
     applyZoom();
     host.onHexesBuilt(isoDiv, rebuildISO);
   };
@@ -3631,7 +3662,7 @@ export function buildLightsTable(host, lights){
   const hidden = host.hiddenEids;
   // The card wrapper lives HERE, not in the hosts — same objects AND same
   // layout in both views.
-  const root = el("div", { class: "card lv-tablecard" });
+  const root = el("div", { class: "card lv-tablecard lv-index" });
 
   const unassigned = lights.filter(l => !l.area_name && !hidden.has(l.entity_id));
   if (host.lightsLoading) {
@@ -3730,11 +3761,14 @@ export function buildLightsTable(host, lights){
     // this exact sort key until fixed by hand, separately, the same day).
     ["state", "State", (l) => { const sw = stateWordOf(l, host.floodLatches, host.doorInvertByEid); return sw ? sw.sortValue : (l.state === "on" ? 1 : 0); }],
   ];
-  const th = (key, label, extraStyle) => {
-    if (!key || !host.onTableSort) return el("th", { style: extraStyle || "" }, label);
+  // cls: lv-narrow / lv-slim / lv-phone, a column that steps aside when the index is
+  // narrower than 480px (lv-narrow) / 360px (lv-slim, lv-phone) (styles.css .lv-index).
+  const th = (key, label, extraStyle, cls) => {
+    if (!key || !host.onTableSort) return el("th", { class: cls || "", style: extraStyle || "" }, label);
     const active = sortState && sortState.column === key;
     const arrow = active ? (sortState.dir === "asc" ? " ▲" : " ▼") : "";
     return el("th", {
+      class: cls || "",
       style: `cursor:pointer;user-select:none;${extraStyle || ""}`,
       title: "Sort by " + label,
       onclick: () => {
@@ -3745,15 +3779,19 @@ export function buildLightsTable(host, lights){
       },
     }, label + arrow);
   };
+  // An empty Type column (no override control: below Pro) steps aside with
+  // Health and Brand; the Pro pulldown only on a phone, so it stays in the
+  // desktop builder's 440px column.
+  const typeNarrow = host.onTypeOverride ? "lv-phone" : "lv-narrow";
   const tbl = el("table", { class: "table lv-table", style: "width:100%" });
   tbl.appendChild(el("thead", {}, el("tr", {}, [
     th("code", "Code"),
     th("name", "Light"),
     th("room", "Room"),
-    th("health", "Health", "text-align:center"),
-    th("brand", "Brand"),
+    th("health", "Health", "text-align:center", "lv-slim"),
+    th("brand", "Brand", "", "lv-narrow"),
     th("state", "State"),
-    th(null, "Type", "text-align:center"),
+    th(null, "Type", "text-align:center", typeNarrow),
     th(null, "Map", "width:60px;text-align:center"),
   ])));
   const tbody = el("tbody");
@@ -3813,8 +3851,8 @@ export function buildLightsTable(host, lights){
         codeSwatchSvg = svg;
         return [svg, el("span", { style: `font-family:monospace;font-weight:700;color:${swatch};font-size:12px` }, l.code)];
       })()),
-      el("td", {}, l.friendly_name),
-      el("td", { class: "muted" }, l.area_name
+      el("td", { class: "lv-name" }, l.friendly_name),
+      el("td", { class: "muted lv-room" }, l.area_name
         ? el("span", {}, l.area_name)
         : host.lightsLoading
         ? el("span", {}, "…")
@@ -3843,13 +3881,13 @@ export function buildLightsTable(host, lights){
             return sel;
           })()
       ),
-      el("td", { style: "text-align:center" }, el("span", {
+      el("td", { class: "lv-slim", style: "text-align:center" }, el("span", {
         title: l.healthy ? "Healthy" : (l.healthReason || "Unhealthy"),
         style: `display:inline-block;width:9px;height:9px;border-radius:50%;` +
                `background:${l.healthy ? "#52b788" : "#f87171"};` +
                (l.healthy ? "" : "box-shadow:0 0 4px #f87171bb"),
       })),
-      el("td", { class: "muted", style: "font-size:11px" }, l.brand || "—"),
+      el("td", { class: "muted lv-narrow", style: "font-size:11px" }, l.brand || "—"),
       el("td", {}, (() => {
         // stateWordOf (Phase 2a follow-up, 2026-09-19) — was four
         // independent hand-written chains across this file (this one, the
@@ -3891,7 +3929,7 @@ export function buildLightsTable(host, lights){
       // (Garry, 2026-09-07: "some light switches are fan switches") now
       // reads l.isFan===true too — gating on the derived flag would hide
       // the only way to revert it.
-      el("td", { style: "text-align:center" },
+      el("td", { class: typeNarrow, style: "text-align:center" },
         (host.onTypeOverride && l.entity_id.startsWith("light.")) ? (() => {
           const sel = document.createElement("select");
           sel.className = "lv-select";
@@ -3907,7 +3945,7 @@ export function buildLightsTable(host, lights){
           return sel;
         })() : el("span", { class: "muted" }, "—")
       ),
-      el("td", { style: "text-align:center;white-space:nowrap" }, [
+      el("td", { class: "lv-map", style: "text-align:center" }, [
         // The visible way to the controls (sidebar): a "⋯" that opens the
         // card — the same card the hold opens, offered in plain sight.
         ...(host.onRowMore && isControllable(l) ? [el("button", {
@@ -4147,7 +4185,9 @@ export function buildLightsTable(host, lights){
     tbody.appendChild(row);
   }
   tbl.appendChild(tbody);
-  root.appendChild(tbl);
+  // A row still too wide for a narrow card (the builder's buttons) scrolls
+  // here, inside the card, never the page (styles.css .lv-index).
+  root.appendChild(el("div", { class: "lv-tblwrap" }, tbl));
   // Map → index: selecting a marker brings its row into view (the builder
   // sets focusRowEid for the render right after a map selection, only).
   if (host.focusRowEid) {

@@ -304,3 +304,59 @@ def test_the_paid_and_lighting_products_are_explained(html: str) -> None:
     assert "Bright" in html, "the editions section no longer mentions PadSpan Bright"
     low = html.lower()
     assert "light placement" in low, "the page no longer says what unlocks light placement"
+
+
+def test_the_paypal_buttons_are_styled_like_the_links_beside_them(html: str) -> None:
+    """Design pass 2026-09-28: `.btn` was written for links. On a <button>
+    (every PayPal form) the browser's own grey fill and font showed through —
+    "Upgrade to PadSpan Pro — $12" in #pro was light text on light grey, and
+    "Buy PadSpan Bright Pro" a plain grey system button among styled links."""
+    css = html[:html.index("</style>")]
+    assert re.search(r"\.btn\{[^}]*font-family:inherit", css), "a <button class=btn> keeps the browser font"
+    assert re.search(r"\.btn\.ghost\{[^}]*background:transparent", css), "a <button class='btn ghost'> is filled grey"
+    for b in re.findall(r"<button\b[^>]*>", html):
+        if "btn" not in b:
+            continue
+        cls = re.search(r'class="([^"]*)"', b).group(1).split()
+        assert "primary" in cls or "ghost" in cls, f"a .btn button with no look of its own: {b}"
+        if "ghost" in cls:
+            assert "border:0" not in b, f"a ghost button with its border taken off: {b}"
+
+
+def test_the_pro_list_has_one_marker_per_line(html: str) -> None:
+    """The numbered circles (.steps) and a disc bullet on every line of
+    "What Pro unlocks today"."""
+    pro = html[html.index('id="pro"'):]
+    pro = pro[:pro.index("</section>")]
+    assert not re.search(r'class="steps"[^>]*list-style', pro)
+
+
+def test_hero_images_reserve_their_height(html: str) -> None:
+    """A lazy hero image with no size grew ~800 px while the smooth jump to
+    #pro passed it, so every Buy link from the app landed a screen below its
+    target. Width and height reserve the box before the image loads."""
+    for img in re.findall(r'<img class="heroimg"[^>]*>', html):
+        assert re.search(r'width="\d+" height="\d+"', img), img
+    assert re.search(r"\.heroimg\{[^}]*height:auto", html)
+
+
+def test_nothing_makes_the_page_wider_than_a_phone(html: str) -> None:
+    """Design pass leftover, 2026-09-28: on a 390px phone the page was 438px
+    wide — `script.garage_door_truck` in the release notes could not break —
+    so it scrolled sideways, and a jump to #pro landed 104px off. A code name
+    breaks anywhere; every table scrolls inside its own box."""
+    css = html[:html.index("</style>")]
+    assert re.search(r"(?:^|\n)code\{[^}]*overflow-wrap:anywhere", css), "a long code name widens the page"
+    assert re.search(r"\.tablewrap\{[^}]*overflow-x:auto", css)
+    body = html[html.index("<body"):]
+    assert body.count("<table") == body.count('<div class="tablewrap">\n  <table>'), \
+        "a table outside a .tablewrap box widens the page on a phone"
+
+
+def test_anchors_land_below_the_sticky_nav(html: str) -> None:
+    """Every Buy link in the app lands on #pro. The nav is sticky — one row,
+    two on a phone — and sat over the section's first lines."""
+    css = html[:html.index("</style>")]
+    assert re.search(r"(?:^|\n)section\[id\]\{scroll-margin-top:\d+px\}", css), "desktop"
+    phone = re.search(r"@media\(max-width:640px\)\{[^\n]*section\[id\]\{scroll-margin-top:(\d+)px\}", css)
+    assert phone and int(phone.group(1)) >= 80, "a phone's two-row nav covers the section heading"

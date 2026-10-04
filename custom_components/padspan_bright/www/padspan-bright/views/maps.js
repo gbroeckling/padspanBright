@@ -118,9 +118,11 @@ export function render(ctx){
 
   const tabs = el("div",{class:"tabs"}, tabDefs.map(([id,label])=>_tabBtn(id,label,activeTab,setTab)));
 
+  // The text takes what is left and wraps by word; Refresh keeps its width
+  // (on a phone it squeezed to one letter per line).
   const header = el("div",{class:"card"},[
     el("div",{style:"display:flex;align-items:center;gap:10px;justify-content:space-between"},[
-      el("div",{},[
+      el("div",{style:"flex:1 1 auto;min-width:0"},[
         el("div",{class:"card-head"},[
           el("div",{style:"font-weight:700;font-size:16px"},"Mapping"),
           helpBtn("maps"),
@@ -129,8 +131,8 @@ export function render(ctx){
           ? "Upload a photo of your floor plan to visualise where your Bluetooth scanners are placed."
           : "Upload floorplans (any image type), auto-size to PNG, then place BLE receivers. Export maps + receiver layout."),
       ]),
-      el("div",{style:"display:flex;gap:8px;align-items:center"},[
-        el("button",{class:"btn inline", onclick:()=>ctx.actions.mapsRefresh()}, "Refresh"),
+      el("div",{style:"display:flex;gap:8px;align-items:center;flex:none"},[
+        el("button",{class:"btn inline", style:"white-space:nowrap", onclick:()=>ctx.actions.mapsRefresh()}, "Refresh"),
       ])
     ]),
     tabs,
@@ -3772,7 +3774,7 @@ function _export(ctx, active, maps_list){
 const BRIGHT_PRO_MANUAL = [
   {
     "heading": "Getting started: your licence and turning on the Atlas panel",
-    "intro": "Bright Pro adds the tools for placing and styling fixtures on your map. Enter the licence key in Settings → Features. The separate Atlas panel is turned on from the same page and does not require a Pro key.",
+    "intro": "Bright Pro adds the tools for placing and styling fixtures on your map. Enter the licence key in Settings → Features. The separate Atlas panel is on by default and does not require a Pro key.",
     "subsections": [
       {
         "heading": "What your licence unlocks",
@@ -3794,14 +3796,14 @@ const BRIGHT_PRO_MANUAL = [
         ]
       },
       {
-        "heading": "Turn on the everyday Atlas panel",
+        "heading": "The everyday Atlas panel",
         "body": "",
         "steps": [
-          "In Settings → Features, scroll down to the Mapped Light Control Goodie card, check Enable Mapped Light Control in sidebar, and click Save.",
-          "Restart Home Assistant. A separate Atlas entry appears in your sidebar afterward — that's the one to use day to day, not the PadSpan Mapping tab."
+          "The Atlas is its own entry in your sidebar, on by default — that's the one to use day to day, not the PadSpan Mapping tab.",
+          "To turn it off or back on: Settings → UI Structure (Advanced mode), the Atlas card. Tick or untick Show the Atlas in the Home Assistant sidebar, click Save, and restart Home Assistant."
         ],
         "notes": [
-          "Unchecking the box, saving, and restarting again removes the Atlas entry the same way."
+          "It stays the way you leave it after updates."
         ]
       }
     ]
@@ -9347,6 +9349,14 @@ function _lightsTab(ctx, maps, active) {
     },
     // Day lifts the ground and mutes the pools; from the sun HA tracks.
     ambient: sunAmbient(ctx.hass),
+    // Outdoor weather, the same overlay the Atlas sidebar draws (its own
+    // slot, so the two surfaces never share an element). Like the sidebar,
+    // nothing until the settings have answered.
+    weather: ctx.state.settings && ctx.state.settings.atlas_weather_enabled !== undefined ? {
+      slot: "builder", settings: ctx.state.settings,
+      states: ctx.hass?.states || {}, entities: ctx.hass?.entities,
+      telemetry: (name) => { if (ctx.actions.telemetryEvent) ctx.actions.telemetryEvent(name); },
+    } : null,
     isolux: mapState._lightsIsolux === undefined
       ? !!ctx.state.settings?.lights_isolux
       : !!mapState._lightsIsolux,

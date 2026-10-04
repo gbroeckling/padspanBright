@@ -610,3 +610,50 @@ def test_the_listener_is_set_up_once_and_torn_down():
     assert ET._UNSUB not in hass.data[DOMAIN]
     src = (__import__("pathlib").Path(ET.__file__).parent / "__init__.py").read_text(encoding="utf-8")
     assert "async_setup_emergency_test(hass)" in src and "async_stop_emergency_test(hass)" in src
+
+
+def test_the_button_can_be_hidden_in_settings():
+    """Settings → UI Structure → Atlas → "Show the Test emergency lighting
+    button on the Atlas": on by default, a boolean the settings write accepts,
+    and the Atlas reads it (lights_panel.js _emergButtonHidden) — keeping the
+    last answer when a settings fetch fails, and hiding the button only while
+    no test runs (tests/js/lights_panel_lifecycle.mjs runs both)."""
+    from pathlib import Path
+    from custom_components.padspan_bright.settings_store import DEFAULT_SETTINGS
+    assert DEFAULT_SETTINGS["atlas_emergency_button"] is True
+    root = Path(__file__).resolve().parents[1] / "custom_components" / "padspan_bright"
+    ws = (root / "ws_settings.py").read_text(encoding="utf-8")
+    assert 'vol.Optional("atlas_emergency_button"): bool' in ws and '"atlas_emergency_button", "bermuda_ignore"' in ws
+    lp = (root / "www" / "padspan-bright" / "lights_panel.js").read_text(encoding="utf-8")
+    assert ("if (s.atlas_emergency_button !== undefined) this.state._emergButtonHidden = "
+            "s.atlas_emergency_button === false;") in lp
+    assert "if(this.state._emergButtonHidden && !(s.test && s.test.active)) return null;" in lp
+
+
+def test_the_settings_card_saves_each_switch_by_its_own_rule():
+    """Design pass 2026-09-28: one Save sent both switches and always said
+    "restart Home Assistant". The emergency box saves the moment it changes,
+    alone, with "No restart needed"; Save sends only the sidebar switch, the
+    one that takes a restart; and the card is the Atlas's, on by default —
+    not a "Goodie" that "adds a Lights panel"."""
+    import json, shutil, subprocess
+    from pathlib import Path
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    here = Path(__file__).resolve().parent
+    views = here.parent / "custom_components" / "padspan_bright" / "www" / "padspan-bright" / "views"
+    res = subprocess.run([node, str(here / "js" / "atlas_settings_card.mjs"), str(views)],
+                         capture_output=True, text=True, encoding="utf-8", timeout=120)
+    lines = [ln for ln in res.stdout.splitlines() if ln.startswith("{")]
+    assert lines, res.stdout[-2000:] + res.stderr[-2000:]
+    out = json.loads(lines[-1])
+    assert not out["failures"] and res.returncode == 0, out["failures"]
+    assert out["emergencySaves"] == [{"atlas_emergency_button": False}], out
+    # Re-review 2026-09-28: through settingsSet it re-rendered the whole
+    # Settings view and threw away other unsaved changes on the page.
+    assert out["emergencyRerenders"] == 0, out
+    assert out["saveSends"] == [{"lights_panel_enabled": False}], out
+    assert "Goodie" not in out["title"] and "Atlas" in out["title"], out["title"]
+    assert "On by default" in out["blurb"] and "Lights panel" not in out["blurb"], out["blurb"]
+    assert any("No restart needed" in t for t in out["restartNotes"]), out["restartNotes"]

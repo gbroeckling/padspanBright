@@ -84,6 +84,20 @@ function type(card, value) {
   i.dispatchEvent({ type: "input" });
 }
 
+await check("a wall screen gets the buy option as text, never a new tab it can't close", () => {
+  const W = (iw, ih, sw, sh) => ({ innerWidth: iw, innerHeight: ih, screen: { width: sw, height: sh } });
+  assert(T.newTabOk(false, W(1400, 900, 1920, 1080)) === true, "a desktop browser window opens tabs");
+  assert(T.newTabOk(true, W(1400, 900, 1920, 1080)) === false, "?kiosk=1 never opens tabs");
+  assert(T.newTabOk(false, W(1080, 1920, 1080, 1920)) === false, "Chrome --kiosk fills the screen: no tabs");
+  assert(T.newTabOk(false, W(1919, 1080, 1920, 1080)) === false, "a pixel of display-scaling slack");
+  assert(T.newTabOk(false, {}) === true, "nothing to measure: a normal browser");
+  const kiosk = makeHost();
+  kiosk.host.kiosk = true;
+  const card = T.trialOfferCard(kiosk.host, "update_banner");
+  assert(!find(card, "buy"), "no link on a kiosk");
+  assert(find(card, "buy-text") && /padspan\.traks\.ca/.test(find(card, "buy-text").textContent), "names the site instead");
+});
+
 await check("who is offered the trial", () => {
   const cases = [
     [FREE, true],
@@ -97,6 +111,38 @@ await check("who is offered the trial", () => {
   for (const [s, want] of cases) {
     assert(T.trialOfferable(s) === want, `${JSON.stringify(s)} -> ${T.trialOfferable(s)}, want ${want}`);
   }
+});
+
+await check("every card says the presence tracking stays free, unless its host already did", () => {
+  const { host } = makeHost();
+  const card = T.trialOfferCard(host, "atlas");
+  assert(find(card, "honesty") && find(card, "honesty").textContent === "The presence tracking you're using stays free.", "no honesty line");
+  assert(!find(T.trialOfferCard(host, "milestone", { honesty: false }), "honesty"), "honesty:false still says it");
+  const na = makeHost({ admin: false }).host;
+  assert(find(T.trialOfferCard(na, "sidebar"), "honesty"), "a non-admin's card lacks it");
+});
+
+await check("the milestone is due once someone is on the map, or after a week", () => {
+  const now = 1_800_000_000_000, day = 86400;
+  const s = (o) => ({ ...FREE, trial_nudge_done: false, first_seen_ts: now / 1000, ...o });
+  assert(T.trialMilestoneDue(s({}), true, now) === true, "positioned");
+  assert(T.trialMilestoneDue(s({}), false, now) === false, "day one, nobody");
+  assert(T.trialMilestoneDue(s({ first_seen_ts: now / 1000 - 6.9 * day }), false, now) === false, "6.9 days");
+  assert(T.trialMilestoneDue(s({ first_seen_ts: now / 1000 - 7 * day }), false, now) === true, "7 days");
+  assert(T.trialMilestoneDue(s({ first_seen_ts: 0 }), false, now) === false, "unstamped read as old");
+  assert(T.trialMilestoneDue(s({ trial_nudge_done: true }), true, now) === false, "answered");
+  const old = s({}); delete old.trial_nudge_done;
+  assert(T.trialMilestoneDue(old, true, now) === false, "an older backend read as due");
+  assert(T.trialMilestoneDue(s({ tier: "bright", pro_has_key: true }), true, now) === false, "keyed");
+  assert(T.trialMilestoneDue(null, true, now) === false, "no settings");
+});
+
+await check("a placement counted as seen is not counted again when its card opens", () => {
+  const { host, events } = makeHost();
+  T.trialOfferSeen("milestone", host.telemetry);
+  T.trialOfferSeen("milestone", host.telemetry);
+  T.trialOfferCard(host, "milestone");
+  assert(JSON.stringify(events) === '["trial_offer_shown:milestone"]', JSON.stringify(events));
 });
 
 await check("a licensed house gets no card at all", () => {
@@ -113,6 +159,18 @@ await check("the card says what it is, in the agreed words", () => {
   assert(find(card, "note").textContent === "Your email is only used to send your key; one trial per home.", "note");
   assert(find(card, "buy") && /PadSpan Pro/.test(find(card, "buy").textContent), "buy link missing");
   assert(!find(T.trialOfferCard(host, "maps", { buy: false }), "buy"), "buy link shown with buy:false");
+});
+
+await check("the buy line is a small grey link where nobody hit a wall, amber on the paywalls", () => {
+  const { host } = makeHost();
+  const style = (surface) => find(T.trialOfferCard(host, surface), "buy").getAttribute("style");
+  for (const quiet of ["update_banner", "milestone", "sidebar"]) {
+    assert(/color:#94a3b8/.test(style(quiet)) && !/#fbbf24|font-weight/.test(style(quiet)), `${quiet}: ${style(quiet)}`);
+  }
+  for (const wall of ["atlas", "maps", "placement", "locate", "busy_times", "settings", "overview"]) {
+    assert(/color:#fbbf24/.test(style(wall)), `${wall} lost the amber line: ${style(wall)}`);
+  }
+  assert(/PadSpan Pro/.test(find(T.trialOfferCard(host, "sidebar"), "buy").textContent), "the quiet link lost its words");
 });
 
 await check("a non-admin sees one line and never reaches trial_start", () => {
@@ -218,7 +276,45 @@ await check("Not now is offered only where the host asks for it", () => {
 
 await check("a Pro gate's pitch does not promise the Pro feature", () => {
   const p = T.trialPitch("locate", "Locate");
-  assert(/Locate needs a PadSpan Pro key/.test(p) && /lighting/.test(p), p);
+  assert(/The trial doesn't unlock Locate/.test(p) && /lighting/.test(p), p);
+  // The gate right above already says Locate needs Pro; the card must not
+  // say it a second time.
+  assert(!/needs a PadSpan Pro key/.test(p), "the gate's own line, repeated: " + p);
+});
+
+await check("the update banner's trial line is news once, never on a kiosk or after an answer", () => {
+  const s = { ...FREE, trial_nudge_done: false };
+  assert(T.trialNewsDue(s, "0.38.86", false) === true, "the update that brought the trial");
+  assert(T.trialNewsDue(s, "0.9.3", false) === true, "an older install updating straight past it");
+  for (const seen of ["0.38.87", "0.38.88", "0.39.0", "1.0.0"]) {
+    assert(T.trialNewsDue(s, seen, false) === false, "said again in the banner from " + seen);
+  }
+  assert(T.trialNewsDue(s, "", false) === false, "no previous version: no banner, no line");
+  assert(T.trialNewsDue(s, "0.38.86", true) === false, "on a kiosk");
+  assert(T.trialNewsDue({ ...s, trial_nudge_done: true }, "0.38.86", false) === false, "after No thanks");
+  assert(T.trialNewsDue({ tier: "pro", pro_has_key: true }, "0.38.86", false) === false, "with a key");
+  const old = { ...FREE }; delete old.trial_nudge_done;
+  assert(T.trialNewsDue(old, "0.38.86", false) === true, "an older backend (no flag) reads as not answered");
+});
+
+await check("a Bright build's card leaves out the presence line unless presence is shown", () => {
+  const bright = { ...FREE, edition: "bright" };
+  assert(T.trialHonestyShown(FREE) && !T.trialHonestyShown(bright), "edition rule");
+  assert(T.trialHonestyShown({ ...bright, bright_reveal_presence: true }), "revealed presence");
+  const card = T.trialOfferCard(makeHost({ settings: bright }).host, "sidebar");
+  assert(card && !find(card, "honesty"), "a Bright card says the presence tracking stays free");
+  const shown = T.trialOfferCard(makeHost({ settings: { ...bright, bright_reveal_presence: true } }).host, "settings");
+  assert(find(shown, "honesty"), "the presence line is missing with presence revealed");
+});
+
+await check("trialStartedHere says whether this surface started the trial", async () => {
+  const h = makeHost({ answer: { ok: true, days_left: 90 } });
+  assert(T.trialStartedHere("milestone") === false, "before");
+  const card = T.trialOfferCard(h.host, "milestone");
+  type(card, "someone@example.com");
+  find(card, "start").click();
+  await settle();
+  assert(T.trialStartedHere("milestone") === true && T.trialStartedHere("atlas") === false, "after");
 });
 
 // ── the real views: the gate cards carry the trial, and only without a key ──
@@ -241,7 +337,7 @@ await check("Locate and Busy Times gates carry the trial card with their own sur
     const root = mod.render(ctx, {});
     const card = root.querySelector("[data-trial=card]");
     assert(card && card.getAttribute("data-surface") === surface, `${surface}: no trial card`);
-    assert(new RegExp(word + " needs a PadSpan Pro key").test(card.textContent), `${surface}: pitch`);
+    assert(new RegExp("The trial doesn't unlock " + word).test(card.textContent), `${surface}: pitch`);
     assert(!/3-month/.test(root.textContent), `${surface}: old 3-month wording`);
     const keyed = mod.render(viewCtx({ tier: "bright", pro_has_key: true }).ctx, {});
     assert(!keyed.querySelector("[data-trial=card]"), `${surface}: offered with a key`);

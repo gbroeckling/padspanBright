@@ -16,7 +16,7 @@
  *
  * Uses a "draft" copy of the model so edits don't take effect until Save.
  */
-const { BUY_URL, PRO_PRICE, LICENCE_PATH, BRIGHT_PRICE, BRIGHT_UPGRADE_PRICE, EDITIONS_URL } =
+const { BUY_URL, PRO_PRICE, PRO_LIFETIME_PRICE, proLifetimeOpen, LICENCE_PATH, BRIGHT_PRICE, BRIGHT_UPGRADE_PRICE, EDITIONS_URL } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
 // Optional too: the tester sign-up must not take the Settings tab with it.
 const { testerSection } = await import(`./tester_signup.js${new URL(import.meta.url).search}`)
@@ -24,6 +24,10 @@ const { testerSection } = await import(`./tester_signup.js${new URL(import.meta.
 // Optional: a card that fails to load must not take the Settings tab with it.
 const { trialOfferFromCtx } = await import(`./trial_offer.js${new URL(import.meta.url).search}`)
   .catch(err => { console.warn("PadSpan: trial_offer failed to load", err); return { trialOfferFromCtx: () => null }; });
+// Optional as well: only the Atlas weather section's "Automatic — …" labels
+// and warning list need it.
+const WX = await import(`./atlas_weather.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: atlas_weather failed to load", err); return null; });
 
 export function render(ctx){
   const { el, esc, roomColor, helpBtn } = ctx.helpers;
@@ -1044,7 +1048,8 @@ function _settingsPresence(ctx, el){
       "Opt in to send the developer an anonymous usage report at most once a day: which version and " +
       "Home Assistant; how many scanners, floors, rooms, placed lights, walls, maps, calibration points, " +
       "IRKs and objects you have and which related integrations are installed; which feature switches " +
-      "are on; which tabs and tools got used (and whether IRKs are resolving anything); a few health flags; and how many warnings each part of the " +
+      "are on; which tabs and tools got used (and whether IRKs are resolving anything); a few health flags; how hard the machine " +
+      "works (load, Home Assistant's CPU and memory, sampled once a minute) and what class of machine it is (CPU count, RAM size, board); and how many warnings each part of the " +
       "code logged. Counts, versions and flags only \u2014 never addresses, keys, device or room names, " +
       "coordinates or timestamps. Preview is the complete list. PadSpan is developed against one house; " +
       "this is how features that only exist in yours (an iPhone with an IRK, a Bermuda install, twelve floors) get seen at all."
@@ -2922,7 +2927,8 @@ function _settingsLicence(ctx, el){
     } }, hasKey ? "Replace licence key" : "Enter licence key");
   row.appendChild(enterBtn);
 
-  if (!hasKey || lapsed || isTrial) {
+  const canBuy = !hasKey || lapsed || isTrial;
+  if (canBuy) {
     row.appendChild(el("a", { class: "btn inline", href: BUY_URL, target: "_blank", rel: "noopener",
       style: "font-size:12px;border-color:#52b788;color:#a7f3d0;text-decoration:none" },
       (lapsed ? "Renew" : "Buy") + " PadSpan Pro \u2014 " + PRO_PRICE));
@@ -2943,6 +2949,14 @@ function _settingsLicence(ctx, el){
     "What does each tier unlock?");
   row.appendChild(tourBtn);
   card.appendChild(row);
+  // The launch offer, under the buy button while it lasts (editions.js; the
+  // site takes its form away at the same moment). A lifetime key never has
+  // the buy button, so never this either.
+  if (canBuy && proLifetimeOpen()) {
+    card.appendChild(el("div", { style: "font-size:12px;margin-top:8px" },
+      el("a", { href: BUY_URL, target: "_blank", rel: "noopener", style: "color:#a7f3d0;text-decoration:underline" },
+        "Or PadSpan Pro for life — " + PRO_LIFETIME_PRICE + ", once, until October 31.")));
+  }
   // The 90-day trial (views/trial_offer.js): the same card every paid wall
   // offers, shown here while there is no key at all. Its own Buy link is off —
   // this card already has one in the row above.
@@ -3237,6 +3251,82 @@ function _settingsFeatures(ctx, el){
   return wrap;
 }
 
+// ── The Atlas's outdoor weather (views/atlas_weather.js) ─────────────────────
+// Rain or snow around the house on the Atlas. Every control saves on its own
+// the moment it changes, straight to the wire like the emergency button
+// (settingsSet would re-render the page and drop unsaved edits elsewhere);
+// the Atlas picks it up at its next settings refresh.
+function _atlasWeatherSection(ctx, el, settings){
+  const box = el("div",{style:"margin-top:14px;padding-top:12px;border-top:1px solid #1e3a2a"});
+  box.appendChild(el("div",{style:"font-weight:600;font-size:14px;color:#e2e8f0;margin-bottom:4px"},"🌧️ Outdoor weather"));
+  box.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-bottom:8px"},
+    "Rain or snow drawn around the house on the Atlas, never over a room, only while it is actually raining or snowing. " +
+    "A rain sensor alone shows light rain; heavy rain needs a rainfall warning or the weather entity saying “pouring”, heavy snow a snowfall warning. " +
+    "PadSpan Pro animates it; the free map shows it still."));
+  const note = el("div",{style:"font-size:11px;color:#94a3b8;margin:6px 0 0"}, "Saves as soon as you change it. No restart needed.");
+  const save = async (key, value, undo) => {
+    try {
+      const r = await ctx.actions.wsCall("padspan_bright/settings_set", { [key]: value });
+      if (r && r.settings && ctx.state) ctx.state.settings = r.settings;
+      note.textContent = "Saved — the Atlas shows it at its next refresh.";
+    } catch (e) {
+      if (undo) undo();
+      ctx.toast("Could not save: " + String((e && e.message) || e), true);
+    }
+  };
+
+  const onRow = el("label",{style:"display:flex;align-items:center;gap:8px;cursor:pointer"});
+  const onCb = el("input",{type:"checkbox"});
+  onCb.checked = settings.atlas_weather_enabled !== false;
+  onRow.appendChild(onCb);
+  onRow.appendChild(el("span",{style:"color:#e2e8f0;font-size:14px"}, "Show rain and snow on the Atlas"));
+  onCb.addEventListener("change", ()=>{ const want = onCb.checked; save("atlas_weather_enabled", want, ()=>{ onCb.checked = !want; }); });
+  box.appendChild(onRow);
+
+  const states = (ctx.hass && ctx.hass.states) || {};
+  const entities = ctx.hass && ctx.hass.entities;
+  const nameOf = (eid) => { const n = states[eid] && states[eid].attributes && states[eid].attributes.friendly_name; return n ? `${n} (${eid})` : eid; };
+  const ids = Object.keys(states).sort();
+  const picker = (label, key, blank, list) => {
+    const cur = String(settings[key] || "");
+    const sel = document.createElement("select");
+    sel.className = "select";
+    sel.style.maxWidth = "100%";
+    sel.appendChild(el("option",{value:""}, blank));
+    for (const eid of (cur && !list.includes(cur) ? [cur, ...list] : list)) sel.appendChild(el("option",{value:eid}, nameOf(eid)));
+    sel.value = cur;
+    sel.addEventListener("change", ()=>{ const want = sel.value; save(key, want, ()=>{ sel.value = cur; }); });
+    box.appendChild(el("div",{style:"display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:8px"},[
+      el("span",{style:"color:#cbd5e1;font-size:13px;min-width:130px"}, label), sel,
+    ]));
+  };
+  // Only actual rain sensors (atlas_weather.js rainSensorIds).
+  const rainIds = WX ? WX.rainSensorIds(states, entities) : [];
+  const firstWx = WX ? WX.firstWeatherEntity(states) : "";
+  const warnIds = WX ? WX.warningEntities({}, states, entities) : [];
+  // The detected ones first, then anything else that calls itself a warning
+  // or an alert — never a water-leak detector (atlas_weather.js warningPickerIds).
+  const warnList = WX ? WX.warningPickerIds(states, entities) : [];
+  picker("Rain sensor", "atlas_weather_rain_entity", "None — use the weather entity", rainIds);
+  picker("Weather entity", "atlas_weather_condition_entity",
+    firstWx ? `Automatic — ${nameOf(firstWx)}` : "Automatic — none found (no weather shows)", ids.filter(eid => eid.startsWith("weather.")));
+  picker("Weather warnings", "atlas_weather_warning_entity",
+    warnIds.length ? `Automatic — ${warnIds.length} found` : "Automatic — none found", warnList);
+
+  const k = Number(settings.atlas_weather_strength);
+  const start = Number.isFinite(k) ? Math.max(0.5, Math.min(1.5, k)) : 1;
+  const range = el("input",{type:"range", min:"0.5", max:"1.5", step:"0.1"});
+  range.value = String(start);
+  const val = el("span",{style:"color:#e2e8f0;font-size:13px;font-variant-numeric:tabular-nums"}, `${start.toFixed(1)}×`);
+  range.addEventListener("input", ()=>{ val.textContent = `${Number(range.value).toFixed(1)}×`; });
+  range.addEventListener("change", ()=>{ save("atlas_weather_strength", Number(range.value), ()=>{ range.value = String(start); val.textContent = `${start.toFixed(1)}×`; }); });
+  box.appendChild(el("div",{style:"display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:8px"},[
+    el("span",{style:"color:#cbd5e1;font-size:13px;min-width:130px"}, "Strength"), range, val,
+  ]));
+  box.appendChild(note);
+  return box;
+}
+
 // ── UI Structure tab ──────────────────────────────────────────────────────────
 const _DEV_ONLY_TABS = ["devices","bluetooth","presence","monitor","qa","sandbox"];
 const _TAB_LABELS = {devices:"Devices",bluetooth:"Bluetooth",presence:"Presence",monitor:"Monitor",qa:"QA",sandbox:"Sandbox"};
@@ -3279,27 +3369,61 @@ function _settingsUI(ctx, el){
   });
   wrap.appendChild(el("div",{style:"display:flex;align-items:center"}, [saveBtn, status]));
 
-  // ── Mapped Light Control Goodie ──
+  // ── The Atlas (was "Mapped Light Control Goodie") ──
+  // The Atlas is on by default now (settings_store.py). Two switches that
+  // behave differently, so each says how: the sidebar entry is registered at
+  // setup (panel.py) and takes a restart after Save; the emergency button is
+  // read by the Atlas on its next refresh, so it saves the moment it changes.
   const lightsCard = el("div",{class:"card",style:"padding:16px;margin-top:20px"});
-  lightsCard.appendChild(el("div",{style:"font-weight:700;font-size:14px;color:#fbbf24;margin-bottom:6px"},"\uD83D\uDCA1 Mapped Light Control Goodie"));
+  lightsCard.appendChild(el("div",{style:"font-weight:700;font-size:14px;color:#fbbf24;margin-bottom:6px"},"\uD83D\uDCA1 Atlas \u2014 Mapped Light Control"));
   lightsCard.appendChild(el("div",{style:"font-size:12px;color:#94a3b8;margin-bottom:10px;line-height:1.5"},
-    "Adds a separate Lights panel to the HA sidebar for map-based light control. Requires a Home Assistant restart after changing this setting."));
+    "The house map for everyday light control, as its own entry in the Home Assistant sidebar. On by default."));
   const lightsRow = el("label",{style:"display:flex;align-items:center;gap:8px;cursor:pointer"});
   const lightsCb = el("input",{type:"checkbox"});
   lightsCb.checked = !!(settings.lights_panel_enabled);
   lightsRow.appendChild(lightsCb);
-  lightsRow.appendChild(el("span",{style:"color:#e2e8f0;font-size:14px"}, "Enable Mapped Light Control in sidebar"));
+  lightsRow.appendChild(el("span",{style:"color:#e2e8f0;font-size:14px"}, "Show the Atlas in the Home Assistant sidebar"));
   lightsCard.appendChild(lightsRow);
-  const lightsSaveBtn = el("button",{class:"btn",style:"margin-top:10px"},"Save");
+  lightsCard.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;margin:2px 0 0 24px"},
+    "Save, then restart Home Assistant for this one to take effect."));
+  const lightsSaveBtn = el("button",{class:"btn inline",style:"margin-top:10px"},"Save");
   const lightsStatus = el("span",{style:"margin-left:10px;color:#94a3b8;font-size:13px"});
   lightsSaveBtn.addEventListener("click", async ()=>{
     await ctx.actions.settingsSet({ lights_panel_enabled: lightsCb.checked });
     lightsStatus.textContent = lightsCb.checked
-      ? "Saved \u2014 restart Home Assistant to see the Lights panel in the sidebar."
-      : "Saved \u2014 restart Home Assistant to remove the Lights panel from the sidebar.";
+      ? "Saved \u2014 restart Home Assistant to see the Atlas in the sidebar."
+      : "Saved \u2014 restart Home Assistant to remove the Atlas from the sidebar.";
     lightsStatus.style.color = "#fbbf24";
   });
   lightsCard.appendChild(el("div",{style:"display:flex;align-items:center;flex-wrap:wrap"}, [lightsSaveBtn, lightsStatus]));
+  // The Atlas's red "Test emergency lighting" button — shown only when the
+  // house has emergency lights; this hides it even then (never while a test
+  // runs). Saved on its own the moment it changes.
+  const emergRow = el("label",{style:"display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:14px;padding-top:12px;border-top:1px solid #1e3a2a"});
+  const emergCb = el("input",{type:"checkbox"});
+  emergCb.checked = settings.atlas_emergency_button !== false;
+  emergRow.appendChild(emergCb);
+  emergRow.appendChild(el("span",{style:"color:#e2e8f0;font-size:14px"}, "Show the Test emergency lighting button on the Atlas"));
+  lightsCard.appendChild(emergRow);
+  const emergNote = el("div",{style:"font-size:11px;color:#94a3b8;margin:2px 0 0 24px"},
+    "Saves as soon as you tick or untick it. No restart needed.");
+  lightsCard.appendChild(emergNote);
+  emergCb.addEventListener("change", async ()=>{
+    const want = emergCb.checked;
+    try {
+      // Straight to the wire, NOT settingsSet: that re-renders the whole
+      // Settings view at once, which would throw away any other change on
+      // this page that hasn't been saved yet (and this note with it).
+      const r = await ctx.actions.wsCall("padspan_bright/settings_set", { atlas_emergency_button: want });
+      if (r && r.settings && ctx.state) ctx.state.settings = r.settings;
+      emergNote.textContent = want ? "Saved \u2014 the button comes back on the Atlas at its next refresh."
+        : "Saved \u2014 the button leaves the Atlas at its next refresh.";
+    } catch (e) {
+      emergCb.checked = !want;
+      ctx.toast("Could not save: " + String((e && e.message) || e), true);
+    }
+  });
+  lightsCard.appendChild(_atlasWeatherSection(ctx, el, settings));
   wrap.appendChild(lightsCard);
 
   // ── Edition & tier ──

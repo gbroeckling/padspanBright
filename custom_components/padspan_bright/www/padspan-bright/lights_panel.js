@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.85";
-const BUILD_ID = "20260928T223144Z";
+const APP_VERSION = "0.38.94";
+const BUILD_ID = "20261004T145853Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -187,9 +187,13 @@ class PadSpanLightsApp extends HTMLElement {
     }
     // The emergency lighting test's state — another browser (the wall
     // kiosk, a phone) can start or end it. Every 10 s while the house has
-    // emergency lights; without any (or an older backend), every 5 minutes —
+    // emergency lights and the button shows; every 5 minutes without any
+    // (or an older backend), or while Settings hides the button — slow, but
+    // still asked, so a test started elsewhere brings the button back —
     // plus on load and on Refresh (_boot).
-    const emergEvery = (this.state._emerg && this.state._emerg.available) ? 10000 : 300000;
+    const emerg = this.state._emerg;
+    const emergShown = !this.state._emergButtonHidden || !!(emerg && emerg.test && emerg.test.active);
+    const emergEvery = (emerg && emerg.available && emergShown) ? 10000 : 300000;
     if(Date.now() - (this._emergTs || 0) > emergEvery) await this._loadEmergency();
     this._render();   // registry staleness handled inside _buildUI
   }
@@ -269,6 +273,20 @@ class PadSpanLightsApp extends HTMLElement {
       // Quick-apply only (see onApplyPreset in the host below) — presets are
       // authored in Mapping -> Lights, this panel just switches between them.
       this.state._showcasePresets = Array.isArray(s.lights_showcase_presets) ? s.lights_showcase_presets : [];
+      // Settings → UI Structure → "Show the Test emergency lighting button".
+      // A failed settings fetch keeps the last answer.
+      if (s.atlas_emergency_button !== undefined) this.state._emergButtonHidden = s.atlas_emergency_button === false;
+      // Outdoor weather (Settings → UI Structure → Atlas), field by field. A
+      // failed fetch keeps the last answer; before any answer, no weather.
+      if (s.atlas_weather_enabled !== undefined) {
+        this.state._weather = {
+          atlas_weather_enabled: s.atlas_weather_enabled,
+          atlas_weather_rain_entity: s.atlas_weather_rain_entity,
+          atlas_weather_condition_entity: s.atlas_weather_condition_entity,
+          atlas_weather_warning_entity: s.atlas_weather_warning_entity,
+          atlas_weather_strength: s.atlas_weather_strength,
+        };
+      }
       this.state._wholeHousePresets = Array.isArray(s.whole_house_presets) ? s.whole_house_presets : [];
       // Layout v2 (Garry, 2026-09-21) is a house-wide trial toggle, set
       // from the builder only — this panel reflects it, same convention
@@ -294,7 +312,8 @@ class PadSpanLightsApp extends HTMLElement {
       // whether the usage report is on, so its offer counts only leave the
       // browser when it is (panel.js _telemetryEvent's rule).
       if (s.pro_has_key !== undefined) {
-        this.state._trialSettings = { pro_has_key: s.pro_has_key, tier: s.tier };
+        this.state._trialSettings = { pro_has_key: s.pro_has_key, tier: s.tier,
+          edition: s.edition, bright_reveal_presence: s.bright_reveal_presence };
         this.state._telemetryOn = !!s.telemetry_enabled;
       }
       // Hidden-map ids are read only to stay consistent with the Mapping tab
@@ -396,7 +415,7 @@ class PadSpanLightsApp extends HTMLElement {
     const ran = (this.state._emerg && this.state._emerg.emergency_ran) || [];
     if(ran.length && !this._emergArmed()){
       this._emergArmUntil = Date.now() + 3000;
-      this._toast(`${ran.join(", ")} ran during the test.\nTap again to turn off every emergency light`, true);
+      this._toast(`${ran.join(", ")} ran during the test.\nTap again to turn off every emergency light`, true, 3000);
       clearTimeout(this._emergArmTimer);
       this._emergArmTimer = setTimeout(()=>{ this._emergArmUntil = 0; this._render(); }, 3000);
       this._render();
@@ -415,6 +434,10 @@ class PadSpanLightsApp extends HTMLElement {
   _emergencyOverlay(){
     const s = this.state._emerg;
     if(!s || !s.available) return null;
+    // Settings → UI Structure → "Show the Test emergency lighting button".
+    // Hidden only while idle: a test running (started here or elsewhere)
+    // always shows, so it can be seen and ended.
+    if(this.state._emergButtonHidden && !(s.test && s.test.active)) return null;
     const active = !!(s.test && s.test.active);
     const busy = !!this._emergBusy;
     const name = {};
@@ -549,24 +572,26 @@ class PadSpanLightsApp extends HTMLElement {
             dead ? "color:rgba(226,240,232,.4);border:1px dashed rgba(226,240,232,.25)"
               : on ? "color:#111827;background:#fbbf24;border:1px solid #fbbf24"
               : "color:rgba(226,240,232,.55);border:1px solid rgba(226,240,232,.2)"),
-          el("button",{style: act + ";min-width:62px" + (dead ? ";opacity:.4;cursor:default" : dim),
+          // Fixed widths, and a blank where a row has no "⋯", so the state
+          // chips and buttons line up down the list.
+          el("button",{style: act + ";min-width:82px" + (dead ? ";opacity:.4;cursor:default" : dim),
             disabled: dead ? "" : null,
             onclick:()=>this._emergencyCall({ type:"padspan_bright/emergency_member", entity_id:m.entity_id, on:!on }, ()=>null)},
             on ? "Turn off" : "Turn on"),
-          ...(m.entity_id.startsWith("light.") && !dead ? [el("button",{style: act + ";padding:6px 10px", title:"Brightness, colour and effects",
+          ...(m.entity_id.startsWith("light.") && !dead ? [el("button",{style: act + ";padding:6px 0;width:38px", title:"Brightness, colour and effects",
             onclick:()=>{
               // Adjusting a light during a test counts as setting it by hand.
               if(active) this._hass.callWS({ type:"padspan_bright/emergency_member", entity_id:m.entity_id })
                 .then(r=>{ this._emergApply(r); }).catch(()=>{});
               close();
               this._openWledDetail(m.entity_id);
-            }},"⋯")] : []),
+            }},"⋯")] : [el("span",{style:"width:38px;flex:none", "aria-hidden":"true"})]),
         ]);
         sheet.appendChild(row);
       }
       sheet.appendChild(el("div",{style:"font-size:11px;color:rgba(226,240,232,.5);line-height:1.5;margin-top:10px"},
         active ? "When the test ends, lights marked “was on” stay on and lights marked “set here” stay as you set them. Force off turns every one off."
-          : "The red button starts a test. Lights already on stay on when it ends."));
+          : "Start test turns every emergency light on. Lights already on stay on when it ends."));
     };
     const refresh = ()=>{ if(!down && shows() !== shown) fill(); };
     this._emergCard = { fill, close, refresh, sheet, overlay };
@@ -862,6 +887,18 @@ class PadSpanLightsApp extends HTMLElement {
       // this panel never edits it, only displays what Mapping -> Lights set.
       hideDeviceCodes: !!this.state._hideDeviceCodes,
       ambient: sunAmbient(this._hass),
+      // Rain or snow outside the floor plates, from the states this panel
+      // already holds — nothing extra is asked of Home Assistant.
+      weather: this.state._weather ? {
+        slot: "atlas", settings: this.state._weather,
+        states: this._hass?.states || {}, entities: this._hass?.entities,
+        // The opt-in report's closed words, once per page load, and only
+        // while the report is on (the trial card's rule).
+        telemetry: (name)=>{
+          if(!this.state._telemetryOn || !this._hass) return;
+          Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:String(name) })).catch(()=>{});
+        },
+      } : null,
       // Same filter as the builder, from the same rule, over the same
       // placements — the map hides them, the index table below still lists
       // every light.
@@ -980,11 +1017,12 @@ class PadSpanLightsApp extends HTMLElement {
 
     const mapCard=buildLightsMapCard(host);
     root.appendChild(mapCard);
-    // "Test emergency lighting" floats over the map's bottom-right corner:
-    // a zero-height anchor right after the stage, so nothing moves.
+    // "Test emergency lighting" floats over the map's TOP-right corner (the
+    // map's top is on screen when the Atlas opens; its bottom often is not):
+    // a zero-height anchor right before the stage, so nothing moves.
     const emerg=this._emergencyOverlay();
     const stage=emerg && mapCard.querySelector(".lv-stage");
-    if(stage) stage.parentNode.insertBefore(emerg, stage.nextSibling);
+    if(stage) stage.parentNode.insertBefore(emerg, stage);
 
     // ── The 90-day trial, under the free map it would unlock ──────────────────
     if(!paid){
@@ -1025,7 +1063,7 @@ class PadSpanLightsApp extends HTMLElement {
     });
   }
 
-  _toast(msg, isError=false){
+  _toast(msg, isError=false, durationMs=null){
     const t=document.createElement("div");
     t.textContent=msg;
     t.style.cssText=`position:fixed;bottom:24px;left:50%;transform:translateX(-50%);`+
@@ -1037,8 +1075,14 @@ class PadSpanLightsApp extends HTMLElement {
       `backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);`+
       `box-shadow:0 8px 30px rgba(0,0,0,.5),0 0 20px ${isError?"rgba(220,38,38,.2)":"rgba(82,183,136,.15)"};`+
       `white-space:pre-wrap;max-width:320px;text-align:center`;
+    // One at a time: a new message replaces the last rather than landing on it.
+    if(this._toastEl){ try{ document.body.removeChild(this._toastEl); }catch(_){} }
+    this._toastEl = t;
     document.body.appendChild(t);
-    setTimeout(()=>{ try{document.body.removeChild(t);}catch(_){} },3500);
+    // Long enough to read: the emergency messages run to a few sentences.
+    // A message tied to a window (Force off's "tap again") passes its own.
+    const ms = durationMs || Math.min(10000, Math.max(3500, String(msg).length * 60));
+    setTimeout(()=>{ try{document.body.removeChild(t);}catch(_){} if(this._toastEl === t) this._toastEl = null; }, ms);
   }
 
   connectedCallback(){

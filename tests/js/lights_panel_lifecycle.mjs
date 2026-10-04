@@ -134,11 +134,12 @@ const MODEL = {
   ha_started_at: iso(24 * 3600_000),
 };
 
-function makeHass({ settings, admin = true }) {
+function makeHass({ settings, admin = true, extraStates = null }) {
   const calls = { ws: [], svc: [] };
   return {
     calls,
-    states: STATES,
+    // extraStates: entities the Atlas reads but never lists (a weather.*).
+    states: extraStates ? { ...STATES, ...extraStates } : STATES,
     user: { is_admin: admin, name: "smoke" },
     language: "en",
     config: { unit_system: { temperature: "°C" } },
@@ -171,6 +172,12 @@ const SCENARIOS = [
   ["pro, hide untouched + hide codes, a latched flood alarm", { ...BASE, lights_hide_untouched: true, lights_hide_device_codes: true,
       flood_latches: { "binary_sensor.kitchen_sink_leak": { triggered_at: NOW / 1000 - 3600, expires_at: NOW / 1000 + 86400 } } }, {}],
   ["settings that never arrive", null, {}],
+  // Outdoor weather (views/atlas_weather.js): pouring outside, the overlay
+  // drawn over the map — and, free, still.
+  ["pro, pouring outside", { ...BASE, atlas_weather_enabled: true, atlas_weather_strength: 1.2 },
+    { extraStates: { "weather.forecast_home": ST("weather.forecast_home", "pouring", { temperature: 9, temperature_unit: "°C" }) } }],
+  ["free tier, snowing outside", { ...BASE, tier: "free", atlas_weather_enabled: true },
+    { extraStates: { "weather.forecast_home": ST("weather.forecast_home", "snowy", { temperature: -3, temperature_unit: "°C" }) } }],
 ];
 
 const { } = await import(pathToFileURL(join(WWW, "lights_panel.js")).href);
@@ -203,6 +210,8 @@ if (!Cls) {
       if (!content || !content.children.length) throw new Error("rendered nothing into #content");
       const all = content._all();
       rec.svg = all.some(n => typeof n.innerHTML === "string" && n.innerHTML.includes("<svg"));
+      const wx = all.find(n => n.classList && n.classList.contains("lv-wx"));
+      rec.weather = wx ? (wx.classList.contains("still") ? "still" : "animated") : null;
       const rows = all.filter(n => n.localName === "tr" && n.getAttribute("data-eid"));
       rec.rows = rows.length;
       if (!rec.svg) throw new Error("no isometric <svg> was drawn");
@@ -301,9 +310,10 @@ if (Cls) {
 }
 
 // The "Test emergency lighting" button (emergency_test.py): hidden without
-// lights, floats right after the stage, toggles through the backend, and
-// Force off shows only while a test runs.
-const emergency = { hiddenWithout: null, afterStage: null, idleForce: null, sent: [], activeForce: null,
+// lights, floats over the map's top-right from an anchor right before the
+// stage, toggles through the backend, and Force off shows only while a test
+// runs.
+const emergency = { hiddenWithout: null, beforeStage: null, idleForce: null, sent: [], activeForce: null,
   activeLabel: null, endedForce: null };
 if (Cls) {
   try {
@@ -339,7 +349,7 @@ if (Cls) {
     await el._loadEmergency(); el._render();
     const anchor = find("lv-emerg-anchor")[0];
     const stage = find("lv-stage")[0];
-    emergency.afterStage = !!(anchor && stage && stage.nextSibling === anchor);
+    emergency.beforeStage = !!(anchor && stage && anchor.nextSibling === stage);
     emergency.idleForce = find("lv-emerg-force").length;
     find("lv-emerg-btn")[0].click();
     await flush(); await flush();
@@ -352,6 +362,11 @@ if (Cls) {
     emergency.cardOpen = !!el._emergCard;
     emergency.cardNames = ["Closet", "PoE 7"].every(n => cardText().includes(n));
     emergency.cardTag = cardText().includes("was on");
+    // Every row ends in a 38 px slot — the "⋯" or a blank — so the state
+    // chips and switches line up down the list (a switch has no "⋯").
+    const rowsOf = el._emergCard.sheet.children.filter(r => /border-bottom/.test(r.getAttribute("style") || ""));
+    emergency.cardRows = rowsOf.length;
+    emergency.cardAligned = rowsOf.length > 0 && rowsOf.every(r => /width:38px/.test(r.children[r.children.length - 1].getAttribute("style") || ""));
     const turn = document.body._all().find(n => n.localName === "button" && n.textContent === "Turn on");
     if (turn) turn.click();
     await flush(); await flush();
@@ -491,5 +506,70 @@ if (Cls) {
   } catch (e) { fail("emergency review fixes", "lifecycle", e); }
 }
 
-console.log(JSON.stringify({ scenarios, failures, blip, restart, emergency, emerg2 }));
+// Settings → UI Structure → "Show the Test emergency lighting button" off:
+// no button while idle, still asked every 5 minutes (not every 10 s), back
+// the moment a test runs (started elsewhere), back when switched on again,
+// and a failed settings fetch keeps the last answer.
+const emerg3 = { hiddenAnchor: null, hiddenPollFast: null, hiddenPollSlow: null, activeWhileHidden: null,
+  activePollFast: null, keptOnFailedFetch: null, backWhenReEnabled: null };
+if (Cls) {
+  try {
+    const members = [{ entity_id: "light.a", name: "Closet", state: "off" }];
+    let test = { active: false, started_at: null, kept_on: [], manual: [] };
+    let statusCalls = 0, settingsDown = false;
+    const settings = { ...BASE, atlas_emergency_button: false };
+    const hass = makeHass({ settings });
+    const real = hass.callWS;
+    hass.callWS = async (m) => {
+      if (m.type === "padspan_bright/emergency_status") {
+        statusCalls++;
+        return { available: true, source: "group", groups: [], members, test, emergency_ran: [], pending_off: [] };
+      }
+      if (m.type === "padspan_bright/settings_get" && settingsDown) throw new Error("ws down");
+      return real(m);
+    };
+    const el = new Cls();
+    el.connectedCallback();
+    el.hass = hass;
+    await el._boot(); await flush(); await flush();
+    const find = (cls) => el.shadowRoot.querySelector("#content")._all().filter(n => (n.className || "").split(" ").includes(cls));
+    const poll = async (emergAgo, settingsAgo = 0) => {
+      el._emergTs = Date.now() - emergAgo;
+      el._settingsTs = Date.now() - settingsAgo;
+      await el._poll(); await flush();
+    };
+    el._render();
+    emerg3.hiddenAnchor = find("lv-emerg-anchor").length;
+    statusCalls = 0;
+    await poll(11_000);
+    emerg3.hiddenPollFast = statusCalls;
+    await poll(301_000);
+    emerg3.hiddenPollSlow = statusCalls;
+    // A test started from another screen while the button is hidden.
+    test = { active: true, started_at: 1, kept_on: [], manual: [] };
+    await poll(301_000);
+    emerg3.activeWhileHidden = find("lv-emerg-btn").length;
+    statusCalls = 0;
+    await poll(11_000);
+    emerg3.activePollFast = statusCalls;
+    test = { active: false, started_at: null, kept_on: [], manual: [] };
+    await poll(11_000);
+    // A settings fetch that fails keeps "hidden".
+    settingsDown = true;
+    await poll(0, 31_000);
+    emerg3.keptOnFailedFetch = el.state._emergButtonHidden === true && find("lv-emerg-anchor").length === 0;
+    settingsDown = false;
+    // Switched back on in Settings: the next settings read brings it back.
+    settings.atlas_emergency_button = true;
+    await poll(0, 31_000);
+    emerg3.backWhenReEnabled = find("lv-emerg-anchor").length;
+    // Toasts: a new one replaces the last rather than landing on top of it.
+    el._toast("first toast"); el._toast("second toast");
+    const texts = document.body._all().map(n => n._text || "");
+    emerg3.toastsOnScreen = texts.filter(t => t === "first toast" || t === "second toast").length;
+    el.disconnectedCallback();
+  } catch (e) { fail("emergency button hidden in settings", "lifecycle", e); }
+}
+
+console.log(JSON.stringify({ scenarios, failures, blip, restart, emergency, emerg2, emerg3 }));
 process.exit(failures.length ? 1 : 0);

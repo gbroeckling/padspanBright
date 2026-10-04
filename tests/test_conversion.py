@@ -141,7 +141,7 @@ def test_settings_load_before_the_panel_is_registered() -> None:
 def test_the_offer_events_are_allowed_and_closed() -> None:
     want = ({f"{w}:{s}" for w in ("trial_offer_shown", "trial_started", "trial_failed") for s in T.TRIAL_SURFACES}
             | {f"getting_started_step:{s}" for s in T.GETTING_STARTED_STEPS}
-            | {"getting_started_shown", "getting_started_dismissed"})
+            | {"getting_started_shown", "getting_started_dismissed", "trial_nudge_dismissed"})
     assert T.OFFER_EVENTS == frozenset(want)
     assert all(T.event_allowed(e) for e in T.OFFER_EVENTS)
     for bad in ("trial_offer_shown:kitchen", "trial_started:", "trial_started:someone@example.com",
@@ -230,3 +230,165 @@ def test_every_new_import_carries_the_cache_buster() -> None:
     assert "import(`./views/trial_offer.js${new URL(import.meta.url).search}`)" in lp
     panel = (_WWW / "panel.js").read_text(encoding="utf-8")
     assert "import(`./views/trial_offer.js?b=${BUILD_ID}`)" in panel
+
+
+# ═══ 4. The quiet placements: the settings they rest on ═══════════════════════
+
+def test_the_milestone_keys_have_defaults() -> None:
+    assert ss.DEFAULT_SETTINGS["trial_nudge_done"] is False
+    assert ss.DEFAULT_SETTINGS["first_seen_ts"] == 0
+
+
+async def test_an_existing_install_is_stamped_first_seen_now_and_saved() -> None:
+    """No first_seen_ts: stamped on this load, so the milestone's week counts
+    from the update, not from the real install date."""
+    import time
+    before = time.time()
+    _, data, saved = await _load({"light_theme": True, "atlas_default_v1_applied": True})
+    assert before <= data["first_seen_ts"] <= time.time() + 1
+    assert saved.get("first_seen_ts") == data["first_seen_ts"], "the stamp was not persisted"
+    assert data["trial_nudge_done"] is False
+
+
+async def test_first_seen_is_never_moved_once_set() -> None:
+    _, data, _ = await _load({"first_seen_ts": 1_700_000_000.0, "atlas_default_v1_applied": True,
+                              "trial_nudge_done": True})
+    assert data["first_seen_ts"] == 1_700_000_000.0
+    assert data["trial_nudge_done"] is True
+
+
+@pytest.mark.parametrize("bad", [0, -5, None, "yesterday", True])
+async def test_a_bad_first_seen_is_restamped(bad) -> None:
+    _, data, _ = await _load({"first_seen_ts": bad, "atlas_default_v1_applied": True})
+    assert isinstance(data["first_seen_ts"], float) and data["first_seen_ts"] > 1_600_000_000
+
+
+def test_trial_nudge_done_is_settable_and_first_seen_is_not() -> None:
+    src = (_CC / "ws_settings.py").read_text(encoding="utf-8")
+    assert 'vol.Optional("trial_nudge_done"): bool' in src
+    assert 'payload["trial_nudge_done"] = bool(msg.get("trial_nudge_done"))' in src
+    assert '"first_seen_ts"' not in src, "first_seen_ts is the backend's stamp, never the browser's"
+
+
+def test_the_new_surfaces_and_the_dismissal_are_in_the_vocabulary() -> None:
+    for s in ("update_banner", "milestone", "sidebar"):
+        assert s in T.TRIAL_SURFACES
+        for what in ("trial_offer_shown", "trial_started", "trial_failed"):
+            assert T.event_allowed(f"{what}:{s}")
+    assert T.event_allowed("trial_nudge_dismissed")
+    assert not T.event_allowed("trial_nudge_dismissed:milestone")
+
+
+def test_the_panel_placements_are_wired() -> None:
+    """The three placements live in panel.js (tests/js/whats_new_card.mjs runs
+    them): the banner's line inside _whatsNewCard, the milestone only where
+    Getting started is not, and the sidebar entry built by _renderNav."""
+    panel = (_WWW / "panel.js").read_text(encoding="utf-8").replace("\r\n", "\n")
+    wn = panel[panel.index("  _whatsNewCard(){"):panel.index("  _trialMilestoneCard(")]
+    assert 'trialOfferFromCtx(this._ctx(), "update_banner"' in wn
+    i = panel.index('} else if (this.state.view === "overview") {')
+    tail = panel[i:i + 1500]
+    assert "this._trialMilestoneCard(_hasPositioned)" in tail and "_setupKnown && _posKnown" in tail
+    nav = panel[panel.index("  _renderNav(){"):panel.index("  _showHelp(")]
+    assert "this._renderSidebarTrial();" in nav
+    assert '<div id="navTrial"' in panel
+    css = (_WWW / "styles.css").read_text(encoding="utf-8")
+    assert ".app.mini #navTrial{display:none}" in css
+
+
+# ═══ 5. Kept through a restore, a factory reset and a Bright import ═══════════
+# Review 2026-09-28: none of the three carried trial_nudge_done or
+# first_seen_ts, so a restore of an older backup (or a reset) brought the
+# milestone card back to a house that had said "No thanks", or restarted its
+# week. Like the licence, neither is house configuration.
+
+def test_trial_state_kept_takes_an_answer_from_either_side_and_the_earliest_sighting() -> None:
+    k = ss.trial_state_kept
+    assert k({"trial_nudge_done": True}, {"trial_nudge_done": False})["trial_nudge_done"] is True
+    assert k({}, {"trial_nudge_done": True})["trial_nudge_done"] is True
+    assert k({}, {}) == {"trial_nudge_done": False}, "no sighting on either side: nothing invented"
+    assert k({"first_seen_ts": 2_000.0}, {"first_seen_ts": 1_000.0})["first_seen_ts"] == 1_000.0
+    assert k({"first_seen_ts": 0}, {"first_seen_ts": 1_000.0})["first_seen_ts"] == 1_000.0
+    for bad in (0, -5, None, "yesterday", True):
+        assert k({"first_seen_ts": bad}, None) == {"trial_nudge_done": False}, bad
+
+
+def test_a_restore_keeps_the_later_whats_new_version() -> None:
+    """Re-review 2026-09-28: a restore took whatsnew_seen_version from the
+    backup, so the update banner (and its one-time trial line) showed again
+    although nothing new had been installed."""
+    k = ss.trial_state_kept
+    assert k({"whatsnew_seen_version": "0.38.89"}, {"whatsnew_seen_version": "0.38.80"})["whatsnew_seen_version"] == "0.38.89"
+    assert k({"whatsnew_seen_version": "0.38.9"}, {"whatsnew_seen_version": "0.38.100"})["whatsnew_seen_version"] == "0.38.100"
+    assert k({"whatsnew_seen_version": "0.38.89"}, {})["whatsnew_seen_version"] == "0.38.89"
+    assert "whatsnew_seen_version" not in k({"whatsnew_seen_version": "garbage"}, {"whatsnew_seen_version": None})
+
+
+class _FakeStore:
+    saved: dict = {}
+
+    def __init__(self, hass, version, key):
+        self._key = key
+
+    async def async_load(self):
+        return None
+
+    async def async_save(self, data):
+        _FakeStore.saved[self._key] = data
+
+    async def async_remove(self):
+        _FakeStore.saved.pop(self._key, None)
+
+
+def _run(coro):
+    import asyncio
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def test_a_factory_reset_keeps_the_trial_answer_and_first_sighting(monkeypatch) -> None:
+    import homeassistant.helpers.storage as _hs
+    from custom_components.padspan_bright.const import SETTINGS_STORE_KEY
+    from custom_components.padspan_bright.ws_factory_reset import ws_factory_reset
+    from tests.test_telemetry import _hass
+    _FakeStore.saved = {}
+    monkeypatch.setattr(_hs, "Store", _FakeStore)
+    h = _hass()
+    h.data[DOMAIN][DATA_SETTINGS].data.update({"trial_nudge_done": True, "first_seen_ts": 1_700_000_000.0,
+                                               "quiet_mode": True})
+    _run(ws_factory_reset(h, MagicMock(), {"id": 1, "confirm": "FACTORY RESET"}))
+    after = h.data[DOMAIN][DATA_SETTINGS].data
+    assert after["quiet_mode"] is False, "the reset did not run"
+    assert after["trial_nudge_done"] is True and after["first_seen_ts"] == 1_700_000_000.0, after
+    saved = _FakeStore.saved[SETTINGS_STORE_KEY]
+    assert saved["trial_nudge_done"] is True and saved["first_seen_ts"] == 1_700_000_000.0
+
+
+@pytest.mark.parametrize("live,in_backup,done,first", [
+    ({"trial_nudge_done": True, "first_seen_ts": 2_000.0}, {"trial_nudge_done": False, "first_seen_ts": 1_000.0},
+     True, 1_000.0),
+    ({"trial_nudge_done": False, "first_seen_ts": 5_000.0}, {"trial_nudge_done": True, "first_seen_ts": 0},
+     True, 5_000.0),
+])
+def test_a_restore_keeps_the_trial_answer_and_the_earliest_sighting(monkeypatch, live, in_backup, done, first) -> None:
+    import homeassistant.helpers.storage as _hs
+    from custom_components.padspan_bright import ws_backup
+    from custom_components.padspan_bright.const import SETTINGS_STORE_KEY
+    from tests.test_telemetry import _hass
+    _FakeStore.saved = {}
+    monkeypatch.setattr(_hs, "Store", _FakeStore)
+    bk = {"backups": [{"id": "bk1", "created_at": "2026-01-01T00:00:00+00:00", "version": "0.38.80",
+                       "note": "", "map_images": {},
+                       "stores": {SETTINGS_STORE_KEY: {"quiet_mode": True, **in_backup}}}]}
+
+    async def _load_backups(_hass_):
+        return bk
+
+    monkeypatch.setattr(ws_backup, "_load_backups", _load_backups)
+    h = _hass()
+    h.data[DOMAIN][DATA_SETTINGS].data.update(live)
+    _run(ws_backup.ws_store_backup_restore(h, MagicMock(), {"id": 1, "backup_id": "bk1",
+                                                              "store_keys": [SETTINGS_STORE_KEY]}))
+    after = h.data[DOMAIN][DATA_SETTINGS].data
+    assert after["quiet_mode"] is True, "the restore did not run"
+    assert after["trial_nudge_done"] is done and after["first_seen_ts"] == first, after
+    assert _FakeStore.saved[SETTINGS_STORE_KEY]["trial_nudge_done"] is done
