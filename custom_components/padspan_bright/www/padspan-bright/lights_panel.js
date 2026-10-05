@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.100";
-const BUILD_ID = "20261005T181352Z";
+const APP_VERSION = "0.38.101";
+const BUILD_ID = "20261005T195317Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -149,6 +149,8 @@ class PadSpanLightsApp extends HTMLElement {
     // cleared one deep), multiplying full re-renders and churning the DOM
     // mid-interaction.
     if(this._pollTimer){ clearInterval(this._pollTimer); this._pollTimer=null; }
+    // Refresh reads Live Aboard's file again too (the flat map's kinds and furniture).
+    this._shownAt = Date.now();
     // Maps + settings are small and fast — render the floor/room shapes on
     // those alone first. The entity/device registry (needed only to know
     // which room each light is in) is a multi-MB whole-house dump on a
@@ -291,7 +293,7 @@ class PadSpanLightsApp extends HTMLElement {
       // off. A failed fetch keeps the last answer; before any, no switch.
       if (s.atlas_3d_enabled !== undefined) {
         this.state._house3d = { atlas_3d_enabled: s.atlas_3d_enabled, atlas_3d_quality: s.atlas_3d_quality,
-          fabric_bearing_deg: s.fabric_bearing_deg, atlas_3d_weather: s.atlas_3d_weather, atlas_3d_showcase: s.atlas_3d_showcase,
+          fabric_bearing_deg: s.fabric_bearing_deg, atlas_3d_weather: s.atlas_3d_weather, atlas_3d_showcase: s.atlas_3d_showcase, atlas_3d_look: s.atlas_3d_look,
           atlas_3d_people: s.atlas_3d_people, presence_poll_interval_s: s.presence_poll_interval_s, light_shapes: s.light_shapes,
           atlas_3d_tags: s.atlas_3d_tags };
       }
@@ -516,7 +518,7 @@ class PadSpanLightsApp extends HTMLElement {
       + `border-radius:${desktop ? "16px" : "18px 18px 0 0"};color:#e2e8f0;font-family:Inter,system-ui,sans-serif;`
       + "box-shadow:0 -12px 50px rgba(0,0,0,.6)"});
     overlay.appendChild(sheet);
-    const close = ()=>{ try{ document.body.removeChild(overlay); }catch(_){} this._emergCard = null; };
+    const close = ()=>{ overlay.remove(); this._emergCard = null; };
     overlay.addEventListener("click", e=>{ if(e.target === overlay) close(); });
     let down = false, shown = null;
     overlay.addEventListener("pointerdown", ()=>{ down = true; });
@@ -907,6 +909,13 @@ class PadSpanLightsApp extends HTMLElement {
           Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:String(name) })).catch(()=>{});
         },
       } : null,
+      // This screen is the house map (views/atlas_screen.js): zoomed in, the
+      // flat map takes the whole panel too, it can go full screen, and a
+      // double-tap on a room zooms to it; with Show people or Show tags &
+      // scanners on, they show on it too (views/atlas_aboard.js). Mapping's
+      // builder hands none of it. shownAt: when this panel was last opened
+      // (Live Aboard's file is read again then, never on the poll).
+      screen: { slot: "atlas", shownAt: this._shownAt || 0 },
       // The 3D house: the shared card draws its Map / 3D switch only while
       // the setting is on and the tier is Pro, and reads the rest from here.
       house3d: this.state._house3d ? {
@@ -1122,17 +1131,18 @@ class PadSpanLightsApp extends HTMLElement {
       `box-shadow:0 8px 30px rgba(0,0,0,.5),0 0 20px ${isError?"rgba(220,38,38,.2)":"rgba(82,183,136,.15)"};`+
       `white-space:pre-wrap;max-width:320px;text-align:center`;
     // One at a time: a new message replaces the last rather than landing on it.
-    if(this._toastEl){ try{ document.body.removeChild(this._toastEl); }catch(_){} }
+    if(this._toastEl) this._toastEl.remove();
     this._toastEl = t;
     document.body.appendChild(t);
     // Long enough to read: the emergency messages run to a few sentences.
     // A message tied to a window (Force off's "tap again") passes its own.
     const ms = durationMs || Math.min(10000, Math.max(3500, String(msg).length * 60));
-    setTimeout(()=>{ try{document.body.removeChild(t);}catch(_){} if(this._toastEl === t) this._toastEl = null; }, ms);
+    setTimeout(()=>{ t.remove(); if(this._toastEl === t) this._toastEl = null; }, ms);
   }
 
   connectedCallback(){
     if(!this.shadowRoot) this.attachShadow({mode:"open"});
+    this._shownAt = Date.now();
     // Track a held pointer so the 5s poll can't re-render mid-interaction
     // (dragging a slider is the case that actually bites).
     if(!this._pointerWired){

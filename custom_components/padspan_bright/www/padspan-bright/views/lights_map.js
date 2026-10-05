@@ -26,6 +26,10 @@ const { tierAtLeast } =
 // load must not take the house map with it — the map just has no weather.
 const WX = await import(`./atlas_weather.js${new URL(import.meta.url).search}`)
   .catch(err => { console.warn("PadSpan: atlas_weather failed to load", err); return null; });
+// The sidebar as a screen (atlas_screen.js): the map alone, full screen, a
+// double-tap on a room. Optional too: missing, the map is as it always was.
+const SCREEN = await import(`./atlas_screen.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: atlas_screen failed to load", err); return null; });
 
 // ── What a tier is shown ─────────────────────────────────────────────────────
 // Below `bright` — PadSpan Bright with no key, PadSpan Bright with no key — the
@@ -846,6 +850,8 @@ export function wireHoverHud(isoDiv, opts){
   const stackAt = (x, y) => {
     const seen = new Set(), out = [];
     for (const n of fromPoint(x, y)) {
+      // A tag, scanner or person on top (atlas_aboard.js) takes the click itself.
+      if (n.closest && n.closest("[data-live]")) break;
       const g = n.closest ? n.closest("g.lhex[data-eid]") : null;
       if (!g || !svg.contains(g)) continue;
       const eid = g.getAttribute("data-eid");
@@ -855,6 +861,7 @@ export function wireHoverHud(isoDiv, opts){
   };
   const roomAt = (x, y) => {
     for (const n of fromPoint(x, y)) {
+      if (n.closest && n.closest("[data-live]")) break;
       const g = n.closest ? n.closest("g.lroom[data-room]") : null;
       if (g && svg.contains(g)) return g.getAttribute("data-room");
     }
@@ -968,6 +975,15 @@ export function pressRing(svg, cx, cy, r){
   svg.appendChild(c);
   return c;
 }
+// A second tap on the same marker hard on the first (a double-tap, to zoom or
+// not) is not a second switch: a light double-tapped switches once.
+let _lastTap = null;
+function _tapAgain(eid, e){
+  const t = Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now();
+  const again = !!_lastTap && _lastTap.eid === eid && t - _lastTap.t <= 420 && Math.hypot(e.clientX - _lastTap.x, e.clientY - _lastTap.y) <= 44;
+  _lastTap = again ? null : { eid, t, x: e.clientX, y: e.clientY };
+  return again;
+}
 export function wireUseSurface(isoDiv, api){
   const q = (sel) => isoDiv.querySelectorAll(sel);
   const svg = isoDiv.querySelector("svg");
@@ -1040,7 +1056,7 @@ export function wireUseSurface(isoDiv, api){
       // never arm below and every real tap (quick or long) opens its own
       // activity history instead of toggling into the read-only refusal.
       if (l0.isMotion) { if (r === "tap" || r === "open") api.openActivity(eid); return; }
-      if (r === "tap") { api.toggle(eid); return; }
+      if (r === "tap") { if (!_tapAgain(eid, e)) api.toggle(eid); return; }
       if (r === "open") { if (holdable) api.openControls(eid); else api.toggle(eid); return; }
       if (r === "drag-end") {
         const b = g._dragTarget;
@@ -1124,7 +1140,7 @@ export function openAggregateSheet(api, { title, sub, items, actions }){
   const overlay = mk("div", _S.overlay);
   const desktop = typeof window !== "undefined" && window.innerWidth > 768;
   if (desktop) overlay.style.alignItems = "center";
-  const close = () => { try { document.body.removeChild(overlay); } catch (_) {} };
+  const close = () => { overlay.remove(); };
   overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
   const sheet = mk("div", _S.sheet + (desktop ? ";border-radius:16px" : ""));
   const head = mk("div", _S.head);
@@ -1352,7 +1368,7 @@ export async function openActivityCalendar(hass, eid) {
   const overlay = mk("div", _S.overlay);
   const desktop = typeof window !== "undefined" && window.innerWidth > 768;
   if (desktop) overlay.style.alignItems = "center";
-  const close = () => { try { document.body.removeChild(overlay); } catch (_) {} };
+  const close = () => { overlay.remove(); };
   overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
   const sheet = mk("div", _S.sheet + (desktop ? ";border-radius:16px" : ""));
   const head = mk("div", _S.head);
@@ -1450,7 +1466,7 @@ export function openControlCard(hass, eid, api){
   overlay.style.cssText = "position:fixed;inset:0;background:rgba(3,8,5,.62);z-index:10000;"
     + "display:flex;align-items:center;justify-content:center;"
     + "backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)";
-  const close = () => { try { document.body.removeChild(overlay); } catch (_) {} };
+  const close = () => { overlay.remove(); };
   overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
 
   const box = el("div", { style:
@@ -1754,7 +1770,7 @@ function _pickEntityOverlay(title, candidates, onPick){
   overlay.style.cssText = "position:fixed;inset:0;background:rgba(3,8,5,.62);z-index:10000;"
     + "display:flex;align-items:center;justify-content:center;"
     + "backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)";
-  const close = () => { try { document.body.removeChild(overlay); } catch (_) {} };
+  const close = () => { overlay.remove(); };
   overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
   const box = el("div", { style:
     "background:linear-gradient(180deg,#101f15,#0b1710);border:1px solid rgba(120,190,155,.28);"
@@ -1864,7 +1880,7 @@ export function openBarrierCard(hass, bar, api){
   overlay.style.cssText = "position:fixed;inset:0;background:rgba(3,8,5,.62);z-index:10000;"
     + "display:flex;align-items:center;justify-content:center;"
     + "backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)";
-  const close = () => { try { document.body.removeChild(overlay); } catch (_) {} };
+  const close = () => { overlay.remove(); };
   overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
 
   const box = el("div", { style:
@@ -2704,6 +2720,19 @@ export { _exactBrightness, _tellProblems };
 //   saveView() → Promise              persist floorGap/horizGap/focusIdx
 //   onHexesBuilt(isoDiv, rebuild)     wire hex interactions after every build
 // }
+// What the flat sidebar Atlas takes from Live Aboard (views/atlas_aboard.js):
+// fetched only once Show people or Show tags & scanners is on, or Live Aboard
+// is (its light kinds and furniture); off, never. A failure leaves the map as
+// it always was. Loaded, the newest card of each screen draws again.
+let _AB = null, _abLoading = null, _abFailed = false;
+const _abRedraw = new Map();          // slot -> the newest card's redraw
+function _abLoad(){
+  if (_AB || _abFailed || _abLoading) return;
+  _abLoading = import(`./atlas_aboard.js${new URL(import.meta.url).search}`)
+    .then((m) => { _AB = m; for (const f of [..._abRedraw.values()]) { try { f(); } catch (_) { /* the next card draws */ } } })
+    .catch((err) => { console.warn("PadSpan: atlas_aboard failed to load", err); _abFailed = true; });
+}
+
 export function buildLightsMapCard(hostIn){
   // The tier decides what is drawn, whatever the host asked for. One place,
   // for both hosts — see lightsHostForTier.
@@ -2862,6 +2891,11 @@ export function buildLightsMapCard(hostIn){
   }
   const la3dPaints = [];
   let la3dCloseDrawer = null;
+  // The drawers' Find active, Zoom and Save / Reset view act on Live Aboard
+  // while it shows (fn gets its slot); false while the flat map shows.
+  // Still loading, the flat map is what shows: its own controls act on it.
+  const la3dDo = (fn) => { if (!la3dOn()) return false; const s = la3dSlot(); if (!s) return false; fn(s); return true; };
+  let la3dZoomLbl = null;
   const la3dSlot = () => (_LA && h3 ? _LA.liveAboardSlot(h3.slot) : null);
   // Why this screen cannot show 3D right now: the fallback kind, or null.
   const la3dWhy = () => {
@@ -2903,12 +2937,16 @@ export function buildLightsMapCard(hostIn){
           edit: typeof h3.edit === "function" ? h3.edit : null,
           // Rain and snow, and the Showcase look (P8): the flat map's own
           // weather inputs with Live Aboard's Rain and snow switch, and the
-          // Showcase theme this map shows with "Use the Atlas's Showcase
-          // look". The view decides what they draw.
+          // Showcase theme this map shows. The view decides what they draw.
           weather: host.weather && host.weather.settings ? host.weather : null, weather3d: h3.settings.atlas_3d_weather,
-          showcase3d: h3.settings.atlas_3d_showcase,
           showcase: { key: host.showcase ? (host.showcaseTheme || "classic") : "classic",
                       theme: (host.showcase && SHOWCASE_THEMES[host.showcaseTheme]) || SHOWCASE_THEMES.classic },
+          // Live Aboard's look (atlas_3d_look): the same as this map unless
+          // "own" is chosen, and what this map wears: Showcase on or off, and
+          // the theme it reads its colours from (buildIsoSVG's own THEME).
+          look3d: h3.settings.atlas_3d_look === "own" ? "own" : "atlas",
+          atlasLook: { on: !!host.showcase, key: host.showcaseTheme || "classic",
+                       theme: SHOWCASE_THEMES[host.showcaseTheme] || SHOWCASE_THEMES.classic },
           // Mapping → Furnish (P2): the Furnish tool open, what its flows and
           // "This is a device…" need of the host, and the floor chips a piece
           // moved up or down a floor takes along.
@@ -2939,9 +2977,14 @@ export function buildLightsMapCard(hostIn){
           entities: h3.entities || null, regIds: h3.regIds || null, emergency: h3.emergency || null,
           // P6: the people layer, only while Show people is on: the live
           // snapshot through the host (off, it is never read).
-          people: h3.settings.atlas_3d_people === true && h3.people ? h3.people : null,
+          people: h3.settings.atlas_3d_people === true && h3.people ? abReader(h3.people) : null,
           // Show tags & scanners: the same snapshot, the same reader (read once for both).
-          tags: h3.settings.atlas_3d_tags === true && h3.people ? h3.people : null,
+          tags: h3.settings.atlas_3d_tags === true && h3.people ? abReader(h3.people) : null,
+          // ☰'s class chips, the leak sensors' 2-day latch, the codes (none
+          // while "Hide device codes" is on), and ⚙'s zoom label to keep up.
+          classFilter: host.classFilter || null, floodLatches: host.floodLatches || {},
+          codes: host.hideDeviceCodes ? null : { showcase: !!host.showcase },
+          onZoom: (pct) => { if (la3dZoomLbl && la3dOn()) la3dZoomLbl.textContent = `${pct}%`; },
           onTouch: () => { if (la3dCloseDrawer) la3dCloseDrawer(); } });
       } catch (_) { /* attach counts its own failures; the flat map stays */ }
     }
@@ -2987,11 +3030,87 @@ export function buildLightsMapCard(hostIn){
   };
   if (h3) _la3dPickers.set(h3.slot, pick3d);
 
+  // The sidebar as a screen (atlas_screen.js; host.screen is the sidebar
+  // host's alone, never Mapping's): zoomed in past the whole house, the bars
+  // step aside for the map alone; ⛶ takes the panel full screen; a
+  // double-tap on a room's empty floor zooms to that room. Not while Live
+  // Aboard shows (it has its own).
+  const scr = SCREEN && host.screen && host.screen.slot
+    ? SCREEN.flatScreen({ slot: host.screen.slot, card: mapCard, stage: isoDiv, zoom: view.zoom, shown: () => !h3 || !la3dOn() }) : null;
+  if (scr) {
+    if (h3) la3dPaints.push(() => scr.paint());
+    // The point under a finger, in the drawing's own units.
+    const drawn = (cx, cy) => {
+      const svg = isoDiv.querySelector("svg"), m = svg && svg.getScreenCTM ? svg.getScreenCTM() : null;
+      if (!m || !svg.createSVGPoint) return null;
+      const p = svg.createSVGPoint(); p.x = cx; p.y = cy;
+      const q = p.matrixTransform(m.inverse());
+      return [q.x, q.y];
+    };
+    SCREEN.flatDoubleTap(isoDiv, {
+      roomAt: (cx, cy) => {
+        const fz = getFocusZ(view.focusIdx);
+        return SCREEN.roomUnder(_frame, drawn(cx, cy), (z) => fz === null || (Array.isArray(fz) ? fz.includes(z) : fz === z), pointInPolygon);
+      },
+      go: (r) => {
+        const svg = isoDiv.querySelector("svg"), vb = svg && svg.viewBox && svg.viewBox.baseVal;
+        if (!vb || !vb.width) return;
+        const box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+        for (const p of r.pts) {
+          const [x, y] = _frame.iso(p[0], p[1], r.z);
+          box.x0 = Math.min(box.x0, x); box.y0 = Math.min(box.y0, y); box.x1 = Math.max(box.x1, x); box.y1 = Math.max(box.y1, y);
+        }
+        const t = SCREEN.roomZoom(box, vb.width, Math.max(1, isoDiv.clientWidth - 20), Math.max(1, Math.min(isoDiv.clientHeight, window.innerHeight || isoDiv.clientHeight) - 20));
+        view.zoom = t.zoom;
+        applyZoom(true);
+        // Its middle in the middle of the stage, wherever the stage is now.
+        const svg2 = isoDiv.querySelector("svg"), m = svg2 && svg2.getScreenCTM ? svg2.getScreenCTM() : null;
+        if (!m) return;
+        const p = svg2.createSVGPoint(); p.x = t.cx; p.y = t.cy;
+        const at = p.matrixTransform(m), sr = isoDiv.getBoundingClientRect();
+        const vh = Math.min(sr.height, (window.innerHeight || sr.height) - Math.max(0, sr.top));
+        isoDiv.scrollLeft += at.x - (sr.left + sr.width / 2);
+        isoDiv.scrollTop += at.y - (sr.top + vh / 2);
+      },
+    });
+  }
+
+  // What the flat sidebar Atlas takes from Live Aboard (atlas_aboard.js; the
+  // sidebar only): with Show people / Show tags & scanners on (Pro, the
+  // Settings box's own gate; Live Aboard need not be on), who and what is
+  // where, through the very reader Live Aboard reads (one read serves both);
+  // with Live Aboard on, the light kinds set there and, with Show furniture,
+  // its furniture, doors and windows. None of it on: nothing is fetched.
+  const abSet = host.house3d && host.house3d.settings ? host.house3d.settings : {};
+  const abSlot = scr ? host.screen.slot : null;
+  const abLive = !!(scr && tierAtLeast(host.tier, "pro") && host.house3d && host.house3d.people
+    && (abSet.atlas_3d_people === true || abSet.atlas_3d_tags === true));
+  const abFile = !!(scr && h3 && typeof h3.load === "function");
+  const abReader = (pp) => (scr && SCREEN ? SCREEN.sharedReader(abSlot, pp) : pp);
+  const abFurnKey = `padspan_lv_furniture_${abSlot}`;
+  const abFurn = () => { try { return localStorage.getItem(abFurnKey) === "1"; } catch (_) { return false; } };
+  if (abLive || abFile) { _abRedraw.set(abSlot, () => rebuildISO()); _abLoad(); }
+  else if (scr) { _abRedraw.delete(abSlot); if (_AB) _AB.liveLayer(abSlot).clear(); }
+  let abData = null;
+  const abDraw = (snapshot) => {
+    if (!_AB || !abLive) return;
+    const fz = getFocusZ(view.focusIdx);
+    _AB.liveLayer(abSlot).draw(snapshot !== undefined ? null : {
+      stage: isoDiv, frame: _frame, frameKey: `${view.floorGap}|${view.horizGap}`, model: host.model,
+      states: host.house3d.states || {}, file: abData,
+      people: abSet.atlas_3d_people === true, tags: abSet.atlas_3d_tags === true, hideNames: !codesShown || !!host.hideDeviceCodes,
+      focused: (z) => fz === null || (Array.isArray(fz) ? fz.includes(z) : fz === z), outdoor: isOutdoorFloorId,
+      home: () => { const rn = isoDiv.getRootNode ? isoDiv.getRootNode() : null; return rn && rn.host ? rn : document.body; } }, snapshot);
+  };
+  if (abLive && _AB) mapCard.appendChild(_AB.liveCss());
+
   // Semantic zoom (use surface): the codes leave the drawing below 100% and
   // come back above it, so a zoom change across that line is a rebuild, not
   // just a CSS width. The builder always shows codes (host.codeChip unset).
   let codesShown = null;
-  const applyZoom = () => {
+  const applyZoom = (byHand = false) => {
+    // By hand past the whole house: the map alone; back out (any way): the bars.
+    if (scr) scr.zoomed(view.zoom, byHand);
     const svg = isoDiv.querySelector("svg");
     if (!svg) return;
     // Width, V2 or classic alike: a plain CSS percentage of the stage,
@@ -3042,7 +3161,7 @@ export function buildLightsMapCard(hostIn){
     const prev = view.zoom || 1;
     const bx = (isoDiv.scrollLeft + cx) / prev, by = (isoDiv.scrollTop + cy) / prev;
     view.zoom = next;
-    applyZoom();
+    applyZoom(true);
     isoDiv.scrollLeft = bx * next - cx;
     isoDiv.scrollTop = by * next - cy;
   };
@@ -3052,8 +3171,11 @@ export function buildLightsMapCard(hostIn){
     // filter on the drawing, not the persisted hidden set, so the table still
     // lists every light and stays the way to reach one that is filtered out.
     codesShown = host.codeChip ? codesVisibleAtZoom(view.zoom) : true;
-    const svgStr = buildIsoSVG(host.model, host.byRoom, host.hiddenEidsMap || host.hiddenEids, getFocusZ(view.focusIdx),
-      view.floorGap, view.horizGap, host.lightsByEid, host.lightsLoading, floors,
+    // Live Aboard's light kinds and furniture (atlas_aboard.js; none: as ever).
+    abData = _AB && abFile ? _AB.fileOf(abSlot, h3.load, host.screen.shownAt, () => { const f = _abRedraw.get(abSlot); if (f) f(); }) : null;
+    const abDrawn = abData ? _AB.drawnWith(host.lightsByEid, host.byRoom, _AB.kindShapes(abData, host.lightsByEid, h3.settings.light_shapes)) : null;
+    const svgStr = buildIsoSVG(host.model, abDrawn ? abDrawn.byRoom : host.byRoom, host.hiddenEidsMap || host.hiddenEids, getFocusZ(view.focusIdx),
+      view.floorGap, view.horizGap, abDrawn ? abDrawn.lightsByEid : host.lightsByEid, host.lightsLoading, floors,
       { showcase: !!host.showcase, showcaseTheme: host.showcaseTheme || "classic",
         fitRooms: !!host.showcase && !!host.fitRooms,
         ambient: host.ambient, isolux: !!host.showcase && !!host.isolux,
@@ -3089,8 +3211,18 @@ export function buildLightsMapCard(hostIn){
         automorphRoomPct: view.automorphLivePct !== undefined ? view.automorphLivePct : (host.automorphRoomPct || 0),
         automorphHardness: view.automorphLiveHardness !== undefined ? view.automorphLiveHardness : (host.automorphHardness || 0),
         automorphStyle: host.automorphStyle || "glow",
-        automorphSubtlety: view.automorphLiveSubtlety !== undefined ? view.automorphLiveSubtlety : (host.automorphSubtlety || 0) });
+        automorphSubtlety: view.automorphLiveSubtlety !== undefined ? view.automorphLiveSubtlety : (host.automorphSubtlety || 0),
+        underlay: abData && abFurn() ? _AB.underlayOf(abData) : null });
     isoDiv.innerHTML = svgStr;
+    // People, tags and scanners over it, then the newest positions (while
+    // the flat map shows and the page is in sight).
+    if (abLive && _AB) {
+      abDraw();
+      if (!(h3 && la3dOn()) && !(typeof document !== "undefined" && document.hidden)) {
+        const live = abReader(host.house3d.people);
+        Promise.resolve().then(() => live.read()).then((snap) => abDraw(snap && typeof snap === "object" ? snap : null), () => {});
+      }
+    }
     mountWeather(svgStr);
     applyZoom();
     host.onHexesBuilt(isoDiv, rebuildISO);
@@ -3440,7 +3572,8 @@ export function buildLightsMapCard(hostIn){
     gapLbl.textContent = String(view.floorGap);
     rebuildISO();
   });
-  layoutGroup.appendChild(el("span", { class: "lv-lbl" }, "Spacing"));
+  const gapName = el("span", { class: "lv-lbl" }, "Spacing");
+  layoutGroup.appendChild(gapName);
   layoutGroup.appendChild(gapSlider);
   layoutGroup.appendChild(gapLbl);
 
@@ -3456,7 +3589,8 @@ export function buildLightsMapCard(hostIn){
     horizLbl.textContent = String(view.horizGap);
     rebuildISO();
   });
-  layoutGroup.appendChild(el("span", { class: "lv-lbl" }, "L / R"));
+  const horizName = el("span", { class: "lv-lbl" }, "L / R");
+  layoutGroup.appendChild(horizName);
   layoutGroup.appendChild(horizSlider);
   layoutGroup.appendChild(horizLbl);
   // v2: set once when the floors are first stacked, so folded — and not on
@@ -3471,6 +3605,8 @@ export function buildLightsMapCard(hostIn){
   const saveLbl = el("span", { class: "lv-status" }, "");
   const saveBtn = el("button", { class: "lv-act", style: "margin-left:4px",
     onclick: async () => {
+      // Live Aboard showing: its camera, kept in its Views.
+      if (la3dDo(s => s.saveView())) return;
       saveBtn.disabled = true;
       try {
         await host.saveView();
@@ -3482,6 +3618,8 @@ export function buildLightsMapCard(hostIn){
   }, "Save view");
   const resetBtn = el("button", { class: "lv-act",
     onclick: async () => {
+      // Live Aboard showing: the whole house.
+      if (la3dDo(s => s.wholeHouse())) return;
       view.floorGap = 150; view.horizGap = 0; view.focusIdx = 0; view.zoom = 1.0;
       gapSlider.value = "150"; gapLbl.textContent = "150";
       horizSlider.value = "0"; horizLbl.textContent = "0";
@@ -3501,23 +3639,53 @@ export function buildLightsMapCard(hostIn){
     layoutTarget.appendChild(saveLbl);
   }
   if (layoutFold) ctrlRow.appendChild(layoutFold.d);
+  // Spacing and L / R only stack the flat map's floors: while Live Aboard
+  // shows they step aside, and Save / Reset view say what they do there.
+  if (h3) {
+    let la = false;
+    la3dPaints.push(() => {
+      const on = la3dOn();
+      if (on === la) return;
+      la = on;
+      for (const n of [gapName, gapSlider, gapLbl, horizName, horizSlider, horizLbl]) n.style.display = on ? "none" : "";
+      saveBtn.title = on ? "Keep this view in Live Aboard's Views" : "";
+      resetBtn.title = on ? "Back to the whole house" : "";
+    });
+  }
 
   // Zoom controls — one segmented cluster rather than three loose buttons
   ctrlRow.appendChild(SEP());
   ctrlRow.appendChild(el("span", { class: "lv-lbl" }, "Zoom"));
+  // While Live Aboard shows they drive its camera: 100% is its whole-house
+  // fit, and the middle says its zoom against that fit.
+  const zoomMid = el("button", { title: "Reset zoom", onclick: () => {
+    if (la3dDo(s => s.zoom("fit"))) return;
+    view.zoom = 1.0; applyZoom(true);
+  } }, "100%");
   ctrlRow.appendChild(el("span", { class: "lv-zoomseg" }, [
     el("button", { title: "Zoom out", onclick: () => {
+      if (la3dDo(s => s.zoom("out"))) return;
       view.zoom = Math.max(0.4, Math.round((view.zoom - 0.1) * 10) / 10);
-      applyZoom();
+      applyZoom(true);
     } }, "−"),
-    el("button", { title: "Reset zoom", onclick: () => {
-      view.zoom = 1.0; applyZoom();
-    } }, "100%"),
+    zoomMid,
     el("button", { title: "Zoom in", onclick: () => {
+      if (la3dDo(s => s.zoom("in"))) return;
       view.zoom = Math.min(2.5, Math.round((view.zoom + 0.1) * 10) / 10);
-      applyZoom();
+      applyZoom(true);
     } }, "+"),
   ]));
+  if (h3) {
+    la3dZoomLbl = zoomMid;
+    let la = false;
+    la3dPaints.push(() => {
+      const s = la3dOn() ? la3dSlot() : null;
+      if (!s && !la) return;
+      la = !!s;
+      zoomMid.textContent = s ? `${s.zoomPct()}%` : "100%";
+      zoomMid.title = s ? "The whole house" : "Reset zoom";
+    });
+  }
   // The Map / 3D switch, right beside the zoom (only while the 3D house is on).
   if (h3) {
     // Why 3D cannot show, said in the page beside the greyed button (a
@@ -3540,6 +3708,16 @@ export function buildLightsMapCard(hostIn){
       whyEl.textContent = why;
       whyEl.style.display = why ? "inline-block" : "none";
     });
+  }
+
+  // Show furniture (Live Aboard on, the sidebar): each piece placed in Live
+  // Aboard, faint on its floor, with its doors and windows; per browser.
+  if (abFile) {
+    const fb = el("button", { "data-lv-furniture": "", title: "Show the furniture, doors and windows placed in Live Aboard on this map",
+      onclick: () => { try { localStorage.setItem(abFurnKey, abFurn() ? "0" : "1"); } catch (_) { /* kept for this card only */ } paintFb(); rebuildISO(); } }, "Show furniture");
+    const paintFb = () => { const on = abFurn(); fb.setAttribute("aria-pressed", String(on)); fb.style.cssText = on ? "background:rgba(82,183,136,.24);color:#e8f0ea" : ""; };
+    paintFb();
+    ctrlRow.appendChild(el("span", { class: "lv-zoomseg" }, [fb]));
   }
 
   // Garry, 2026-09-09: "all sliders need a ? to bring up a card that
@@ -3801,6 +3979,7 @@ export function buildLightsMapCard(hostIn){
         onclick: () => {
           const pick = allLights.find(l => l.isMotion && l.state === "on") || allLights.find(l => l.state === "on");
           if (!pick) { if (host.toast) host.toast("Nothing is on"); return; }
+          if (la3dDo(s => s.findDevice(pick.entity_id))) return;
           const g = isoDiv.querySelector(`.lhex[data-eid="${String(pick.entity_id).replace(/"/g, '\\"')}"]`);
           const svg = isoDiv.querySelector("svg");
           if (!g || !svg || !g.getBoundingClientRect) return;
@@ -3897,7 +4076,12 @@ export function buildLightsMapCard(hostIn){
     isoDiv.addEventListener("pointerdown", () => { if (view.drawer) setDrawer(view.drawer); });
   }
   mapCard.appendChild(isoDiv);
-  const legend = buildShapeLegend(el, Object.values(host.lightsByEid));
+  if (scr) mapCard.appendChild(scr.anchor);
+  // The shapes as drawn: with Live Aboard's kinds once its file has been read.
+  const abLegend = _AB && abFile ? _AB.fileData(abSlot) : null;
+  const legend = buildShapeLegend(el, Object.values(abLegend
+    ? _AB.drawnWith(host.lightsByEid, host.byRoom, _AB.kindShapes(abLegend, host.lightsByEid, h3.settings.light_shapes)).lightsByEid
+    : host.lightsByEid));
   if (legend) mapCard.appendChild(legend);
   rebuildISO();
   // Restore the pan position a previous rebuild of this same card saved
