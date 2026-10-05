@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.98";
-const BUILD_ID = "20261005T054845Z";
+const APP_VERSION = "0.38.99";
+const BUILD_ID = "20261005T165017Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -292,7 +292,8 @@ class PadSpanLightsApp extends HTMLElement {
       if (s.atlas_3d_enabled !== undefined) {
         this.state._house3d = { atlas_3d_enabled: s.atlas_3d_enabled, atlas_3d_quality: s.atlas_3d_quality,
           fabric_bearing_deg: s.fabric_bearing_deg, atlas_3d_weather: s.atlas_3d_weather, atlas_3d_showcase: s.atlas_3d_showcase,
-          atlas_3d_people: s.atlas_3d_people, presence_poll_interval_s: s.presence_poll_interval_s };
+          atlas_3d_people: s.atlas_3d_people, presence_poll_interval_s: s.presence_poll_interval_s, light_shapes: s.light_shapes,
+          atlas_3d_tags: s.atlas_3d_tags };
       }
       this.state._wholeHousePresets = Array.isArray(s.whole_house_presets) ? s.whole_house_presets : [];
       // Layout v2 (Garry, 2026-09-21) is a house-wide trial toggle, set
@@ -910,6 +911,9 @@ class PadSpanLightsApp extends HTMLElement {
       // the setting is on and the tier is Pro, and reads the rest from here.
       house3d: this.state._house3d ? {
         slot: "atlas", settings: this.state._house3d,
+        // This screen is the house map: zoomed in, Live Aboard takes the
+        // whole panel (every bar steps aside), and it can go full screen.
+        mapOnly: true,
         // The sun's position (sun.sun) and the place (hass.config): no new calls.
         states: this._hass?.states || {}, config: this._hass?.config || null,
         // The 3D compass's Save: the GPS Bridge's own bearing,

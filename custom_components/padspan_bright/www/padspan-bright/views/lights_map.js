@@ -1009,6 +1009,10 @@ export function wireUseSurface(isoDiv, api){
           // An exact device starts from its own brightness, or its look's.
           dragBri = ex ? (_exactBrightness(api.hass && api.hass.states, ex) ?? ex.lookBri ?? 128)
             : typeof st?.attributes?.brightness === "number" ? st.attributes.brightness : (lastBrightness(eid) || 128);
+          // A new dim answers at once: the 180 ms spacing is within one
+          // press, as in Live Aboard (live_aboard_use.js), not carried over
+          // from the press before on the same light.
+          lastSend = 0;
           if (ring) { ring.remove(); ring = null; }
           readout = document.createElement("div");
           readout.style.cssText = "position:fixed;z-index:10001;padding:4px 10px;border-radius:999px;font-size:13px;font-weight:800;"
@@ -2606,6 +2610,12 @@ function buildShapeLegend(el, lights){
 const _LA_PICK = "padspan_lv_3d_";
 const _la3dPicked = (slot) => { try { return localStorage.getItem(_LA_PICK + slot) === "1"; } catch (_) { return false; } };
 const _la3dPick = (slot, on) => { try { localStorage.setItem(_LA_PICK + slot, on ? "1" : "0"); } catch (_) {} };
+// Live Aboard's own small things kept per browser (its saved views, the
+// first-time card seen): the view keeps nothing itself; the card keeps them.
+const _laPrefs = {
+  get: (k) => { try { return localStorage.getItem("padspan_la3d_" + k); } catch (_) { return null; } },
+  set: (k, v) => { try { localStorage.setItem("padspan_la3d_" + k, String(v)); } catch (_) {} },
+};
 let _LA = null;                       // views/live_aboard.js, once loaded
 let _laLoading = null, _laLoadFailed = false, _laNoGl = false, _laNoGlSent = false;
 const _laWaiting = new Map();         // slot -> the newest card's mount, while it loads
@@ -2875,6 +2885,8 @@ export function buildLightsMapCard(hostIn){
         const z = Array.isArray(focus) ? focus[focus.length - 1] : focus;
         la3dSlot().attach(isoDiv, { model: host.model, floors, lightsByEid: host.lightsByEid || {},
           hidden: host.hiddenEidsMap || host.hiddenEids,
+          // The Atlas shapes the person set: what a light is drawn as follows them.
+          shapeOverrides: h3.settings.light_shapes || null,
           topFloorIds: z === null || z === undefined ? null : floorIdsOnSlab(_frame, host.model, floors, z),
           quality: h3.settings.atlas_3d_quality, telemetry: h3.telemetry,
           // The sun (sun.sun, else hass.config) and true north (the GPS
@@ -2903,6 +2915,17 @@ export function buildLightsMapCard(hostIn){
           furnish: h3.furnish === true ? { callWS: typeof h3.callWS === "function" ? h3.callWS : null,
             toast: typeof h3.toast === "function" ? h3.toast : null, settings: h3.settings, entities: h3.entities || null } : null,
           setTopFloor: (fid) => la3dTopFloor(fid),
+          // The view's floor stepper (▲ Main ▼ · All): the floor chips'
+          // choice, a floor at a time, lowest first; and, on the sidebar,
+          // the map alone when zoomed in and full screen (h3.mapOnly).
+          floorSteps: sortedLevels.length > 1 ? {
+            names: sortedLevels.map(lv => floorNameAtLevel(_frame, host.model, floors, lv) || `L${lv}`),
+            zs: sortedLevels.map(lv => String(lv)),
+            at: z === null || z === undefined ? sortedLevels.length - 1 : Math.max(0, sortedLevels.indexOf(z)),
+            all: z === null || z === undefined,
+            go: (i) => la3dFocus(i < 0 ? 0 : isoPos.findIndex(q => q === sortedLevels[i])) } : null,
+          mapOnly: h3.mapOnly === true,
+          prefs: _laPrefs,
           // P5: furniture that is a device follows a renamed entity (the
           // registry the Atlas already reads), and the emergency lights are
           // outlined while the Atlas's test runs.
@@ -2910,6 +2933,8 @@ export function buildLightsMapCard(hostIn){
           // P6: the people layer, only while Show people is on: the live
           // snapshot through the host (off, it is never read).
           people: h3.settings.atlas_3d_people === true && h3.people ? h3.people : null,
+          // Show tags & scanners: the same snapshot, the same reader (read once for both).
+          tags: h3.settings.atlas_3d_tags === true && h3.people ? h3.people : null,
           onTouch: () => { if (la3dCloseDrawer) la3dCloseDrawer(); } });
       } catch (_) { /* attach counts its own failures; the flat map stays */ }
     }
@@ -2917,8 +2942,9 @@ export function buildLightsMapCard(hostIn){
   };
   // A piece moved up or down a floor (Furnish): its floor becomes the top one
   // showing, as its floor chip would make it, so you see where it went.
-  const la3dTopFloor = (fid) => {
-    const idx = isoPos.findIndex(p => p === _frame.levelOf(String(fid)));
+  const la3dTopFloor = (fid) => la3dFocus(isoPos.findIndex(p => p === _frame.levelOf(String(fid))));
+  // The floor chips' choice, from the 3D view (its floor stepper, or a piece moved a floor).
+  const la3dFocus = (idx) => {
     if (idx < 0 || idx === view.focusIdx) return;
     view.focusIdx = idx;
     resetFocusCtl(idx);
