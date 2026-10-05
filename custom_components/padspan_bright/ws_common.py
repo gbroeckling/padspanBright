@@ -42,6 +42,8 @@ from .const import (
     DATA_DEVICE_REGISTRY,
     DATA_WLED_LOOKS,
     WLED_LOOKS_STORE_KEY,
+    DATA_HOUSE3D,
+    HOUSE3D_STORE_KEY,
     LIGHT_SHAPE_KINDS,
 )
 from .device_registry import DEVICE_REGISTRY_STORE_KEY
@@ -330,6 +332,7 @@ _ALL_STORE_KEYS = [
     TRACEBACK_STORE_KEY,
     OBJECT_HISTORY_STORE_KEY,
     WLED_LOOKS_STORE_KEY,
+    HOUSE3D_STORE_KEY,
 ]
 
 
@@ -357,7 +360,44 @@ _DATA_KEY_MAP = {
     # Each WLED device's remembered look and the sync settings PadSpan
     # switched off (wled_exact.py) — what puts a strip back after a rebuild.
     WLED_LOOKS_STORE_KEY: DATA_WLED_LOOKS,
+    # Live Aboard's own file (house3d_store.py): furniture, 3D-only light
+    # heights and door swings. A file that was never written is left out of
+    # backups (_BACKUP_ONLY_ONCE_WRITTEN below). A backup carrying
+    # "padspan_bright.house3d": {} comes only from commit e8a10ada, which was
+    # never installed anywhere.
+    HOUSE3D_STORE_KEY: DATA_HOUSE3D,
 }
+
+
+# Stores a backup takes only once their file exists. Live Aboard is normally
+# off: an install that never used it has no file, and its backups must carry
+# no entry for it, or a later restore would create the file, or empty one that
+# has furniture in it by then (house3d_store.py).
+_BACKUP_ONLY_ONCE_WRITTEN = frozenset({HOUSE3D_STORE_KEY})
+
+# "There was no file": what a safety backup taken right before an operation
+# that may CREATE one of those stores records for it (the Bright import's;
+# _auto_backup(mark_absent=True)), so that restoring it can take that file
+# away again. Ordinary backups never record it: restoring an older backup
+# must not wipe furniture placed since (house3d_store.async_restore_data).
+ABSENT_MARKER = "__padspan_absent__"
+
+
+def _is_absent_marker(data) -> bool:
+    return isinstance(data, dict) and len(data) == 1 and data.get(ABSENT_MARKER) is True
+
+
+async def _store_file_written(hass, store_key: str) -> bool:
+    """Does Home Assistant hold this store's file (.storage/<key>)? If the
+    check itself fails, the answer is yes: a backup that carries an empty
+    entry is the old behaviour, one that silently drops a real file loses
+    data."""
+    import os  # noqa: PLC0415
+    try:
+        path = hass.config.path(".storage", store_key)
+        return bool(await hass.async_add_executor_job(os.path.isfile, path))
+    except Exception:  # noqa: BLE001
+        return True
 
 
 _MAX_BACKUPS = 3  # Oldest backup is dropped when a new one exceeds this limit

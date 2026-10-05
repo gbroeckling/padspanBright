@@ -5,7 +5,7 @@
 
 // Shared stack transform (P2-5); query inherited from our own module URL so
 // the ?b= cache-buster propagates (see docs/06_UI_CACHE_BUSTING.md).
-const { BUY_URL: _LIC_BUY_URL, PRO_PRICE: _LIC_PRICE, LICENCE_PATH: _LIC_PATH } =
+const { BUY_URL: _LIC_BUY_URL, PRO_PRICE: _LIC_PRICE, LICENCE_PATH: _LIC_PATH, tierAtLeast: _tierAtLeast } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
 // Shared pan/zoom viewport (gap #11, best-in-class roadmap) — extracted
 // from this file's own former _attachPanZoom, see pan_zoom.js's header.
@@ -110,6 +110,13 @@ export function render(ctx){
     ? [["library","Library"],["upload","Upload"]]
     : [["library","Library"],["upload","Upload"],["edit","Edit"],["stack","3D Stack"],["rooms","Rooms"],["lights","Atlas"],["export","Export"],["help","Help"]];
 
+  // Live Aboard's Furnish (P2), after Atlas: only while Live Aboard shows (the
+  // switch on, at Pro or Bright Pro). Otherwise there is no such tab, the way
+  // Basic leaves tabs out, and nothing of it is loaded.
+  const furnishTab = !isBasic && ctx.state.settings?.atlas_3d_enabled === true && _tierAtLeast(ctx.state.settings?.tier, "pro");
+  if (furnishTab) tabDefs.splice(tabDefs.findIndex(([id]) => id === "lights") + 1, 0, ["furnish", "Furnish"]);
+  else if (tab === "furnish") ctx.state.mapsTab = "lights";
+
   // If current tab is not in basic tab list, reset to library
   if(isBasic && tab !== "library" && tab !== "upload"){
     ctx.state.mapsTab = "library";
@@ -145,6 +152,7 @@ export function render(ctx){
     activeTab==="stack" ? _stack(ctx, maps, helpBtn) :
     activeTab==="rooms" ? _roomsTab(ctx, maps) :
     activeTab==="lights" ? _lightsTab(ctx, maps, active) :
+    activeTab==="furnish" ? _lightsTab(ctx, maps, active) :
     activeTab==="export" ? _export(ctx, active, maps) :
     _help(ctx),
   ]);
@@ -307,6 +315,20 @@ function _compareAllMaps(ctx, maps, resultDiv) {
 // buttons. Each row shows receiver count, dimensions, floor, whether a
 // coverage gap was detected, and its placed size (or "not placed"). Includes
 // the undo-migration banner.
+// Opening a floor plan to edit it lives in Advanced mode: Basic has only
+// Library and Upload, and render() puts any other tab straight back to
+// Library. So in Basic, Open did nothing at all, with no sign why (Jay,
+// 2026-10-04, placing a BLE proxy he had missed). It switches to Advanced,
+// says so, and opens the plan.
+function _openForEdit(ctx, mapId){
+  ctx.actions.mapsSetActive(mapId);
+  if (ctx.state.complexity === "basic") {
+    ctx.actions.setComplexity("advanced");
+    ctx.toast("Editing a floor plan is in Advanced mode, so PadSpan switched to Advanced. The Basic / Advanced button at the top switches back.");
+  }
+  ctx.actions.setMapsTab("edit");
+}
+
 function _library(ctx, maps, activeId, helpBtn, isBasic){
   const { el } = ctx.helpers;
   helpBtn = helpBtn || (()=>null);
@@ -365,10 +387,7 @@ function _library(ctx, maps, activeId, helpBtn, isBasic){
           el("div",{style:"font-weight:600;color:#fbbf24;font-size:13px"}, `Data migrated from "${_mig.srcMapName}" to "${_mig.targetMapName}"`),
           el("div",{class:"muted",style:"font-size:11px"}, "Review the target map. If things look wrong, revert the migrated data."),
         ]),
-        el("button",{class:"btn inline", style:"color:#52b788;border-color:#52b788", onclick:()=>{
-          ctx.actions.mapsSetActive(_mig.targetMapId);
-          ctx.actions.setMapsTab('edit');
-        }}, "Review map"),
+        el("button",{class:"btn inline", style:"color:#52b788;border-color:#52b788", onclick:()=>_openForEdit(ctx, _mig.targetMapId)}, "Review map"),
         el("button",{class:"btn danger", style:"font-size:12px", onclick:async ()=>{
           if(!confirm("Remove all migrated receivers, beacons, and room outlines from the target map?")) return;
           // Remove migrated items from target map — computed from a FRESH
@@ -474,7 +493,7 @@ function _library(ctx, maps, activeId, helpBtn, isBasic){
     ]);
 
     const actions = el("div",{style:"display:flex;gap:8px;align-items:center;flex-shrink:0;flex-wrap:wrap"});
-    actions.appendChild(el("button",{class:"btn inline", onclick:()=>{ ctx.actions.mapsSetActive(m.id); ctx.actions.setMapsTab('edit'); }}, "Open"));
+    actions.appendChild(el("button",{class:"btn inline", onclick:()=>_openForEdit(ctx, m.id)}, "Open"));
     actions.appendChild(el("button",{class:"btn inline danger", onclick:()=>{ _deleteMapModal(ctx, m, maps); }}, "Delete"));
 
     row.appendChild(thumb);
@@ -488,6 +507,28 @@ function _library(ctx, maps, activeId, helpBtn, isBasic){
 }
 
 // ── Delete Map Modal ─────────────────────────────────────────────────────────
+// Live Aboard (P6): the looks of the beacons, from the 3D file's devices (a
+// tag's form and colours), read once per page when Show beacons first needs
+// them (a failed read: none, until the page loads again); the map draws
+// again when they arrive. {key: {form, color, accent}}, or null until read.
+function _beaconLooks(ctx, mapState) {
+  if (mapState._beaconLooks !== undefined) return mapState._beaconLooks;
+  mapState._beaconLooks = null;
+  Promise.resolve(ctx.actions.wsCall("padspan_bright/house3d_get")).then((r) => {
+    const out = {};
+    const dv = r && r.data && r.data.devices && typeof r.data.devices === "object" ? r.data.devices : {};
+    for (const [k, v] of Object.entries(dv)) {
+      const rc = v && v.recipe;
+      if (!rc || rc.kind !== "tag") continue;
+      const cols = Array.isArray(rc.colors) ? rc.colors : [];
+      out[k] = { form: String((rc.params && rc.params.form) || "puck"), color: cols[0] || null, accent: cols[1] || null };
+    }
+    mapState._beaconLooks = out;
+    if (Object.keys(out).length) ctx.actions.renderRooms();
+  }).catch(() => { mapState._beaconLooks = {}; });
+  return null;
+}
+
 // When a map has data (receivers, beacons, room outlines), offers the option
 // to migrate that data to another same-floor map before deleting. Migration
 // transforms coordinates from source → world → target coordinate space using
@@ -1250,7 +1291,7 @@ function _wizardFinish(ctx, map, isBasic){
   const calBtn = el("button",{class:"btn primary"}, "Go to Calibration →");
   calBtn.addEventListener("click", ()=>{
     ctx.state._mapsWizard = null;
-    if (isBasic) { ctx.state.complexity = "advanced"; try{ localStorage.setItem("padspan_complexity","advanced"); }catch(e){} }
+    if (isBasic) ctx.actions.setComplexity("advanced");
     ctx.state.view = "calibration";
     if (ctx.state._calib) ctx.state._calib.tab = "beacon";
     ctx.actions.renderRooms();
@@ -3884,7 +3925,7 @@ const BRIGHT_PRO_MANUAL = [
       },
       {
         "heading": "Find your plans in the Library",
-        "body": "Every plan you upload shows up in the Library tab, grouped by floor. Each one shows a thumbnail, its pixel size, and whether it's been scaled yet — \"not placed\" means the real-world size still isn't set. Tap Open to jump back into editing it, or Delete to remove it.",
+        "body": "Every plan you upload shows up in the Library tab, grouped by floor. Each one shows a thumbnail, its pixel size, and whether it's been scaled yet — \"not placed\" means the real-world size still isn't set. Tap Open to jump back into editing it (editing is in Advanced mode, so in Basic mode Open switches to Advanced for you), or Delete to remove it.",
         "steps": [],
         "notes": []
       },
@@ -8506,6 +8547,8 @@ function _lightsTourCard(ctx, wrap, paid){
 // itself is entity-registry-wide, not per-map.
 function _lightsTab(ctx, maps, active) {
   const { el } = ctx.helpers;
+  // Mapping → Furnish (P2) is this tab's card with its 3D house in the Furnish tool.
+  const furnish = ctx.state.mapsTab === "furnish";
   const mapState = ctx.state.maps;
   const wrap = el("div", {});
   if (!mapState._lightsDraftM) mapState._lightsDraftM = {};
@@ -9020,6 +9063,13 @@ function _lightsTab(ctx, maps, active) {
       x_m: o.x_m, y_m: o.y_m,
       floor_id: o.floor_id || null,
     }));
+  // Live Aboard (P6): a beacon with a look (a tag made in Furnish → People &
+  // devices) wears a small drawing of it — only while Show beacons is on and
+  // Live Aboard is on at Pro. Off, nothing is read and the beacons are as
+  // they always were.
+  const beaconLooks = showBeacons && ctx.state.settings?.atlas_3d_enabled === true && _tierAtLeast(tier, "pro")
+    ? _beaconLooks(ctx, mapState) : null;
+  if (beaconLooks) for (const b of beacons) if (beaconLooks[b.key]) b.look = beaconLooks[b.key];
 
   // A press-and-hold jump must never land on a row the index's own filter
   // is hiding — "take me to this device" outranks a list filter set earlier.
@@ -9357,6 +9407,44 @@ function _lightsTab(ctx, maps, active) {
       states: ctx.hass?.states || {}, entities: ctx.hass?.entities,
       telemetry: (name) => { if (ctx.actions.telemetryEvent) ctx.actions.telemetryEvent(name); },
     } : null,
+    // The 3D house: the same Map / 3D switch the Atlas sidebar draws (its own
+    // slot and its own remembered choice), only while the setting is on and
+    // the tier is Pro.
+    house3d: ctx.state.settings && ctx.state.settings.atlas_3d_enabled !== undefined ? {
+      slot: "builder", settings: ctx.state.settings,
+      states: ctx.hass?.states || {}, config: ctx.hass?.config || null,
+      // Mapping → Furnish (P2): the Furnish tool open, and what its flows and
+      // "This is a device…" need: the connection, a toast, the entity registry.
+      furnish, entities: ctx.hass?.entities || null, toast: (t, bad) => ctx.toast(t, bad),
+      // A piece linked to a device follows it through a rename (P5): the registry already read.
+      regIds: ctx.state._lightsRegStore?.reg?.regIds || null,
+      // Show people (P6): this page does not poll the live snapshot (the
+      // panel's poll skips Mapping), so with live data the view reads it
+      // through here as the sidebar does: only while Show people is on and
+      // the view redraws, never more often than Overview polls. Sample data
+      // stays the page's own.
+      people: ctx.state.dataMode === "live"
+        ? { read: () => ctx.actions.wsCall("padspan_bright/live_snapshot").then((r) => (r && r.snapshot) || null),
+            everyMs: 1000 * (Number(ctx.state.settings.presence_poll_interval_s) || 5) }
+        : { snapshot: () => ctx.state.live?.snapshot || null },
+      callWS: (msg) => { const { type, ...rest } = msg || {}; return ctx.actions.wsCall(type, rest); },
+      // The 3D compass's Save: fabric_bearing_deg alone, straight to the wire
+      // like the Settings box (settingsSet would re-render everything).
+      saveNorth: async (b) => {
+        const r = await ctx.actions.wsCall("padspan_bright/settings_set", { fabric_bearing_deg: b });
+        if (r && r.settings) ctx.state.settings = r.settings;
+        return true;
+      },
+      // Taps and holds in 3D: the sidebar's exact api (Preview as sidebar's).
+      useApi: () => previewApi,
+      // The 3D file (doors and windows drawn in 3D, heights): read when the
+      // 3D view shows, never on the poll.
+      load: () => ctx.actions.wsCall("padspan_bright/house3d_get"),
+      // The 3D editor's Save, on the same gate as placing a light here
+      // (paid, not Preview): without it the 3D view offers no Edit.
+      edit: paid && !preview ? (changes) => ctx.actions.wsCall("padspan_bright/house3d_edit", changes) : null,
+      telemetry: (name) => { if (ctx.actions.telemetryEvent) ctx.actions.telemetryEvent(name); },
+    } : null,
     isolux: mapState._lightsIsolux === undefined
       ? !!ctx.state.settings?.lights_isolux
       : !!mapState._lightsIsolux,
@@ -9689,6 +9777,14 @@ function _lightsTab(ctx, maps, active) {
     },
   };
   const mapCardEl = buildLightsMapCard(host);
+  // Mapping → Furnish (P2): the same card, its 3D house in the Furnish tool;
+  // the light-placement tools are this tab's, not Furnish's.
+  if (furnish) {
+    return el("div", {}, [
+      el("div", { class: "card", style: "padding:10px 12px;margin-bottom:12px;font-size:12.5px;line-height:1.5" },
+        "Furnish Live Aboard: Build adds a piece; drag it into place. Floor ▲ / ▼ moves it to another floor, and Height in room raises it onto a table, a shelf or a wall. Nothing is kept until Save."),
+      mapCardEl]);
+  }
   // The drafting grid on the stage says "editing" without a word.
   if (paid && !preview) { const stage = mapCardEl.querySelector(".lv-stage"); if (stage) stage.classList.add("editing"); }
   // Layout v2 (Garry, 2026-09-21, "get it done"): on a wide enough monitor

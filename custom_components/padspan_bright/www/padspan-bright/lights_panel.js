@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.94";
-const BUILD_ID = "20261004T145853Z";
+const APP_VERSION = "0.38.98";
+const BUILD_ID = "20261005T054845Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -286,6 +286,13 @@ class PadSpanLightsApp extends HTMLElement {
           atlas_weather_warning_entity: s.atlas_weather_warning_entity,
           atlas_weather_strength: s.atlas_weather_strength,
         };
+      }
+      // The 3D house (Settings → UI Structure → Atlas → 3D house), normally
+      // off. A failed fetch keeps the last answer; before any, no switch.
+      if (s.atlas_3d_enabled !== undefined) {
+        this.state._house3d = { atlas_3d_enabled: s.atlas_3d_enabled, atlas_3d_quality: s.atlas_3d_quality,
+          fabric_bearing_deg: s.fabric_bearing_deg, atlas_3d_weather: s.atlas_3d_weather, atlas_3d_showcase: s.atlas_3d_showcase,
+          atlas_3d_people: s.atlas_3d_people, presence_poll_interval_s: s.presence_poll_interval_s };
       }
       this.state._wholeHousePresets = Array.isArray(s.whole_house_presets) ? s.whole_house_presets : [];
       // Layout v2 (Garry, 2026-09-21) is a house-wide trial toggle, set
@@ -894,6 +901,41 @@ class PadSpanLightsApp extends HTMLElement {
         states: this._hass?.states || {}, entities: this._hass?.entities,
         // The opt-in report's closed words, once per page load, and only
         // while the report is on (the trial card's rule).
+        telemetry: (name)=>{
+          if(!this.state._telemetryOn || !this._hass) return;
+          Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:String(name) })).catch(()=>{});
+        },
+      } : null,
+      // The 3D house: the shared card draws its Map / 3D switch only while
+      // the setting is on and the tier is Pro, and reads the rest from here.
+      house3d: this.state._house3d ? {
+        slot: "atlas", settings: this.state._house3d,
+        // The sun's position (sun.sun) and the place (hass.config): no new calls.
+        states: this._hass?.states || {}, config: this._hass?.config || null,
+        // The 3D compass's Save: the GPS Bridge's own bearing,
+        // fabric_bearing_deg, written alone and kept here at once.
+        saveNorth: async (b)=>{
+          const r = await this._hass.callWS({ type:"padspan_bright/settings_set", fabric_bearing_deg: b });
+          const v = Number(r && r.settings && r.settings.fabric_bearing_deg);
+          this.state._house3d = { ...(this.state._house3d || {}), fabric_bearing_deg: Number.isFinite(v) ? v : b };
+          return true;
+        },
+        // Taps and holds in 3D: this map's own use api, asked for on the press.
+        useApi: ()=>this._useApi(lightsByEid, lights),
+        // Furniture that is a device (P5): renames followed through the
+        // registry already read above, and the emergency lights while a
+        // test runs (the status this panel already keeps).
+        entities: this._hass?.entities || null, regIds: this._regStore?.reg?.regIds || null,
+        // Show people (P6): this panel has no live snapshot of its own, so
+        // the 3D view reads Overview's through here, only while Show people
+        // is on and the view shows, never more often than Overview polls.
+        people: { read: ()=>this._hass.callWS({ type:"padspan_bright/live_snapshot" }).then(r=>(r && r.snapshot) || null),
+          everyMs: 1000 * (Number(this.state._house3d.presence_poll_interval_s) || 5) },
+        emergency: this.state._emerg && this.state._emerg.test && this.state._emerg.test.active
+          ? (this.state._emerg.members || []).map(m => m && m.entity_id).filter(Boolean) : null,
+        // The 3D file (doors and windows drawn in 3D, heights): read when
+        // the 3D view shows, never on the poll.
+        load: ()=>this._hass.callWS({ type:"padspan_bright/house3d_get" }),
         telemetry: (name)=>{
           if(!this.state._telemetryOn || !this._hass) return;
           Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:String(name) })).catch(()=>{});

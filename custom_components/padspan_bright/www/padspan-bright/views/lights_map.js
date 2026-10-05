@@ -2276,7 +2276,11 @@ export function ensureLightsRegistry(store, hass, areas, onLoaded){
           }
         }
         const areaMap = {}, platformMap = {}, manufacturerMap = {}, ipMap = {};
+        // Every entity by its registry id (Live Aboard: a piece of furniture
+        // linked to a device follows it through a rename). Same fetch.
+        const regIds = {};
         for (const e of (reg || [])) {
+          if (e && e.id && e.entity_id) regIds[e.id] = e.entity_id;
           // Fans and motion sensors ride the lights pipeline now, so their
           // room assignment resolves the same way a light's does. Temperature
           // sensors too — same sensor.* + device_class=="temperature" test
@@ -2313,7 +2317,7 @@ export function ensureLightsRegistry(store, hass, areas, onLoaded){
         // in hand for the device_class/name each pairing decision needs.
         const pairMap = computeMotionOccupancyPairs(reg, hass.states);
         const doorLockMap = computeDoorLockPairs(reg, hass.states);
-        store.reg = { ts: Date.now(), areaMap, platformMap, manufacturerMap, ipMap, pairMap, doorLockMap };
+        store.reg = { ts: Date.now(), areaMap, platformMap, manufacturerMap, ipMap, pairMap, doorLockMap, regIds };
         store.retryAfter = 0;
       } catch (_) {
         // A failed fetch must never become the authoritative answer. With a
@@ -2321,7 +2325,7 @@ export function ensureLightsRegistry(store, hass, areas, onLoaded){
         // stay in the loading state (the map keeps its placeholder) instead of
         // caching an empty areaMap for 60s, which would tell the user every
         // light in the house has no room.
-        if (store.reg) store.reg = { ts: Date.now(), areaMap: store.reg.areaMap, platformMap: store.reg.platformMap, manufacturerMap: store.reg.manufacturerMap, ipMap: store.reg.ipMap, pairMap: store.reg.pairMap, doorLockMap: store.reg.doorLockMap };
+        if (store.reg) store.reg = { ts: Date.now(), areaMap: store.reg.areaMap, platformMap: store.reg.platformMap, manufacturerMap: store.reg.manufacturerMap, ipMap: store.reg.ipMap, pairMap: store.reg.pairMap, doorLockMap: store.reg.doorLockMap, regIds: store.reg.regIds };
         else store.retryAfter = Date.now() + 10000;
       } finally {
         store.loading = false;
@@ -2590,6 +2594,96 @@ function buildShapeLegend(el, lights){
   return row.childNodes.length ? row : null;
 }
 
+// ── Live Aboard: the 3D house (docs/IDEA_ATLAS_3D_HOUSE.md) ──────────────────
+// Normally off (settings.atlas_3d_enabled). Off, the card is exactly what it
+// always was: no switch, and views/live_aboard.js — three.js with it — is never
+// even imported. On, a Map / 3D switch sits beside the zoom buttons (and in
+// the rail on the edge-to-edge layout), and each screen remembers its choice
+// per browser, so the wall PC can open in 3D. The 3D view is one long-lived
+// element per screen (live_aboard.js liveAboardSlot), moved into each new
+// card beside the stage, which it hides while it shows. It loads with
+// import().catch, and every failure puts the flat Atlas back, counted once.
+const _LA_PICK = "padspan_lv_3d_";
+const _la3dPicked = (slot) => { try { return localStorage.getItem(_LA_PICK + slot) === "1"; } catch (_) { return false; } };
+const _la3dPick = (slot, on) => { try { localStorage.setItem(_LA_PICK + slot, on ? "1" : "0"); } catch (_) {} };
+let _LA = null;                       // views/live_aboard.js, once loaded
+let _laLoading = null, _laLoadFailed = false, _laNoGl = false, _laNoGlSent = false;
+const _laWaiting = new Map();         // slot -> the newest card's mount, while it loads
+const _la3dPickers = new Map();       // slot -> the newest card's Map / 3D switch (pick3d)
+// A screen that cannot draw 3D is remembered per PadSpan build (the
+// cache-busting query this file was loaded with; a new build tries once
+// more). No WebGL2 is kept for the browser: a reload neither downloads
+// three.js nor looks again. Too slow is kept for this browser session only
+// (one frame-time check: a tablet busy at boot, or a GPU process that crashed
+// once, is not slow for good). A tap on the greyed 3D button, or on the
+// reason beside it, forgets either and tries once more (la3dRetry).
+const _LA_FAILED = "padspan_la3d_failed", _LA_KEEP = ["no_webgl", "slow_gpu"];
+const _LA_BUILD = new URL(import.meta.url).search;
+const _laKeptIn = (why) => (why === "slow_gpu" ? sessionStorage : localStorage);   // may throw: used in try
+function _laStored(){
+  for (const why of _LA_KEEP) {
+    try {
+      const r = JSON.parse(_laKeptIn(why).getItem(_LA_FAILED) || "null");
+      if (r && r.build === _LA_BUILD && r.why === why) return why;
+    } catch (_) {}
+  }
+  return null;
+}
+const _laCannotHere = () => _laStored() || (_laNoGl ? "no_webgl" : null);
+function _laRemember(why){
+  if (!_LA_KEEP.includes(why) || _laStored() === why) return;
+  try { _laKeptIn(why).setItem(_LA_FAILED, JSON.stringify({ build: _LA_BUILD, why })); } catch (_) {}
+}
+function _laForget(){
+  for (const why of _LA_KEEP) { try { _laKeptIn(why).removeItem(_LA_FAILED); } catch (_) {} }
+  _laNoGl = false;
+}
+// WebGL2, tried on a canvas of its own before three.js is downloaded.
+function _laHasGl(){
+  try {
+    const gl = document.createElement("canvas").getContext("webgl2");
+    if (!gl) return false;
+    try { const x = gl.getExtension("WEBGL_lose_context"); if (x) x.loseContext(); } catch (_) {}
+    return true;
+  } catch (_) { return false; }
+}
+function _laLoad(slot, mount, telemetry){
+  if (_laLoadFailed) return;
+  if (!_laLoading && !_laHasGl()) {
+    // No WebGL2 here: nothing to download. Counted once, as the view would.
+    if (!_laNoGlSent) { _laNoGlSent = true; try { if (typeof telemetry === "function") telemetry("house3d_fallback:no_webgl"); } catch (_) {} }
+    _laNoGl = true;
+    _laRemember("no_webgl");
+    return;
+  }
+  _laWaiting.set(slot, mount);
+  if (_laLoading) return;
+  _laLoading = import(`./live_aboard.js${new URL(import.meta.url).search}`)
+    .then(m => {
+      _LA = m;
+      const waiting = [..._laWaiting.values()];
+      _laWaiting.clear();
+      for (const fn of waiting) { try { fn(); } catch (_) { /* each mount counts its own failures */ } }
+    })
+    .catch(err => {
+      console.warn("PadSpan: live_aboard failed to load", err);
+      _laLoadFailed = true;
+      const waiting = [..._laWaiting.values()];
+      _laWaiting.clear();
+      // The one failure no 3D view can count: the module never arrived.
+      try { if (typeof telemetry === "function") telemetry("house3d_fallback:error"); } catch (_) {}
+      for (const fn of waiting) { try { fn(); } catch (_) {} }
+    });
+}
+const _LA_WHY = {
+  no_webgl: "This screen can't draw Live Aboard (no WebGL). Tap to try again",
+  slow_gpu: "This screen is too slow for Live Aboard. Tap to try again",
+  context_lost: "Live Aboard stopped (the graphics were reset). Reload to try again",
+  error: "Live Aboard stopped with an error. Reload to try again",
+};
+// A hold then a drag in 3D dims exactly as wirePress does, with its two helpers.
+export { _exactBrightness, _tellProblems };
+
 // ── The map card: control row + iso map ──────────────────────────────────────
 // host = {
 //   el(tag,attrs,children)            DOM builder
@@ -2742,6 +2836,124 @@ export function buildLightsMapCard(hostIn){
     } catch (_) { /* attach counts its own failures; the map never sees one */ }
   };
 
+  // The 3D house (see _laLoad above). host.house3d is the host's {slot,
+  // settings (the settings payload), telemetry, states, config}; nothing
+  // below draws or loads anything unless settings.atlas_3d_enabled is on and
+  // the tier is Pro (PadSpan Pro or Bright Pro — Garry, 2026-09-30). Below Pro
+  // it is exactly off; the stored setting is left alone, so a renewed key
+  // brings it back as it was.
+  const h3 = host.house3d && host.house3d.settings && host.house3d.settings.atlas_3d_enabled === true
+    && tierAtLeast(host.tier, "pro") ? host.house3d : null;
+  // Switched off since it was on (this page load): its GL context goes back,
+  // and a 3D view still loading never mounts on a card from before.
+  if (!h3 && host.house3d && host.house3d.slot) {
+    _laWaiting.delete(host.house3d.slot); _la3dPickers.delete(host.house3d.slot);
+    if (_LA) _LA.releaseLiveAboardSlot(host.house3d.slot);
+  }
+  const la3dPaints = [];
+  let la3dCloseDrawer = null;
+  const la3dSlot = () => (_LA && h3 ? _LA.liveAboardSlot(h3.slot) : null);
+  // Why this screen cannot show 3D right now: the fallback kind, or null.
+  const la3dWhy = () => {
+    const s = la3dSlot(), failed = s && s.failed;
+    if (failed) _laRemember(failed);                  // no WebGL, too slow: kept (see _LA_FAILED)
+    return (_laLoadFailed ? "error" : _laCannotHere() || failed) || null;
+  };
+  // The same, said plainly ("" when it can).
+  const la3dWhyNot = () => { const why = la3dWhy(); return why ? (_LA_WHY[why] || _LA_WHY.error) : ""; };
+  // Mapping → Furnish (P2) is the 3D view, whatever this screen last picked.
+  const la3dWant = () => !!h3 && (h3.furnish === true || _la3dPicked(h3.slot));
+  const la3dOn = () => la3dWant() && !la3dWhyNot();
+  const mount3d = () => {
+    if (!h3) return;
+    if (!la3dWant() || _laCannotHere()) { const s = la3dSlot(); if (s) s.detach(); }
+    else if (!_LA) _laLoad(h3.slot, mount3d, h3.telemetry);
+    else {
+      try {
+        // The floor chips choose the top floor; the floors above it hide.
+        const focus = getFocusZ(view.focusIdx);
+        const z = Array.isArray(focus) ? focus[focus.length - 1] : focus;
+        la3dSlot().attach(isoDiv, { model: host.model, floors, lightsByEid: host.lightsByEid || {},
+          hidden: host.hiddenEidsMap || host.hiddenEids,
+          topFloorIds: z === null || z === undefined ? null : floorIdsOnSlab(_frame, host.model, floors, z),
+          quality: h3.settings.atlas_3d_quality, telemetry: h3.telemetry,
+          // The sun (sun.sun, else hass.config) and true north (the GPS
+          // Bridge's bearing), from what the host already holds.
+          states: h3.states, config: h3.config, bearing: h3.settings.fabric_bearing_deg,
+          saveNorth: typeof h3.saveNorth === "function" ? h3.saveNorth : null,
+          // Taps and holds act through the host's own use api (the flat
+          // map's), and motion reads quiet after a restart as it does here.
+          useApi: typeof h3.useApi === "function" ? h3.useApi : null,
+          haStartedMs: Date.parse(host.model && host.model.ha_started_at) || 0,
+          // The 3D file (house3d_get), read through the host; edit (its
+          // Save, house3d_edit) only where the host lets lights be placed.
+          load: typeof h3.load === "function" ? h3.load : null,
+          edit: typeof h3.edit === "function" ? h3.edit : null,
+          // Rain and snow, and the Showcase look (P8): the flat map's own
+          // weather inputs with Live Aboard's Rain and snow switch, and the
+          // Showcase theme this map shows with "Use the Atlas's Showcase
+          // look". The view decides what they draw.
+          weather: host.weather && host.weather.settings ? host.weather : null, weather3d: h3.settings.atlas_3d_weather,
+          showcase3d: h3.settings.atlas_3d_showcase,
+          showcase: { key: host.showcase ? (host.showcaseTheme || "classic") : "classic",
+                      theme: (host.showcase && SHOWCASE_THEMES[host.showcaseTheme]) || SHOWCASE_THEMES.classic },
+          // Mapping → Furnish (P2): the Furnish tool open, what its flows and
+          // "This is a device…" need of the host, and the floor chips a piece
+          // moved up or down a floor takes along.
+          furnish: h3.furnish === true ? { callWS: typeof h3.callWS === "function" ? h3.callWS : null,
+            toast: typeof h3.toast === "function" ? h3.toast : null, settings: h3.settings, entities: h3.entities || null } : null,
+          setTopFloor: (fid) => la3dTopFloor(fid),
+          // P5: furniture that is a device follows a renamed entity (the
+          // registry the Atlas already reads), and the emergency lights are
+          // outlined while the Atlas's test runs.
+          entities: h3.entities || null, regIds: h3.regIds || null, emergency: h3.emergency || null,
+          // P6: the people layer, only while Show people is on: the live
+          // snapshot through the host (off, it is never read).
+          people: h3.settings.atlas_3d_people === true && h3.people ? h3.people : null,
+          onTouch: () => { if (la3dCloseDrawer) la3dCloseDrawer(); } });
+      } catch (_) { /* attach counts its own failures; the flat map stays */ }
+    }
+    for (const paint of la3dPaints) paint();
+  };
+  // A piece moved up or down a floor (Furnish): its floor becomes the top one
+  // showing, as its floor chip would make it, so you see where it went.
+  const la3dTopFloor = (fid) => {
+    const idx = isoPos.findIndex(p => p === _frame.levelOf(String(fid)));
+    if (idx < 0 || idx === view.focusIdx) return;
+    view.focusIdx = idx;
+    resetFocusCtl(idx);
+    for (const b of mapCard.querySelectorAll("button.lv-chipbtn.floor")) if (b._floorIdx !== undefined) b.classList.toggle("on", b._floorIdx === idx);
+    rebuildISO();
+  };
+  const pick3d = (on) => {
+    // Unsaved 3D edits: the view asks first, in the view, and carries on
+    // through the newest card's switch once they are saved or discarded.
+    if (!on) {
+      const s = la3dSlot();
+      if (s && s.holdLeave && s.holdLeave(() => (_la3dPickers.get(h3.slot) || pick3d)(false))) return;
+    }
+    _la3dPick(h3.slot, on);
+    if (!on) {
+      const s = la3dSlot();
+      if (s) s.detach();
+      // The flat map comes back where it was left.
+      if (view.scrollLeft !== undefined) isoDiv.scrollLeft = view.scrollLeft;
+      if (view.scrollTop !== undefined) isoDiv.scrollTop = view.scrollTop;
+    }
+    mount3d();
+  };
+  // Greyed for no WebGL or too slow: a tap tries once more. What was kept is
+  // forgotten, and a screen's view that failed is made afresh (its failure
+  // is kept for the page load); failing again, the reason is back. An error
+  // or a lost context still says to reload.
+  const la3dRetry = () => {
+    if (!_LA_KEEP.includes(la3dWhy())) return;
+    _laForget();
+    if (_LA) for (const k of _la3dPickers.keys()) if (_LA.liveAboardSlot(k).failed) _LA.releaseLiveAboardSlot(k);
+    pick3d(true);
+  };
+  if (h3) _la3dPickers.set(h3.slot, pick3d);
+
   // Semantic zoom (use surface): the codes leave the drawing below 100% and
   // come back above it, so a zoom change across that line is a rebuild, not
   // just a CSS width. The builder always shows codes (host.codeChip unset).
@@ -2849,6 +3061,7 @@ export function buildLightsMapCard(hostIn){
     mountWeather(svgStr);
     applyZoom();
     host.onHexesBuilt(isoDiv, rebuildISO);
+    if (h3) mount3d();
   };
   // Pinch on the drawing zooms about the fingers; one finger pans (the stage
   // scrolls). Wired once per card — the stage element outlives rebuilds.
@@ -3272,6 +3485,29 @@ export function buildLightsMapCard(hostIn){
       applyZoom();
     } }, "+"),
   ]));
+  // The Map / 3D switch, right beside the zoom (only while the 3D house is on).
+  if (h3) {
+    // Why 3D cannot show, said in the page beside the greyed button (a
+    // tooltip never shows on touch, and a disabled button takes no focus).
+    // A tap on either tries once more (la3dRetry).
+    const whyId = `la3d-why-${h3.slot}`;
+    const whyEl = el("span", { id: whyId, "data-la3d-why": "", role: "note", onclick: () => la3dRetry(),
+      style: "display:none;align-self:center;padding:0 8px;font-size:11px;line-height:1.25;opacity:.85;max-width:240px;white-space:normal;cursor:pointer" });
+    const mapB = el("button", { onclick: () => pick3d(false) }, "Map");
+    const d3B = el("button", { onclick: () => { if (!la3dWhyNot()) pick3d(true); else la3dRetry(); } }, "Live Aboard");
+    ctrlRow.appendChild(el("span", { class: "lv-zoomseg", "data-la3d-switch": "" }, [mapB, d3B, whyEl]));
+    la3dPaints.push(() => {
+      const on = la3dOn(), why = la3dWhyNot(), lit = "background:rgba(82,183,136,.24);color:#e8f0ea";
+      mapB.setAttribute("aria-pressed", String(!on)); mapB.style.cssText = h3.furnish === true ? "display:none" : on ? "" : lit;
+      mapB.setAttribute("title", "The flat map");
+      d3B.setAttribute("aria-pressed", String(on)); d3B.style.cssText = on ? lit : "";
+      d3B.setAttribute("title", why || "Live Aboard: the house you can walk around");
+      if (why) { d3B.setAttribute("aria-disabled", "true"); d3B.setAttribute("aria-describedby", whyId); d3B.style.opacity = "0.45"; }
+      else { d3B.removeAttribute("aria-disabled"); d3B.removeAttribute("aria-describedby"); }
+      whyEl.textContent = why;
+      whyEl.style.display = why ? "inline-block" : "none";
+    });
+  }
 
   // Garry, 2026-09-09: "all sliders need a ? to bring up a card that
   // completely describes their function" — this row had none at all
@@ -3599,6 +3835,26 @@ export function buildLightsMapCard(hostIn){
       rail.appendChild(b);
     }
     for (const a of host.railActions || []) rail.appendChild(railBtn(a.icon, a.title, a.onclick));
+    // The Map / 3D switch in the rail (the 3D house only): lit while 3D shows.
+    if (h3) {
+      // Greyed when 3D cannot show: a tap opens the view drawer, where the
+      // switch says why in the page; tapped again, it tries once more.
+      const b3 = railBtn("🏠", "", () => {
+        if (!la3dWhyNot()) pick3d(!la3dOn());
+        else if (drawers.view && view.drawer !== "view") setDrawer("view");
+        else la3dRetry();
+      });
+      b3.setAttribute("data-la3d-switch", "");
+      b3.style.cssText = "font-size:12px;font-weight:700;padding:0;white-space:nowrap";
+      rail.appendChild(b3);
+      la3dPaints.push(() => {
+        const on = la3dOn(), why = la3dWhyNot();
+        b3.classList.toggle("on", on); b3.style.opacity = why ? "0.45" : "";
+        if (why) b3.setAttribute("aria-disabled", "true"); else b3.removeAttribute("aria-disabled");
+        b3.setAttribute("title", why || (on ? "Back to the flat map" : "Live Aboard"));
+      });
+      la3dCloseDrawer = () => { if (view.drawer) setDrawer(view.drawer); };
+    }
     rail.appendChild(railBtn(view.railHidden ? "›" : "‹", view.railHidden ? "Show the controls" : "Hide the controls", () => {
       view.railHidden = !view.railHidden;
       if (view.railHidden && view.drawer) setDrawer(view.drawer);

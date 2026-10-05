@@ -619,6 +619,7 @@ export function render(ctx){
         "padspan_bright.movement_history": "Movement",
         "padspan_bright.traceback": "Traceback",
         "padspan_bright.object_history": "Object History",
+        "padspan_bright.house3d": "Live Aboard",
       };
       return map[k] || k.replace("padspan_bright.", "");
     };

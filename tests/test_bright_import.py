@@ -18,7 +18,7 @@ import pytest
 from custom_components.padspan_bright import bright_import as bi
 from custom_components.padspan_bright.const import (
     DATA_FABRIC, DATA_MAPS, DATA_MODEL, DATA_SETTINGS, DOMAIN,
-    FABRIC_STORE_KEY, MAPS_STORE_KEY, MODEL_STORE_KEY, SETTINGS_STORE_KEY,
+    FABRIC_STORE_KEY, HOUSE3D_STORE_KEY, MAPS_STORE_KEY, MODEL_STORE_KEY, SETTINGS_STORE_KEY,
 )
 
 
@@ -180,7 +180,8 @@ def test_refuses_a_non_empty_target_and_says_what_it_found(tmp_path):
     assert res["target_has"] == ["1 floor", "1 room"]
     assert "never merges" in res["message"]
     # Backed up FIRST (the plan's order), then refused; nothing written.
-    assert _backup_ok.calls and _backup_ok.calls[0][1] == [FABRIC_STORE_KEY, MODEL_STORE_KEY, MAPS_STORE_KEY, SETTINGS_STORE_KEY]
+    assert _backup_ok.calls and _backup_ok.calls[0][1] == [FABRIC_STORE_KEY, MODEL_STORE_KEY, MAPS_STORE_KEY, SETTINGS_STORE_KEY,
+                                                         HOUSE3D_STORE_KEY]   # Live Aboard's file is a house store too
     assert _read_target(tmp_path, FABRIC_STORE_KEY) is None
     assert _read_target(tmp_path, SETTINGS_STORE_KEY) is None
     assert h.tasks == []
@@ -291,3 +292,80 @@ def test_the_wire_and_the_card():
     health = (root / "www" / "padspan-bright" / "views" / "health.js").read_text(encoding="utf-8")
     assert "padspan_bright/bright_import_status" in health and "padspan_bright/bright_import\"" in health
     assert "never merges" in health
+
+
+def test_an_import_drops_the_stale_3d_house_store(tmp_path):
+    """Live Aboard's store is loaded on first use and a reload keeps it, so an
+    import that brings a 3D-house file must drop the cached one; the next use
+    reads the imported file (house3d_store.async_get_store)."""
+    from custom_components.padspan_bright.const import DATA_HOUSE3D
+    imported = {"schema": 1, "pieces": {"fur_9": {"id": "fur_9", "recipe": {"kind": "bed"}}}}
+    _write_bright(tmp_path, "house3d", imported)
+    h = _hass(tmp_path)
+    h.data[DOMAIN][DATA_HOUSE3D] = SimpleNamespace(data={"schema": 1, "pieces": {}})   # stale
+    _backup_ok.calls.clear()
+    res = _run(bi.async_import(h, _backup_ok))
+    assert res["ok"] is True and "house3d" in res["imported"], res
+    assert DATA_HOUSE3D not in h.data[DOMAIN], "the stale copy is gone"
+    assert _read_target(tmp_path, HOUSE3D_STORE_KEY) == imported
+
+
+def test_an_import_keeps_what_this_house_shared_to_the_library(tmp_path):
+    """A target with no furniture is empty, but the owner tokens of what it
+    shared are the only way to withdraw those pieces: they stay
+    (house3d_library.carried_over), and Bright's furniture comes in."""
+    shared = {"prefix": "abcdef", "submissions": {"sub_abcdef0000000001": {
+        "owner_token": "0123456789abcdef0123456789abcdef", "library_id": "lib_000000000001"}}}
+    target = tmp_path / ".storage" / HOUSE3D_STORE_KEY
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"version": 1, "key": HOUSE3D_STORE_KEY, "data": {
+        "schema": 1, "pieces": {}, "library": {"terms_version": 1, **shared, "pending_shares": [
+            {"submission_id": "sub_abcdef0000000001", "recipe": {"kind": "sofa"}}]}}}), encoding="utf-8")
+    imported = {"schema": 1, "pieces": {"fur_9": {"id": "fur_9", "recipe": {"kind": "bed"}}}, "library": {}}
+    _write_bright(tmp_path, "house3d", imported)
+    res = _import(_hass(tmp_path), _backup_ok)
+    assert res["ok"] is True and "house3d" in res["imported"], res
+    assert _read_target(tmp_path, HOUSE3D_STORE_KEY) == {**imported, "library": {**shared, "pending_shares": []}}
+
+
+
+# ── Live Aboard's furniture (P2) ──────────────────────────────────────────────
+
+_FURNITURE = {"schema": 1, "pieces": {"fur_1a2b3c4d": {"id": "fur_1a2b3c4d", "recipe": {"kind": "sofa"}},
+                                      "fur_00000001": {"id": "fur_00000001", "recipe": {"kind": "bed"}}}}
+
+
+def test_target_contents_counts_the_furniture():
+    assert bi.target_contents(None, None, None, _FURNITURE) == ["2 pieces of furniture"]
+    one = {"pieces": {"fur_1a2b3c4d": {}}}
+    assert bi.target_contents(_HOUSE_FABRIC, None, None, one)[-1] == "1 piece of furniture"
+    assert bi.target_contents(None, None, None, {"schema": 1, "pieces": {}, "lights": {"light.a": {"z_m": 1}}}) == []
+    assert bi.target_contents(None, None, None, {"schema": 2, "pieces": [{"id": "fur_1"}]}) == ["1 piece of furniture"]
+
+
+def test_furniture_alone_makes_the_target_not_empty_even_before_anything_loaded_it(tmp_path):
+    """A house whose floors were deleted can still hold furniture: the import
+    would put another house under it. Counted from the file itself when no
+    one has loaded the 3D house yet; the status never loads it."""
+    from custom_components.padspan_bright.const import DATA_HOUSE3D
+    _write_bright(tmp_path, "fabric", _HOUSE_FABRIC)
+    target = tmp_path / ".storage" / HOUSE3D_STORE_KEY
+    target.write_text(json.dumps({"version": 1, "key": HOUSE3D_STORE_KEY, "data": _FURNITURE}), encoding="utf-8")
+    h = _hass(tmp_path)
+    st = _run(bi.async_status(h))
+    assert st["target_has"] == ["2 pieces of furniture"]
+    assert DATA_HOUSE3D not in h.data[DOMAIN], "the status reads the file; it never loads the store"
+    res = _run(bi.async_import(h, _backup_ok))
+    assert res["ok"] is False and res["error"] == "target_not_empty" and res["target_has"] == ["2 pieces of furniture"]
+    assert _read_target(tmp_path, FABRIC_STORE_KEY) is None and _read_target(tmp_path, HOUSE3D_STORE_KEY) == _FURNITURE
+    h.data[DOMAIN][DATA_HOUSE3D] = SimpleNamespace(data={"schema": 1, "pieces": {}})   # loaded and since emptied
+    assert _run(bi.async_status(h))["target_has"] == [], "a loaded store is the truth, not the file"
+
+
+def test_the_status_says_how_much_furniture_bright_brings(tmp_path):
+    _write_bright(tmp_path, "fabric", _HOUSE_FABRIC)
+    _write_bright(tmp_path, "house3d", _FURNITURE)
+    st = _run(bi.async_status(h := _hass(tmp_path)))
+    assert st["source"]["has"][-1] == "2 pieces of furniture" and st["target_has"] == []
+    res = _import(h, _backup_ok)
+    assert res["ok"] is True and _read_target(tmp_path, HOUSE3D_STORE_KEY) == _FURNITURE
