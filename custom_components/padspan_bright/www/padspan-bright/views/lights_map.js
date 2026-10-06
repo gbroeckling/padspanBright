@@ -739,6 +739,8 @@ export function createUndoStack(limit = 50){
     peekUndo(){ return past.length ? past[past.length - 1] : null; },
     peekRedo(){ return future.length ? future[future.length - 1] : null; },
     clear(){ past.length = 0; future.length = 0; },
+    // Every step kept, Undo's and Redo's alike (to amend them in place).
+    forEach(fn){ past.forEach(fn); future.forEach(fn); },
     get canUndo(){ return past.length > 0; },
     get canRedo(){ return future.length > 0; },
   };
@@ -824,6 +826,8 @@ export function wireStageTouch(stage, view, onZoom){
 //   opts.isDragging()  true while a marker drag is in flight: no HUD churn
 //   opts.onPickUnder(eid)  the "Under" button
 //   opts.underTitle / opts.stackHint (null = none) / opts.roomLine(room, n)
+//   opts.heightOf(eid)  its height above its floor (Live Aboard's, on its
+//                       placement record) or null: "2.40 m up" by its name
 export function wireHoverHud(isoDiv, opts){
   const svg = isoDiv.querySelector("svg");
   if (!svg) return () => [];
@@ -878,7 +882,9 @@ export function wireHoverHud(isoDiv, opts){
 
   const label = (eid) => {
     const l = lightsByEid[eid];
-    return l ? `${l.code ? l.code + " · " : ""}${l.friendly_name || eid}` : eid;
+    const name = l ? `${l.code ? l.code + " · " : ""}${l.friendly_name || eid}` : eid;
+    const z = typeof opts.heightOf === "function" ? opts.heightOf(eid) : null;
+    return z === null || z === undefined ? name : `${name} · ${(Math.round(z * 100) / 100).toFixed(2)} m up`;
   };
   // Pin the box to the top-left of the VISIBLE part of the stage. The anchor
   // is sticky within the stage's own scroll box, but the PAGE scrolls too,
@@ -983,6 +989,22 @@ function _tapAgain(eid, e){
   const again = !!_lastTap && _lastTap.eid === eid && t - _lastTap.t <= 420 && Math.hypot(e.clientX - _lastTap.x, e.clientY - _lastTap.y) <= 44;
   _lastTap = again ? null : { eid, t, x: e.clientX, y: e.clientY };
   return again;
+}
+/** A placed device's height above its floor for Live Aboard (z_m, or null
+ *  for its default), as Live Aboard draws it: Mapping's unsaved Height-row
+ *  one (a `draft` entry it marked _z) first, else its record's in
+ *  `committed` (light_positions_m) when decided (a height, or Default
+ *  chosen: null), else the 3D file's (`file`: {lights, devices}, the entry
+ *  in `section`; one never set on the record, Live Aboard still reads it
+ *  there). The one lookup for the Heights list (atlas_heights.js) and the
+ *  hover box. */
+export function heightNow(eid, committed, draft, file, section){
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const d = draft && draft[eid];
+  if (d && d._z) return num(d.z_m);
+  const c = (committed || {})[eid];
+  if (c && typeof c === "object" && Object.prototype.hasOwnProperty.call(c, "z_m")) return num(c.z_m);
+  return num((((file || {})[section] || {})[eid] || {}).z_m);
 }
 export function wireUseSurface(isoDiv, api){
   const q = (sel) => isoDiv.querySelectorAll(sel);
@@ -2935,6 +2957,11 @@ export function buildLightsMapCard(hostIn){
           // Save, house3d_edit) only where the host lets lights be placed.
           load: typeof h3.load === "function" ? h3.load : null,
           edit: typeof h3.edit === "function" ? h3.edit : null,
+          // Its heights go on the placement records (fabric_light_height_set),
+          // given with edit, on the same gate as placing a light.
+          heights: typeof h3.heights === "function" ? h3.heights : null,
+          // The placement records as saved (Mapping draws its unsaved ones over them).
+          records: typeof h3.records === "function" ? h3.records : null,
           // Rain and snow, and the Showcase look (P8): the flat map's own
           // weather inputs with Live Aboard's Rain and snow switch, and the
           // Showcase theme this map shows. The view decides what they draw.
@@ -2984,6 +3011,10 @@ export function buildLightsMapCard(hostIn){
           // while "Hide device codes" is on), and ⚙'s zoom label to keep up.
           classFilter: host.classFilter || null, floodLatches: host.floodLatches || {},
           codes: host.hideDeviceCodes ? null : { showcase: !!host.showcase },
+          // The wall panel and its people (live_aboard_panel.js): the settings
+          // read there (who carries what, the return to the home view), and
+          // Show people / Show tags & scanners from inside the view (admins).
+          settings3d: h3.settings, admin: h3.admin === true, saveSetting: typeof h3.saveSetting === "function" ? h3.saveSetting : null,
           onZoom: (pct) => { if (la3dZoomLbl && la3dOn()) la3dZoomLbl.textContent = `${pct}%`; },
           onTouch: () => { if (la3dCloseDrawer) la3dCloseDrawer(); } });
       } catch (_) { /* attach counts its own failures; the flat map stays */ }
@@ -3099,6 +3130,7 @@ export function buildLightsMapCard(hostIn){
       stage: isoDiv, frame: _frame, frameKey: `${view.floorGap}|${view.horizGap}`, model: host.model,
       states: host.house3d.states || {}, file: abData,
       people: abSet.atlas_3d_people === true, tags: abSet.atlas_3d_tags === true, hideNames: !codesShown || !!host.hideDeviceCodes,
+      carries: abSet.atlas_3d_carries || null,
       focused: (z) => fz === null || (Array.isArray(fz) ? fz.includes(z) : fz === z), outdoor: isOutdoorFloorId,
       home: () => { const rn = isoDiv.getRootNode ? isoDiv.getRootNode() : null; return rn && rn.host ? rn : document.body; } }, snapshot);
   };
@@ -3212,7 +3244,9 @@ export function buildLightsMapCard(hostIn){
         automorphHardness: view.automorphLiveHardness !== undefined ? view.automorphLiveHardness : (host.automorphHardness || 0),
         automorphStyle: host.automorphStyle || "glow",
         automorphSubtlety: view.automorphLiveSubtlety !== undefined ? view.automorphLiveSubtlety : (host.automorphSubtlety || 0),
-        underlay: abData && abFurn() ? _AB.underlayOf(abData) : null });
+        underlay: abData && abFurn() ? _AB.underlayOf(abData) : null,
+        // Live Aboard's own hinge, swing, type and Shown for a door, when it is on.
+        doorOpenings: abData && abData.openings && typeof abData.openings === "object" ? abData.openings : null });
     isoDiv.innerHTML = svgStr;
     // People, tags and scanners over it, then the newest positions (while
     // the flat map shows and the page is in sight).

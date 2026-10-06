@@ -90,6 +90,8 @@ def test_off_means_no_import(card) -> None:
     assert {"views/live_aboard_strip.js", "views/live_aboard_runs.js"} <= set(card["loaded"]), card["loaded"]
     # So is motion (live_aboard_motion.js, 2026-10-05).
     assert "views/live_aboard_motion.js" in set(card["loaded"]), card["loaded"]
+    # So is the house itself: each storey's floor, the roof, stairs' openings (live_aboard_storey.js, 2026-10-05).
+    assert "views/live_aboard_storey.js" in set(card["loaded"]), card["loaded"]
 
 
 def test_off_means_the_3d_file_is_never_read_or_written(card) -> None:
@@ -178,7 +180,8 @@ def test_the_3d_module_is_imported_once_behind_the_switch_and_cache_busted() -> 
                                                   "live_aboard_marks.js",       # the Atlas's leak sensors, locks and codes: reads the house as the view does
                                                   "live_aboard_motion.js",      # motion: reads the house as the view does
                                                   "live_aboard_people.js",    # the Furnish tab's people screen (P6)
-                                                  "atlas_aboard.js"):         # the flat Atlas's people, tags, kinds and furniture (2026-10-05)
+                                                  "atlas_aboard.js",          # the flat Atlas's people, tags, kinds and furniture (2026-10-05)
+                                                  "atlas_heights.js"):        # Mapping's Height row and Heights list: Live Aboard's defaults (2026-10-05)
             continue
         code = "\n".join(ln for ln in _js(p).splitlines() if not ln.lstrip().startswith(("//", "*")))
         if p.name == "settings.js":
@@ -252,7 +255,10 @@ def test_the_compass_save_writes_the_bearing_alone() -> None:
     assert 'saveNorth: async (b)=>{' in block
     assert 'this._hass.callWS({ type:"padspan_bright/settings_set", fabric_bearing_deg: b })' in block
     # (P6: and Show people's read of Overview's live snapshot, only while it is on.)
-    assert block.count("callWS(") == 4, "the report's, the Save's, the 3D file's read and Show people's, nothing else"
+    # (And the wall panel's: Show people / Show tags & scanners from inside the
+    # view, the one key it is handed and nothing else.)
+    assert block.count("callWS(") == 5, "the report's, the Save's, the 3D file's read, Show people's and the switches', nothing else"
+    assert 'await this._hass.callWS({ type:"padspan_bright/settings_set", [key]: v });' in block
     assert 'people: { read: ()=>this._hass.callWS({ type:"padspan_bright/live_snapshot" })' in block
     assert 'load: ()=>this._hass.callWS({ type:"padspan_bright/house3d_get" }),' in block
     maps = _js(_VIEWS / "maps.js")
@@ -263,7 +269,14 @@ def test_the_compass_save_writes_the_bearing_alone() -> None:
     # (contracts §4) and "This is a device…", only on Mapping → Furnish. The
     # fifth is Show people's read of the live snapshot (P6): Mapping does not
     # poll it, so the view reads it, only while Show people is on.
-    assert "settingsSet(" not in mblock and mblock.count("wsCall(") == 5
+    # The sixth is the wall panel's switches (Show people, Show tags & scanners).
+    # The editor's heights go on the placement records (2026-10-05: the Atlas's
+    # own fabric_light_height_set, on the same gate as edit, _laHeightsPut).
+    assert "settingsSet(" not in mblock and mblock.count("wsCall(") == 6
+    assert 'ctx.actions.wsCall("padspan_bright/settings_set", { [key]: v })' in mblock
+    assert "heights: paid && !preview ? _laHeightsPut(ctx, mapState) : null," in mblock
+    put = maps[maps.index("export function _laHeightsPut("):][:400]
+    assert 'ctx.actions.wsCall("padspan_bright/fabric_light_height_set", { heights })' in put
     assert 'read: () => ctx.actions.wsCall("padspan_bright/live_snapshot")' in mblock
     assert "callWS: (msg) => { const { type, ...rest } = msg || {}; return ctx.actions.wsCall(type, rest); }," in mblock
     assert 'load: () => ctx.actions.wsCall("padspan_bright/house3d_get"),' in mblock

@@ -335,7 +335,9 @@ export function createStrip(ctx){
     return RUNS.tidy({ pts, face, loop, ...(onOne ? { piece: onOne } : null) });
   }
   const defaultH = (F, eid = sel) => {
-    const k = kindOf(eid), ceil = ceilOf(F);
+    const k = kindOf(eid), ceil = ceilOf(F), e = entryOf(eid);
+    // Its own height (on its placement record, else the 3D file's) when it has one.
+    if (e && typeof e.z_m === "number" && Number.isFinite(e.z_m)) return Math.max(0, Math.min(e.z_m, ceil - 0.05));
     return k === "cove" ? RUNS.chips(ceil)[4][2] : Math.min(HOUSE.mountHeight(HOUSE.MOUNT[k] ? k : "strip", ceil), ceil - 0.05);
   };
   const faceFor = (eid = sel) => { const r = runOf(eid); return r ? r.face : RUNS.faceOf(kindOf(eid)); };
@@ -391,7 +393,7 @@ export function createStrip(ctx){
   /** "Round this room": the room's walls at the run's height (or the kind's). */
   function roundRoom(F, room){
     const run = placedOf(sel), h = run ? run.pts.reduce((s, q) => s + q[2], 0) / run.pts.length : defaultH(F);
-    const ops = F.pieces.map(P => P.pc).filter(pc => pc.kind === "door" || pc.kind === "window" || pc.kind === "open")
+    const ops = F.pieces.map(P => P.pc).filter(pc => pc.kind === "door" || pc.kind === "window" || pc.kind === "open" || pc.kind === "doorway")
       .map(pc => ({ kind: pc.kind, a: [pc.x0, pc.y0], b: [pc.x1, pc.y1], sill: pc.sill_m, head: pc.head_m }));
     const r = RUNS.roundRoom(RUNS.insetLoop(room.pts, 0.015), Math.min(h, ceilOf(F) - 0.012), ops, { ...opts, face: faceFor() });
     if (r.error) { ctx.hint(r.error, true); return; }

@@ -9,10 +9,12 @@
 // runs them for real (tests/js/live_aboard_draft.mjs).
 //
 // What the 3D file holds for the editor (house3d_store.py, "Data"):
-//   openings  "win_" / "door_" + 8 hex digits: a door or window drawn on a
-//             wall in 3D, a stretch of wall in fabric metres; any other key
-//             is a barrier's id, and holds that barrier's hinge, swing,
-//             sill and head in 3D only (the map is never written)
+//   openings  "win_" / "door_" / "doorway_" + 8 hex digits: a door, window
+//             or doorway (an opening with no door in it) drawn on a wall in
+//             3D, a stretch of wall in fabric metres; any other key is a
+//             barrier's id, and holds that barrier's hinge, swing, sill and
+//             head in 3D only (the map is never written). A door with no
+//             sensor is shown open, ajar or shut ("shown"; DOOR_SHOWN)
 //   lights    {z_m, kind, run}: a light's height above its floor, what it
 //             is (LIGHT_KIND: a pot, a valance, a lamp...) and where a strip
 //             or a string of lights really goes (the Strip tool,
@@ -39,7 +41,29 @@ export const WINDOW_SILL_M = 0.9, WINDOW_HEAD_M = 2.1, DOOR_HEAD_M = 2.03;
 export const GAP_MIN_M = 0.1;              // a window's least height, head over sill (the server's too)
 export const DOOR_LOW_M = 1.0;             // the lowest door the slider offers
 export const DOOR_MIN_HEAD_M = 0.5;        // the lowest door the server keeps, however low the ceiling
-export const OPENING_ID = /^(win|door)_[0-9a-f]{8}$/;
+export const OPENING_ID = /^(win|door|doorway)_[0-9a-f]{8}$/;
+// How a door with no sensor is shown (house3d_store.py DOOR_SHOWN); none
+// stored: ajar inside, shut on an outside wall (live_aboard_storey.js doorShown).
+export const DOOR_SHOWN = ["open", "ajar", "shut"];
+// What a door is and its options (house3d_store.py DOOR_TYPES and the rest;
+// live_aboard_storey.js draws each): kept on an added door and a barrier's
+// entry alike, each only when it is one the server keeps.
+export const DOOR_TYPES = ["hinged", "double", "sliding", "barn", "pocket", "bifold", "overhead", "rollup", "tiltup", "gate"];
+export const DOOR_SLIDES = ["left", "right", "both"], DOOR_FACES = ["in", "out"], DOOR_PANELS = [2, 4];
+const ENTITY = /^(?!.+__)(?!_)[\da-z_]+(?<!_)\.(?!_)[\da-z_]+(?<!_)$/;
+/** The door type keys of entry v the server would keep. */
+export function doorTypeKeys(v){
+  const o = {};
+  if (!v || typeof v !== "object") return o;
+  if (DOOR_TYPES.includes(v.type)) o.type = v.type;
+  if (DOOR_SLIDES.includes(v.slide)) o.slide = v.slide;
+  if (DOOR_FACES.includes(v.face)) o.face = v.face;
+  if (Number.isInteger(v.panels) && v.panels >= DOOR_PANELS[0] && v.panels <= DOOR_PANELS[1]) o.panels = v.panels;
+  if (typeof v.glass === "boolean") o.glass = v.glass;
+  if (typeof v.link === "string" && v.link.length <= 255 && ENTITY.test(v.link)) o.link = v.link;
+  return o;
+}
+const ID_OF = { door: "door", window: "win", doorway: "doorway" };
 export const FILE_SCHEMA = 1;              // the 3D file this version writes (house3d_store.py SCHEMA)
 export const SECTIONS = ["openings", "lights", "devices", "pieces", "figures"];
 // A light's kind in the file (house3d_store.py _KIND): a short word. One this
@@ -58,23 +82,23 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 export const mm = (v) => Math.round(v * 1000) / 1000;
 const copy = (x) => JSON.parse(JSON.stringify(x));
 const canon = (o) => JSON.stringify(Object.keys(o).sort().map(k => [k, o[k]]));
-export const minWidth = (kind) => (kind === "door" ? DOOR_MIN_M : WINDOW_MIN_M);
+export const minWidth = (kind) => (kind === "window" ? WINDOW_MIN_M : DOOR_MIN_M);   // a doorway: a door's
 /** A length as the editor shows it. */
 export const metres = (v) => `${(Math.round(v * 100) / 100).toFixed(2)} m`;
 
-/** A fresh id for a door or window drawn in 3D. */
+/** A fresh id for a door, window or doorway drawn in 3D. */
 export function newOpeningId(kind, rand){
   const r = typeof rand === "function" ? rand
     : (globalThis.crypto && globalThis.crypto.getRandomValues
       ? () => globalThis.crypto.getRandomValues(new Uint8Array(1))[0] / 256 : Math.random);
   let hex = "";
   for (let i = 0; i < 8; i++) hex += Math.floor(r() * 16).toString(16);
-  return `${kind === "door" ? "door" : "win"}_${hex}`;
+  return `${ID_OF[kind] || "win"}_${hex}`;
 }
 
 // ── The file, as the editor owns it ──────────────────────────────────────────
-/** A door or window drawn in 3D, with exactly the fields the file keeps for
- *  its kind (the kind is its id's), or null when the record is not one. */
+/** A door, window or doorway drawn in 3D, with exactly the fields the file
+ *  keeps for its kind (the kind is its id's), or null when the record is not one. */
 export function addedOf(id, v){
   if (!OPENING_ID.test(String(id)) || !v || typeof v !== "object") return null;
   const pt = (p) => (Array.isArray(p) && p.length === 2 && num(p[0]) !== null && num(p[1]) !== null ? [p[0], p[1]] : null);
@@ -85,8 +109,10 @@ export function addedOf(id, v){
     return { kind: "window", floor_id: fl, a_m: a, b_m: b,
              sill_m: num(v.sill_m) ?? WINDOW_SILL_M, head_m: num(v.head_m) ?? WINDOW_HEAD_M };
   }
+  if (String(id).startsWith("doorway_")) return { kind: "doorway", floor_id: fl, a_m: a, b_m: b, head_m: num(v.head_m) ?? DOOR_HEAD_M };
   return { kind: "door", floor_id: fl, a_m: a, b_m: b, head_m: num(v.head_m) ?? DOOR_HEAD_M,
-           hinge: v.hinge === "right" ? "right" : "left", swing: v.swing === "out" ? "out" : "in" };
+           hinge: v.hinge === "right" ? "right" : "left", swing: v.swing === "out" ? "out" : "in",
+           ...(DOOR_SHOWN.includes(v.shown) ? { shown: v.shown } : null), ...doorTypeKeys(v) };
 }
 /** May this version write the file (house3d_store.py writable)? Only a
  *  schema that is a whole number up to FILE_SCHEMA, or none: a newer
@@ -114,6 +140,8 @@ export function ownedOf(data){
     const o = {};
     if (v.hinge === "left" || v.hinge === "right") o.hinge = v.hinge;
     if (v.swing === "in" || v.swing === "out") o.swing = v.swing;
+    if (DOOR_SHOWN.includes(v.shown)) o.shown = v.shown;
+    Object.assign(o, doorTypeKeys(v));
     for (const f of ["sill_m", "head_m"]) if (num(v[f]) !== null) o[f] = v[f];
     if (Object.keys(o).length) out.openings[k] = o;
   }
@@ -206,6 +234,9 @@ export function createDraft(base){
     get dirty(){ return changesOf(d.base, d.cur) !== null; },
     /** Saved: what was saved is the new base, and the history starts again. */
     rebase(b){ d.base = copy(b); d.cur = copy(b); d.undo = []; d.redo = []; d.group = null; },
+    /** Part of it saved: the starting copy becomes `b`; the draft, Undo and
+     *  Redo stay, so what is still unsaved is still there to save. */
+    setBase(b){ d.base = copy(b); },
     /** Entries gone from the file (removed elsewhere): out of the base, the
      *  draft and every Undo and Redo step, so no step brings one back. */
     forget(section, ids){
@@ -309,13 +340,13 @@ export function runStops(run, pieces){
   }
   return [...new Set(stops.map(mm))].sort((a, b) => a - b);
 }
-/** The doors, windows and gaps already on the run, sensor ones included:
- *  [{lo, hi, id, kind}] in metres along it. id: a 3D one's id, else its
- *  barrier's id. */
+/** The doors, windows, doorways and gaps already on the run, sensor ones
+ *  included: [{lo, hi, id, kind}] in metres along it. id: a 3D one's id,
+ *  else its barrier's id. */
 export function runOpenings(run){
   const out = [];
   for (const pc of run.pcs) {
-    if (pc.kind !== "door" && pc.kind !== "window" && pc.kind !== "open") continue;
+    if (pc.kind !== "door" && pc.kind !== "window" && pc.kind !== "open" && pc.kind !== "doorway") continue;
     const a = along(run, pc.x0, pc.y0), b = along(run, pc.x1, pc.y1);
     out.push({ lo: Math.min(a, b), hi: Math.max(a, b), id: pc.added || (pc.barrier && pc.barrier.id) || null, kind: pc.kind });
   }
@@ -390,26 +421,26 @@ export function endsMm(a, b, least){
  *  heightLimits; its ends to the millimetre (endsMm). */
 export function newOpening(kind, floorId, a, b, ceil){
   const [pa, pb] = endsMm(a, b, minWidth(kind));
+  if (kind === "doorway") return { kind, floor_id: floorId, a_m: pa, b_m: pb, ...openingHeights({ kind, head_m: DOOR_HEAD_M }, ceil) };
   if (kind === "door") {
     return { kind: "door", floor_id: floorId, a_m: pa, b_m: pb, ...openingHeights({ kind, head_m: DOOR_HEAD_M }, ceil),
              hinge: "left", swing: "in" };
   }
   return { kind: "window", floor_id: floorId, a_m: pa, b_m: pb, ...openingHeights({ kind, sill_m: WINDOW_SILL_M, head_m: WINDOW_HEAD_M }, ceil) };
 }
-/** Door ↔ window: the same stretch of wall under a new id of the other kind
- *  (the id says the kind), with that kind's defaults; {error} when it is
- *  too narrow to be one. */
-export function switchKind(id, rec, ceil){
-  const to = rec.kind === "door" ? "window" : "door";
+/** Door ↔ window (or `to`: a door, a window or a doorway): the same stretch
+ *  of wall under a new id of that kind (the id says the kind), with that
+ *  kind's defaults; {error} when it is too narrow to be one. */
+export function switchKind(id, rec, ceil, to = rec.kind === "door" ? "window" : "door"){
   const w = Math.hypot(rec.b_m[0] - rec.a_m[0], rec.b_m[1] - rec.a_m[1]);
   if (w < minWidth(to) - EPS) return { error: `A ${to} is at least ${minWidth(to).toFixed(1)} m wide` };
-  return { id: `${to === "door" ? "door" : "win"}_${String(id).split("_")[1]}`, rec: newOpening(to, rec.floor_id, rec.a_m, rec.b_m, ceil) };
+  return { id: `${ID_OF[to] || "win"}_${String(id).split("_").pop()}`, rec: newOpening(to, rec.floor_id, rec.a_m, rec.b_m, ceil) };
 }
 /** A window's sill and head, or a door's head, kept in order within
  *  heightLimits: what a slider may set. */
 export function openingHeights(rec, ceil){
   const lim = heightLimits(ceil);
-  if (rec.kind === "door") return { head_m: mm(clamp(num(rec.head_m) ?? DOOR_HEAD_M, lim.doorLow, lim.doorHigh)) };
+  if (rec.kind === "door" || rec.kind === "doorway") return { head_m: mm(clamp(num(rec.head_m) ?? DOOR_HEAD_M, lim.doorLow, lim.doorHigh)) };
   const sill = mm(clamp(num(rec.sill_m) ?? WINDOW_SILL_M, 0, lim.sill));
   const head = mm(clamp(num(rec.head_m) ?? WINDOW_HEAD_M, sill + GAP_MIN_M, lim.head));
   return { sill_m: sill, head_m: head };
@@ -467,7 +498,7 @@ export function spliceOpening(pieces, id, o){
   if (L < 0.03) return pieces;
   const ux = (b[0] - a[0]) / L, uy = (b[1] - a[1]) / L;
   const mine = { kind: o.kind, mat: null, barrier: null, added: id, sill_m: o.sill_m, head_m: o.head_m,
-                 override: o.kind === "door" ? { hinge: o.hinge, swing: o.swing } : null };
+                 override: o.kind === "door" ? { hinge: o.hinge, swing: o.swing, ...(o.shown ? { shown: o.shown } : null), ...doorTypeKeys(o) } : null };
   let hit = false;
   for (let k = 0; k < pieces.length; k++) {
     const W = pieces[k];
@@ -526,3 +557,99 @@ export const openingsSignature = (vd) => JSON.stringify(Object.keys((vd && vd.op
 /** What the heights of one section are drawn from (and a light's kind). */
 export const heightsSignature = (vd, section) => JSON.stringify(Object.keys((vd && vd[section]) || {}).sort()
   .map(k => [k, (vd[section][k] || {}).z_m, (vd[section][k] || {}).kind]));
+
+// ── Heights on the placement record (Garry, 2026-10-05) ─────────────────────
+// "Same dataset, just extra info": a placed device's height above its floor
+// lives on its one placement record (model.light_positions_m[eid].z_m: a
+// number, or null for the default for its kind, chosen; none when never set),
+// set with fabric_light_height_set, not in the 3D file. The view reads the
+// record first, then the 3D file (an older install's, or a device with no
+// record), then its kind's default; the editor's draft holds the records'
+// heights too, and Save sends each to where it lives: the heights the draft
+// changed to their records in one fabric_light_height_set, the rest to
+// house3d_edit (splitSave). The 3D file's own copy of a placed device's
+// height is left as it is: an older PadSpan reads its heights only there.
+const hasOwn = (o, k) => !!o && typeof o === "object" && Object.prototype.hasOwnProperty.call(o, k);
+/** {entity id: z_m, or null for Default chosen} for each placement record
+ *  that has its height decided. */
+export function recordHeights(model){
+  const pos = model && model.light_positions_m && typeof model.light_positions_m === "object" ? model.light_positions_m : {};
+  const out = {};
+  for (const k of Object.keys(pos)) {
+    if (!hasOwn(pos[k], "z_m")) continue;
+    const z = pos[k].z_m;
+    if (z === null) out[k] = null;
+    else if (num(z) !== null) out[k] = z;
+  }
+  return out;
+}
+/** The 3D file (ownedOf) as the view draws it: each record's height in the
+ *  entry of the section the view reads that device from (sectionOf(eid):
+ *  "lights" for a fixture, "devices" for anything else), over the file's
+ *  own; Default chosen on a record takes the file's height away. Nothing in
+ *  `records`: the file itself, untouched. */
+export function withRecordHeights(file, records, sectionOf){
+  const ids = Object.keys(records || {});
+  if (!ids.length) return file;
+  const out = { ...file, lights: { ...(file.lights || {}) }, devices: { ...(file.devices || {}) } };
+  for (const k of ids) {
+    const s = sectionOf(k) === "lights" ? "lights" : "devices";
+    const e = { ...(out[s][k] || {}) };
+    if (records[k] === null) delete e.z_m; else e.z_m = records[k];
+    if (Object.keys(e).length) out[s][k] = e; else delete out[s][k];
+  }
+  return out;
+}
+const withoutZ = (e) => { const o = { ...(e || {}) }; delete o.z_m; return o; };
+/** Save, split by where each thing lives: {heights, file}. heights: {entity
+ *  id: z_m, or null for the default} for each device with a placement record
+ *  (`placed`) whose height the draft changed from where it started (`base`,
+ *  the draft's starting copy): a height never touched is never sent, so a
+ *  newer one set elsewhere meanwhile stays. file: the draft's changes (`ch`,
+ *  changesOf) for house3d_edit, with a placed device's height left as the 3D
+ *  file has it (`file`, as read): a light's entry keeps the file's own copy,
+ *  a device's height entry is not sent. Either is null with nothing in it. */
+export function splitSave(file, ch, base, placed){
+  const has = (id) => (placed instanceof Set ? placed.has(id) : !!(placed && placed[id]));
+  const heights = {}, out = {};
+  for (const s of SECTIONS) {
+    const sec = ch && ch[s];
+    if (!sec) continue;
+    const keep = {};
+    for (const k of Object.keys(sec)) {
+      if ((s !== "lights" && s !== "devices") || !has(k)) { keep[k] = sec[k]; continue; }
+      const e = sec[k], z = num(e && e.z_m), z0 = num(base && base[s] && base[s][k] && base[s][k].z_m);
+      if (z !== z0) heights[k] = z;
+      const was = (file && file[s] && file[s][k]) || null, fz = num(was && was.z_m);
+      const want = { ...withoutZ(e), ...(fz !== null ? { z_m: fz } : null) };
+      if (s === "devices") {
+        // Anything a device's entry holds besides its height (a look) goes;
+        // its height in the file stays as it is (the server keeps a key it
+        // is not sent).
+        const rest = withoutZ(e);
+        if (Object.keys(rest).length && canon(withoutZ(was)) !== canon(rest)) keep[k] = rest;
+        continue;
+      }
+      // A light's entry is the editor's whole: what it is, its run, and the file's own height.
+      if (canon(was || {}) !== canon(want)) keep[k] = Object.keys(want).length ? want : null;
+    }
+    if (Object.keys(keep).length) out[s] = keep;
+  }
+  return { heights: Object.keys(heights).length ? heights : null, file: Object.keys(out).length ? out : null };
+}
+/** The draft's starting copy once `heights` ({entity id: z_m or null}, from
+ *  `ch`) are saved and the rest of `ch` is not: those heights as the records
+ *  now have them, everything else as it was. */
+export function baseWithHeights(base, ch, heights){
+  const out = copy(base || {});
+  for (const s of ["lights", "devices"]) {
+    for (const k of Object.keys((ch && ch[s]) || {})) {
+      if (!hasOwn(heights, k)) continue;
+      out[s] = out[s] || {};
+      const e = { ...(out[s][k] || {}) };
+      if (heights[k] === null) delete e.z_m; else e.z_m = heights[k];
+      if (Object.keys(e).length) out[s][k] = e; else delete out[s][k];
+    }
+  }
+  return out;
+}
