@@ -112,7 +112,7 @@ async def ws_factory_reset(hass: HomeAssistant, connection, msg) -> None:
         _live_settings = domain.get(DATA_SETTINGS)
         _keep_licence = {
             k: (_live_settings.data if _live_settings else {}).get(k, "")
-            for k in ("forensics_license_key", "forensics_license_expires", "license_is_trial")
+            for k in ("forensics_license_key", "forensics_license_expires", "license_is_trial", "license_tier")
         }
         # Vacation Mode's spans describe what is in HA's recorder, which a
         # PadSpan reset does not touch — a reset mid-vacation closes the span
@@ -276,16 +276,17 @@ async def ws_factory_reset(hass: HomeAssistant, connection, msg) -> None:
         _LOGGER.warning("Factory reset: movement — %s", e)
         errors.append(MOVEMENT_STORE_KEY)
 
-    # ── 9. TracebackStore — reset .frames to [] ──────────────────────────
+    # ── 9. TracebackStore — the whole history, segment files included ────
+    # It emptied only the old single file and the in-memory list: the daily
+    # segment files (the real history) stayed, and every movement came back
+    # on the next reload.
     try:
-        st = _St(hass, 1, TRACEBACK_STORE_KEY)
-        await st.async_save({"frames": []})
-        cleared += 1
         tb_obj = domain.get(DATA_TRACEBACK)
-        if tb_obj and hasattr(tb_obj, "frames"):
-            tb_obj.frames = []
-        elif tb_obj and hasattr(tb_obj, "data"):
-            tb_obj.data = {"frames": []}
+        if tb_obj is not None and hasattr(tb_obj, "async_replace"):
+            await tb_obj.async_replace([])
+        else:
+            await _St(hass, 1, TRACEBACK_STORE_KEY).async_save({"frames": []})
+        cleared += 1
     except Exception as e:
         _LOGGER.warning("Factory reset: traceback — %s", e)
         errors.append(TRACEBACK_STORE_KEY)
@@ -340,9 +341,41 @@ async def ws_factory_reset(hass: HomeAssistant, connection, msg) -> None:
         _LOGGER.warning("Factory reset: capture — %s", e)
         errors.append("padspan_bright.capture")
 
+    # ── 9c-9e. Device registry, Lost & Found, Forensics ──────────────────
+    # The screen promises "permanently delete ALL PadSpan data", "all BLE
+    # object labels and tag names" — but these three were left: the device
+    # registry put its labels straight back on every device after a reset
+    # (snapshot_builder copies a registry label onto the object), Lost & Found
+    # kept every last-seen room, and Forensics every session.
+    from .const import (  # noqa: PLC0415
+        DATA_DEVICE_REGISTRY, DATA_FORENSICS, DATA_LOST_AND_FOUND,
+        FORENSICS_STORE_KEY, LOST_AND_FOUND_STORE_KEY,
+    )
+    from .device_registry import DEVICE_REGISTRY_STORE_KEY  # noqa: PLC0415
+    for _key, _dkey, _empty, _reset in (
+        (DEVICE_REGISTRY_STORE_KEY, DATA_DEVICE_REGISTRY, {"version": 1, "devices": {}},
+         lambda o: (o._devices.clear(), o._index.clear(), o._ephemeral.clear())),
+        (LOST_AND_FOUND_STORE_KEY, DATA_LOST_AND_FOUND, {},
+         lambda o: o.records.clear()),
+        (FORENSICS_STORE_KEY, DATA_FORENSICS, {"addrs": {}},
+         lambda o: o.addrs.clear()),
+    ):
+        try:
+            await _St(hass, 1, _key).async_save(_empty)
+            cleared += 1
+            _obj = domain.get(_dkey)
+            if _obj is not None:
+                _reset(_obj)
+        except Exception as e:
+            _LOGGER.warning("Factory reset: %s — %s", _key, e)
+            errors.append(_key)
+
     # ── 10. Object history (plain dict, not a store class) ────────────────
     try:
-        st = _St(hass, 1, OBJECT_HISTORY_STORE_KEY)
+        # Through the snapshot builder's own Store when it has one: a save on
+        # that Store cancels its pending delayed save, which would otherwise
+        # write the pre-reset history back moments later.
+        st = domain.get("_obj_hist_store") or _St(hass, 1, OBJECT_HISTORY_STORE_KEY)
         await st.async_save({})
         cleared += 1
     except Exception as e:

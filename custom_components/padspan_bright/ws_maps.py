@@ -20,7 +20,6 @@ from .const import (
     DATA_MODEL,
     DEFAULT_FLOOR_ID,
     OUTSIDE_FLOOR_ID,
-    DATA_COORDINATOR,
     DATA_CALIBRATION,
     DATA_TRACEBACK,
 )
@@ -188,7 +187,7 @@ async def ws_maps_update(hass: HomeAssistant, connection, msg) -> None:
         _removed = _old_beacon_keys - _new_beacon_keys
         if _removed:
             try:
-                _coord = hass.data.get(DOMAIN, {}).get(DATA_COORDINATOR)
+                _coord = hass.data.get(DOMAIN, {}).get("presence_coordinator")
                 if _coord:
                     # Check if removed key still exists on another map
                     _all_map_keys: set[str] = set()
@@ -205,7 +204,7 @@ async def ws_maps_update(hass: HomeAssistant, connection, msg) -> None:
     # ── Immediate calibration injection when beacons are saved ────────────
     if _beacons:
         try:
-            _coord = hass.data.get(DOMAIN, {}).get(DATA_COORDINATOR)
+            _coord = hass.data.get(DOMAIN, {}).get("presence_coordinator")
             if _coord:
                 _rb = updated.get("room_bounds") or {}
                 _fid = updated.get("floor_id") or ""
@@ -481,6 +480,10 @@ async def ws_maps_delete_migrate(hass: HomeAssistant, connection, msg) -> None:
 
     moved_receivers: list[str] = []
     moved_beacons: list[str] = []
+    # What Revert migration removes: labels repeat ("Kitchen" on both maps),
+    # keys don't, and the migration already told the two apart by key.
+    moved_receiver_keys: list[str] = []
+    moved_beacon_keys: list[str] = []
     moved_rooms: list[str] = []
     skipped_receivers: list[str] = []
     skipped_beacons: list[str] = []
@@ -504,6 +507,7 @@ async def ws_maps_delete_migrate(hass: HomeAssistant, connection, msg) -> None:
         all_migrated_pts.append((tx, ty))
         tgt_receivers.append(new_rx)
         moved_receivers.append(label)
+        moved_receiver_keys.append(src_key)
         if src_key:
             tgt_rx_sources.add(src_key)
 
@@ -522,6 +526,7 @@ async def ws_maps_delete_migrate(hass: HomeAssistant, connection, msg) -> None:
         all_migrated_pts.append((tx, ty))
         tgt_beacons.append(new_bk)
         moved_beacons.append(label)
+        moved_beacon_keys.append(bk_key)
         if bk_key:
             tgt_bk_keys.add(bk_key)
 
@@ -661,6 +666,8 @@ async def ws_maps_delete_migrate(hass: HomeAssistant, connection, msg) -> None:
         "migrated": {
             "receivers": moved_receivers,
             "beacons": moved_beacons,
+            "receiver_keys": moved_receiver_keys,
+            "beacon_keys": moved_beacon_keys,
             "rooms": moved_rooms,
             "calibration_points": cal_moved,
         },

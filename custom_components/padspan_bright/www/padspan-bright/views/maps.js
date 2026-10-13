@@ -397,11 +397,20 @@ function _library(ctx, maps, activeId, helpBtn, isBasic){
           const m = (ctx.state.maps?.list || []).find(x => x.id === _mig.targetMapId);
           if(!m){ ctx.toast("Target map not found", true); return; }
           const mig = _mig.migrated || {};
-          const movedRxLabels = new Set(mig.receivers || []);
-          const movedBkLabels = new Set(mig.beacons || []);
           const movedRooms = new Set(mig.rooms || []);
-          const newRx = (m.receivers||[]).filter(r => !movedRxLabels.has(r.label || r.source || r.id || ""));
-          const newBk = (m.beacons||[]).filter(b => !movedBkLabels.has(b.label || b.key || ""));
+          // By key: removing by label also took the target's own pin of the
+          // same name ("Kitchen" on both maps), which the migration had
+          // skipped by key. A label only for a moved pin with no key, or
+          // from a backend that sent no keys.
+          const _strip = (items, keyOf, labelOf, labels, keys) => {
+            labels = labels || [];
+            if(!Array.isArray(keys)){ const ls = new Set(labels); return items.filter(x => !ls.has(labelOf(x))); }
+            const ks = new Set(keys.filter(Boolean));
+            const keyless = new Set(labels.filter((_, i) => !keys[i]));
+            return items.filter(x => { const k = keyOf(x); return k ? !ks.has(k) : !keyless.has(labelOf(x)); });
+          };
+          const newRx = _strip(m.receivers||[], r => r.source || r.id || "", r => r.label || r.source || r.id || "", mig.receivers, mig.receiver_keys);
+          const newBk = _strip(m.beacons||[], b => b.key || "", b => b.label || b.key || "", mig.beacons, mig.beacon_keys);
           const newBounds = {};
           for(const [k,v] of Object.entries(m.room_bounds||{})){
             if(!movedRooms.has(k)) newBounds[k] = v;
@@ -2797,23 +2806,10 @@ function _edit(ctx, map, allMaps){
           `Current fabric scale: ${_fabTx.scale_x_m.toFixed(1)}m \u00d7 ${_fabTx.scale_y_m.toFixed(1)}m`));
         mPanel.appendChild(el("div",{style:"font-size:10px;color:#64748b;margin-top:2px"},
           `World origin: (${(_fabTx.origin_x_m||0).toFixed(2)}, ${(_fabTx.origin_y_m||0).toFixed(2)})m \u2014 locked; display edits never move it`));
-        const reanchorBtn = el("button",{class:"btn inline",style:"font-size:10px;padding:2px 8px;margin-top:4px;color:#f59e0b"}, "\u2693 Re-anchor origin");
-        reanchorBtn.title = "Redefine this map's world origin/rotation from its current stack placement. Calibration pins keep their real-world metres and re-derive on the image.";
-        reanchorBtn.addEventListener("click", async () => {
-          if(!confirm("Re-anchor this map's world origin to its current stack placement?\n\nCalibration pins keep their real-world positions (metres) and their on-image positions re-derive through the new origin. This is refused if most pins would land off the map.")) return;
-          reanchorBtn.disabled = true;
-          try {
-            const r = await ctx.actions.callWS({ type: "padspan_bright/fabric_map_reanchor", map_id: map.id });
-            ctx.toast(`Re-anchored: origin (${r.origin_x_m}, ${r.origin_y_m})m, ${r.cal_points_remapped} pin(s) remapped`);
-            await ctx.actions.modelRefresh();   // origin readout reads ctx.state.model
-            await ctx.actions.mapsRefresh();
-          } catch(e) {
-            ctx.toast("Re-anchor refused: " + (e.message || e));
-          } finally {
-            reanchorBtn.disabled = false;
-          }
-        });
-        mPanel.appendChild(reanchorBtn);
+        // No "Re-anchor origin" button: it sent only the map id, which the
+        // backend treats as a no-op (there is no stack placement left to anchor
+        // to), and still toasted "Re-anchored". Placement edits go through the
+        // align editor, which sends the new pose.
       } else if (cal.px_per_meter) {
         mPanel.appendChild(el("div",{style:"font-size:11px;color:#f59e0b;margin-top:8px"},
           `Legacy map scale: ${cal.px_per_meter.toFixed(1)} px/m (not in fabric yet)`));
@@ -10436,9 +10432,18 @@ function _roomsTab(ctx, maps) {
           });
           nameIn.value = "";
           ctx.toast(`✔ "${name}" added — drag it into place`);
-          mapState._roomsDraftFloorId = null;
           mapState._roomsTruthCache = null;
           await ctx.actions.modelRefresh();
+          // Into the open draft, not a fresh copy of the model: re-copying
+          // threw away every unsaved corner, scanner and wall drag.
+          const _added = (ctx.state.model?.room_geometry_m || {})[name];
+          if (_added && mapState._roomsDraft && mapState._roomsOrig) {
+            mapState._roomsDraft[name] = JSON.parse(JSON.stringify(_added));
+            mapState._roomsOrig[name] = JSON.parse(JSON.stringify(_added));
+          } else {
+            mapState._roomsDraftFloorId = null;
+          }
+          ctx.actions.renderRooms();
         } catch (err) {
           ctx.toast("Add failed: " + (err.message || err), true);
           btn.disabled = false;
@@ -10649,7 +10654,13 @@ function _roomsTab(ctx, maps) {
     b => String(b.floor_id || "main") === String(floorId) && (b.points_m || []).length >= 2);
   if (!mapState._roomsBarrierDraft) mapState._roomsBarrierDraft = JSON.parse(JSON.stringify(allBarriers));
   const barDraft = mapState._roomsBarrierDraft;
-  const _barMoved = (i) => JSON.stringify(barDraft[i]?.points_m) !== JSON.stringify(allBarriers[i]?.points_m);
+  // Matched by id, not list position: a wall added or removed elsewhere
+  // while the draft is open must not make every later wall look moved.
+  const _barById = new Map(allBarriers.map(b => [b.id, b]));
+  const _barMoved = (i) => {
+    const cur = barDraft[i] && _barById.get(barDraft[i].id);
+    return !!cur && JSON.stringify(barDraft[i].points_m) !== JSON.stringify(cur.points_m);
+  };
   const movedBarriers = barDraft.map((_, i) => i).filter(_barMoved);
   const fabricDraft = mapState._roomsDraft || {};
   const orig = mapState._roomsOrig || {};
@@ -11436,9 +11447,12 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
               await ctx.actions.wsCall("padspan_bright/fabric_room_remove", { room: only });
               ctx.toast(`Deleted "${only}"`);
               mapState._roomsSel = [];
-              mapState._roomsDraftFloorId = null;
+              // Out of the open draft only; the other unsaved edits stay.
+              if (mapState._roomsDraft) delete mapState._roomsDraft[only];
+              if (mapState._roomsOrig) delete mapState._roomsOrig[only];
               mapState._roomsTruthCache = null;
               await ctx.actions.modelRefresh();
+              ctx.actions.renderRooms();
             } catch (err) { ctx.toast("Delete failed: " + (err.message || err), true); }
           },
         }, `Delete "${only}"`));
@@ -11489,12 +11503,11 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
           for (const i of movedBarriers) {
             const b = barDraft[i];
             try {
+              // The stored wall with its new corners. The set replaces the
+              // record by id, so a payload of name/material/points alone
+              // erased its door, opener and lock links and Invert.
               await ctx.actions.wsCall("padspan_bright/fabric_rf_barrier_set", {
-                barrier: {
-                  id: b.id, name: b.name, material: b.material || "custom",
-                  attenuation_dbm: b.attenuation_dbm ?? 6,
-                  floor_id: floorId, points_m: b.points_m,
-                },
+                barrier: { ..._barById.get(b.id), floor_id: floorId, points_m: b.points_m },
               });
               ok++;
             } catch (err) { fail++; console.warn("fabric_rf_barrier_set failed", b.name, err); }

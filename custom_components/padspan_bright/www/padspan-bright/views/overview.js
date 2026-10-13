@@ -861,6 +861,14 @@ export function render(ctx){
         )) return false;
         return true;
       }).map(o => {
+        // A pinned beacon is drawn where it was pinned (issue #89). The
+        // server sends the solver's live estimate in x_m/y_m and the pin
+        // itself in anchor_true_* (the drift check compares the two); for a
+        // fixed object the pin is where it is.
+        if (o._pinned && typeof o.anchor_true_x_m === "number" && typeof o.anchor_true_y_m === "number") {
+          o = Object.assign({}, o, { x_m: o.anchor_true_x_m, y_m: o.anchor_true_y_m,
+            floor_id: o.anchor_true_floor_id || o.floor_id });
+        }
         if ((o.kind === "ble" || o.kind === "private_ble" || o.kind === "ibeacon") &&
             (!o.room || o.room === "unknown" || o.room === "not_home") && o.address) {
           const eRoom = _entityRoomByAddr[String(o.address).toUpperCase()];
@@ -2189,7 +2197,7 @@ export function render(ctx){
       ovGapLbl.textContent = String(ctx.state._overviewFloorGap);
       _rebuildPositions();
       if (_ovGapDebounce) clearTimeout(_ovGapDebounce);
-      _ovGapDebounce = setTimeout(() => { _rebuildIso(ctx.state._overviewIsoFocus); }, 150);
+      _ovGapDebounce = setTimeout(() => { _rebuildIso(_getFocusZ(ctx.state._overviewIsoFocusIdx)); }, 150);  // _overviewIsoFocus was never set: every floor drew unfocused, at 10%
     });
 
     // L/R horizontal offset slider
@@ -2206,7 +2214,7 @@ export function render(ctx){
       ovHorizLbl.textContent = String(ctx.state._overviewHorizGap);
       _rebuildPositions();
       if (_ovGapDebounce) clearTimeout(_ovGapDebounce);
-      _ovGapDebounce = setTimeout(() => { _rebuildIso(ctx.state._overviewIsoFocus); }, 150);
+      _ovGapDebounce = setTimeout(() => { _rebuildIso(_getFocusZ(ctx.state._overviewIsoFocusIdx)); }, 150);  // _overviewIsoFocus was never set: every floor drew unfocused, at 10%
     });
 
     const ctrlRow = document.createElement("div");
@@ -2814,9 +2822,14 @@ export function render(ctx){
     cancelBtn.addEventListener("click", async () => {
       cancelBtn.disabled = true; cancelBtn.textContent = "Resuming...";
       try {
-        await ctx.actions.wsCall("padspan_bright/unsuspend_databases");
-        ctx.toast("Normal pipeline resumed");
+        const r = await ctx.actions.wsCall("padspan_bright/unsuspend_databases");
+        if (r && r.ok === false) { ctx.toast("Not resumed: " + (r.error || "try again in a moment"), true); }
+        else ctx.toast("Normal pipeline resumed");
       } catch(e) { ctx.toast("Failed: " + String(e), true); }
+      finally {
+        // Left disabled after a failure, the only way back was a reload.
+        cancelBtn.disabled = false; cancelBtn.textContent = "Resume Normal";
+      }
     });
 
     return el("div",{style:
@@ -3053,6 +3066,8 @@ export function render(ctx){
               const irkInput = document.createElement("input");
               irkInput.type = "text";
               irkInput.placeholder = "Paste IRK (hex or base64)";
+              // "Save unverified" is for the key it was offered for: an edited key is checked again.
+              irkInput.addEventListener("input", () => { if (irkSaveBtn._force) { irkSaveBtn._force = false; irkSaveBtn.textContent = "Save"; irkSaveBtn.style.color = "#4ade80"; irkSaveBtn.style.borderColor = "#16a34a"; } });
               irkInput.style.cssText = "font-size:10px;padding:2px 6px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:3px;width:220px;display:none;font-family:monospace";
 
               const irkSaveBtn = document.createElement("button");
@@ -3077,6 +3092,7 @@ export function render(ctx){
                   await ctx.actions.wsCall("padspan_bright/irk_add", {
                     name: phone.device_name || "Phone",
                     irk_hex: irk,
+                    force: irkSaveBtn._force === true,
                   });
                   irkRow.innerHTML = "";
                   const ok = document.createElement("span");
@@ -3093,7 +3109,10 @@ export function render(ctx){
                   errDiv.textContent = errMsg;
                   irkRow.appendChild(errDiv);
                   irkSaveBtn.disabled = false;
-                  irkSaveBtn.textContent = "Retry";
+                  // A phone asleep or away can't be checked against live traffic; the
+                  // backend asks for "save unverified", which Retry never sent.
+                  if (err && err.code === "unverified") { irkSaveBtn._force = true; irkSaveBtn.textContent = "Save unverified"; }
+                  else irkSaveBtn.textContent = "Retry";
                 }
               });
 
@@ -3219,7 +3238,10 @@ export function render(ctx){
                   }
                   btn.textContent = "Enabled — restart HA";
                   btn.style.color = "#34d399"; btn.style.borderColor = "#065f46";
-                  meta.textContent = "Entity enabled & BLE command sent. Restart HA to complete.";
+                  // A disabled phone is found with no iBeacon key, so the command is
+                  // only sent when there is one: say which happened.
+                  meta.textContent = phone.ibeacon_key ? "Entity enabled & BLE command sent. Restart HA to complete."
+                    : "Entity enabled. Restart HA, then turn on the BLE Transmitter in the Companion app (or follow the phone here).";
                 } catch (e) {
                   btn.textContent = "Enable manually in HA";
                   btn.style.color = "#f59e0b";
@@ -3461,6 +3483,8 @@ export function render(ctx){
             const irkInput = document.createElement("input");
             irkInput.type = "text";
             irkInput.placeholder = "Paste IRK (hex or base64)";
+            // "Save unverified" is for the key it was offered for: an edited key is checked again.
+            irkInput.addEventListener("input", () => { if (irkSaveBtn._force) { irkSaveBtn._force = false; irkSaveBtn.textContent = "Save"; irkSaveBtn.style.color = "#4ade80"; irkSaveBtn.style.borderColor = "#16a34a"; } });
             irkInput.style.cssText = "font-size:10px;padding:2px 6px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:3px;width:220px;display:none;font-family:monospace";
             const irkSaveBtn = document.createElement("button");
             irkSaveBtn.style.cssText = "font-size:10px;padding:2px 8px;border-radius:3px;cursor:pointer;border:1px solid #16a34a;background:#052e16;color:#4ade80;display:none";
@@ -3483,6 +3507,7 @@ export function render(ctx){
                 await ctx.actions.wsCall("padspan_bright/irk_add", {
                   name: phone.device_name || "Phone",
                   irk_hex: irk,
+                  force: irkSaveBtn._force === true,
                 });
                 irkRow.innerHTML = "";
                 const ok = document.createElement("span");
@@ -3498,7 +3523,10 @@ export function render(ctx){
                 errDiv.textContent = (err && err.message) || String(err);
                 irkRow.appendChild(errDiv);
                 irkSaveBtn.disabled = false;
-                irkSaveBtn.textContent = "Retry";
+                // A phone asleep or away can't be checked against live traffic; the
+                  // backend asks for "save unverified", which Retry never sent.
+                  if (err && err.code === "unverified") { irkSaveBtn._force = true; irkSaveBtn.textContent = "Save unverified"; }
+                  else irkSaveBtn.textContent = "Retry";
               }
             });
             irkRow.appendChild(addIrkBtn);
@@ -3561,7 +3589,8 @@ export function render(ctx){
                 enableBtn.textContent = "Enabled — restart HA";
                 enableBtn.style.color = "#34d399";
                 enableBtn.style.borderColor = "#065f46";
-                meta.textContent = "Entity enabled & BLE command sent. Restart Home Assistant to complete setup.";
+                meta.textContent = phone.ibeacon_key ? "Entity enabled & BLE command sent. Restart Home Assistant to complete setup."
+                  : "Entity enabled. Restart Home Assistant, then turn on the BLE Transmitter in the Companion app (or follow the phone here).";
               } catch (e) {
                 enableBtn.textContent = "Enable manually";
                 enableBtn.disabled = false;

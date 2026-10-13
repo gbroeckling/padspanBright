@@ -384,6 +384,22 @@ async def test_placement_is_ground_truth_across_a_transform_change() -> None:
     assert m["receivers"][0]["x"] == pytest.approx(0.25)   # the PIN moved
 
 
+@pytest.mark.asyncio
+async def test_rederive_draws_only_this_maps_floor() -> None:
+    """Floors stack on the same footprint: every upstairs and basement
+    scanner and beacon "lands inside" the main plan, and was appended to it
+    and saved, drawn on the wrong floor from then on."""
+    transforms = {"m1": {"origin_x_m": 0, "origin_y_m": 0, "scale_x_m": 10,
+                         "scale_y_m": 10, "rotation_rad": 0, "floor_id": "main"}}
+    mdl = _make_model(transforms)
+    mdl.fabric = _spatial_fabric()
+    await mdl.async_set_scanner_position_m("rx_main", 2.0, 2.0, 2.4, "main")
+    await mdl.async_set_scanner_position_m("rx_up", 3.0, 3.0, 2.4, "upstairs")
+    m = {"id": "m1", "floor_id": "main", "stack": {}, "receivers": [], "beacons": []}
+    await mdl.async_rederive_map_fracs("m1", m)
+    assert [rx["source"] for rx in m["receivers"]] == ["rx_main"]
+
+
 def test_no_implicit_spatial_write_path_survives() -> None:
     """The invariant this pass buys: nothing writes spatial fabric except a
     placement. async_sync_spatial_from_map was the one exception and is gone;
@@ -464,3 +480,42 @@ def test_the_fabric_holds_every_kind_of_thing_with_a_position() -> None:
     for key in ("scanner_positions_m", "beacon_positions_m",
                 "rf_barriers_m", "light_positions_m"):
         assert key in fab.data, key
+
+
+@pytest.mark.asyncio
+async def test_rederive_uses_the_maps_own_floor() -> None:
+    """Moving a map in the Stack table can leave the old stack.floor_id
+    beside the new floor_id; preferring the stack's added the wrong floor's
+    devices and skipped the right one's."""
+    transforms = {"m1": {"origin_x_m": 0, "origin_y_m": 0, "scale_x_m": 10,
+                         "scale_y_m": 10, "rotation_rad": 0, "floor_id": "upstairs"}}
+    mdl = _make_model(transforms)
+    mdl.fabric = _spatial_fabric()
+    await mdl.async_set_scanner_position_m("rx_up", 3.0, 3.0, 2.4, "upstairs")
+    await mdl.async_set_scanner_position_m("rx_main", 2.0, 2.0, 2.4, "main")
+    m = {"id": "m1", "floor_id": "upstairs", "stack": {"floor_id": "main"}, "receivers": [], "beacons": []}
+    await mdl.async_rederive_map_fracs("m1", m)
+    assert [rx["source"] for rx in m["receivers"]] == ["rx_up"]   # not the old floor's
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_area_forgets_its_room_colour_and_floor() -> None:
+    """async_update merges room_meta, so the delete handler's 'room_meta
+    without this room' removed nothing: an area recreated with the same name
+    got its old colour and floor back."""
+    from unittest.mock import AsyncMock, MagicMock
+    from custom_components.padspan_bright import ws_follow
+    from custom_components.padspan_bright.const import DATA_MODEL, DOMAIN
+    mdl = _make_model({})
+    mdl.data["room_meta"] = {"Den": {"floor_id": "up", "color": "#123456"}, "Hall": {"floor_id": "main", "color": "#654321"}}
+    area = MagicMock(); area.name = "Den"
+    ar = MagicMock(); ar.async_get_area.return_value = area
+    hass = MagicMock(); hass.data = {DOMAIN: {DATA_MODEL: mdl}}
+    orig = getattr(ws_follow.area_registry, "async_get", None)
+    ws_follow.area_registry.async_get = lambda h: ar
+    try:
+        await ws_follow.ws_area_delete(hass, MagicMock(), {"id": 1, "area_id": "den"})
+    finally:
+        if orig is not None:
+            ws_follow.area_registry.async_get = orig
+    assert list(mdl.room_meta()) == ["Hall"]

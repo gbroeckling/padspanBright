@@ -254,6 +254,17 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
         "raw_counts": {},
     }
 
+    # Each phase's time, for the opt-in report (perf_sampler "snap_<phase>";
+    # a no-op while it is off). The whole build has been timed since 0.38.103,
+    # and a third of the installs reporting take 1.4-18 s for it, all of them
+    # with Bermuda — this says which part.
+    _phase_t = [time.perf_counter()]
+
+    def _phase_done(name: str) -> None:
+        now = time.perf_counter()
+        record_duration(hass, "snap_" + name, (now - _phase_t[0]) * 1000.0)
+        _phase_t[0] = now
+
     # --- Bluetooth (scanners + advertisements) ---
     # Fetched FIRST because downstream sections (objects, room assignment) depend on it.
     try:
@@ -286,6 +297,24 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
             ble["advertisements"].sort(key=lambda x: x.get("age_s", 1e9))
     except Exception:
         pass
+
+    # --- Tasmota BLE over MQTT (merged the same way, if enabled) ---
+    try:
+        from .tasmota_ble import DATA_TASMOTA_BLE  # noqa: PLC0415
+        _tas = hass.data.get(DOMAIN, {}).get(DATA_TASMOTA_BLE)
+        if _tas is not None:
+            _tas.cache_age_s = _low_memory.ble_age_s(hass)
+            _tas.max_addrs = min(5000, _low_memory.ble_max_addrs(hass) or 5000)
+            _tas_snap = _tas.get_snapshot(max_age_s=_low_memory.ble_age_s(hass))
+            ble = snapshot.setdefault("ble", {"radios": [], "advertisements": [], "diag": {}})
+            ble.setdefault("radios", []).extend(_tas_snap.get("radios", []))
+            ble.setdefault("advertisements", []).extend(_tas_snap.get("advertisements", []))
+            ble.setdefault("diag", {})["tasmota"] = _tas_snap.get("diag", {})
+            ble["advertisements"].sort(key=lambda x: x.get("age_s", 1e9))
+    except Exception:
+        pass
+
+    _phase_done("ble")
 
     # --- Areas (rooms) ---
     area_by_id: dict[str, str] = {}
@@ -407,10 +436,16 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
             if k in (st.attributes or {}):
                 return True
 
-        # Bluetooth-ish heuristics (fallback).
-        return any(k in eidn for k in ('ble', 'bluetooth', 'bermuda', 'tag', 'beacon')) or any(
-            k in n for k in ('ble', 'bluetooth', 'bermuda', 'tag', 'beacon')
-        )
+        # Bluetooth-ish heuristics (fallback), as whole words: substrings made
+        # sensor.kitchen_voltage ("tag") and binary_sensor.dining_table_occupancy
+        # ("ble") tracked objects, present in their area.
+        return bool(_BT_WORD.search(eidn) or _BT_WORD.search(n))
+
+    import re as _re  # noqa: PLC0415
+    # Digits are a boundary (beacon1, tag1_room, ble01) and a tag can carry
+    # its maker's prefix (airtag, smarttag2, ibeacon, bletag); a word inside
+    # another word (kitchen_voltage, dining_table) is not one.
+    _BT_WORD = _re.compile(r"(?:^|[^a-z])(?:air|smart|i|ble)?(?:ble|bluetooth|bermuda|tags?|beacons?)(?:[^a-z]|$)")
 
     def _looks_like_room_tracker(entity_id: str, st: State) -> bool:
         """Safety net for live mode: accept entities whose id/attrs look like location trackers."""
@@ -466,21 +501,86 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
             if hass.states.get(g):
                 return g
 
-        # Fuzzy fallback: find an entity id containing the object id
+        # Fuzzy fallback: find an entity id containing the object id. The
+        # location-like entity ids are gathered ONCE per build and shared by
+        # every saved tag that gets here: it was a walk over every HA state
+        # per missing tag, per build — and a Bermuda house has tens of
+        # thousands of states.
         objn = _norm(obj)
-        for st in hass.states.async_all():
-            eidn = _norm(st.entity_id)
-            if objn and objn in eidn and any(k in eidn for k in ("area", "room", "bermuda", "ble", "beacon", "tag")):
-                return st.entity_id
+        if not objn:
+            return tag_id
+        if _fuzzy_eids is None:
+            _fuzzy_eids_init()
+        for eid, eidn in _fuzzy_eids or ():
+            if objn in eidn:
+                return eid
 
         return tag_id
 
-    cand = 0
+    _fuzzy_eids: list[tuple[str, str]] | None = None
+
+    def _fuzzy_eids_init() -> None:
+        nonlocal _fuzzy_eids
+        _fuzzy_eids = []
+        for st in hass.states.async_all():
+            eidn = _norm(st.entity_id)
+            if any(k in eidn for k in ("area", "room", "bermuda", "ble", "beacon", "tag")):
+                _fuzzy_eids.append((st.entity_id, eidn))
+
     mapped = 0
+
+    def _add_tag(entity_id: str, st: Any, room: str) -> None:
+        nonlocal mapped
+        tag_label = st.attributes.get('friendly_name') or entity_id.split('.', 1)[-1]
+
+        extra: dict[str, Any] = {}
+        for k in ('nearest_receiver', 'receiver', 'rssi', 'distance', 'gateway',
+                   'mac_address', 'address', 'mac', 'scanner', 'scanners'):
+            if k in (st.attributes or {}):
+                extra[k] = st.attributes.get(k)
+
+        tags.append({
+            'entity_id': entity_id,
+            'name': str(tag_label),
+            'room': room,
+            'state': st.state,
+            **extra,
+        })
+
+        room_tag_map_live.setdefault(room, []).append(entity_id)
+        mapped += 1
+
+    cand = 0
+    _bermuda_best: dict[str, tuple[int, str, Any, str]] = {}   # device_id -> best entity
+    # Bermuda devices that have an Area sensor (whatever it reads right now).
+    _bermuda_area_devices: set[str] = set()
+    if _all_bermuda_entry_ids:
+        try:
+            for _st0 in hass.states.async_all("sensor"):
+                if _st0.entity_id.endswith("_area"):
+                    _e0 = er.async_get(_st0.entity_id)
+                    if _e0 and _e0.device_id and _e0.config_entry_id in _all_bermuda_entry_ids:
+                        _bermuda_area_devices.add(_e0.device_id)
+        except Exception:
+            pass
+
+    def _bermuda_never_an_object(entity_id: str, attrs: Any, device_id: str) -> bool:
+        """A Bermuda device's entity that never becomes its object. The
+        selection below and the object-history purge both ask this, so what
+        one skips the other cannot replay."""
+        if "area_scanner_name" in attrs or "_distance_to_" in entity_id:
+            return True
+        # A device with an Area sensor is that sensor alone: it reads
+        # the current room, and "unknown" when the device is out of
+        # range - absent, not moved. Picking by state swapped to Area
+        # Last Seen while away and back again on return, leaving a
+        # second object in the old room.
+        return device_id in _bermuda_area_devices and not entity_id.endswith("_area")
 
     try:
         for st in hass.states.async_all():
             entity_id = st.entity_id
+            _ent_entry = None
 
             # Skip our own derived sensor/tracker entities (area, distance) — they are
             # characteristics of BLE objects already in section B/C of the objects list.
@@ -497,29 +597,36 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
             if not room:
                 continue
 
+            # Bermuda Ignore covers both checks: the room-tracker one matched
+            # every sensor.*_area_last_seen, so ignored Bermuda still came in.
+            _from_bermuda = bool(_ent_entry and _ent_entry.config_entry_id in _all_bermuda_entry_ids)
+            if _bermuda_ignore and _from_bermuda:
+                continue
+
             # Candidate filter: accept Bermuda (by config_entry), common '*_area_last_seen' patterns, or receiver/rssi hints.
             if not (_is_candidate(entity_id, st) or _looks_like_room_tracker(entity_id, st)):
                 continue
             cand += 1
 
-            tag_label = st.attributes.get('friendly_name') or entity_id.split('.', 1)[-1]
+            # One Bermuda device, one object. Its Area and Floor sensors both
+            # carry area_name, and each per-scanner "Distance to" sensor carries
+            # the SCANNER's area: one phone became two objects, or two per
+            # scanner (devices x scanners x 2) - each in a room of its own.
+            if _from_bermuda and getattr(_ent_entry, "device_id", None):
+                if _bermuda_never_an_object(entity_id, st.attributes or {}, _ent_entry.device_id):
+                    continue
+                _by_state = known_rooms.get(_norm(st.state)) is not None
+                _rank = (0 if _by_state and "last_seen" not in entity_id
+                         else 1 if _by_state else 2)
+                _prev = _bermuda_best.get(_ent_entry.device_id)
+                if _prev is not None and (_prev[0], _prev[1]) <= (_rank, entity_id):
+                    continue
+                _bermuda_best[_ent_entry.device_id] = (_rank, entity_id, st, room)
+                continue
 
-            extra: dict[str, Any] = {}
-            for k in ('nearest_receiver', 'receiver', 'rssi', 'distance', 'gateway',
-                       'mac_address', 'address', 'mac', 'scanner', 'scanners'):
-                if k in (st.attributes or {}):
-                    extra[k] = st.attributes.get(k)
-
-            tags.append({
-                'entity_id': entity_id,
-                'name': str(tag_label),
-                'room': room,
-                'state': st.state,
-                **extra,
-            })
-
-            room_tag_map_live.setdefault(room, []).append(entity_id)
-            mapped += 1
+            _add_tag(entity_id, st, room)
+        for _rank, entity_id, st, room in _bermuda_best.values():
+            _add_tag(entity_id, st, room)
     except Exception:
         # If anything weird happens, keep the UI alive with whatever we collected.
         pass
@@ -667,15 +774,34 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
                     slugs_to_try.add(_name_to_slug(rsource))
                 for slug in slugs_to_try:
                     if slug and len(slug) >= 3:
-                        prefix_sensor = f"sensor.{slug}_"
-                        prefix_text = f"text_sensor.{slug}_"
-                        for ent in er_net.entities.values():
-                            eid = ent.entity_id or ""
-                            if eid.startswith(prefix_sensor) or eid.startswith(prefix_text):
-                                candidates.append(ent)
+                        candidates.extend(_net_by_slug().get(slug, ()))
                     if candidates:
                         break
             return candidates
+
+        # sensor./text_sensor. network entities by every "_"-prefix of their
+        # object id, built once per build: the fallback walked the whole entity
+        # registry per slug per radio (Bermuda adds devices x scanners x 2
+        # rows; 25,000 rows x 20 radios was 240 ms a build). Only entities
+        # _apply_net_info can use are indexed.
+        _net_idx: dict[str, list] = {}
+        _net_idx_built: list[bool] = [False]
+
+        def _net_by_slug() -> dict[str, list]:
+            if not _net_idx_built[0]:
+                _net_idx_built[0] = True
+                for ent in er_net.entities.values():
+                    eid = ent.entity_id or ""
+                    dom, _, obj_id = eid.partition(".")
+                    if dom not in ("sensor", "text_sensor"):
+                        continue
+                    low = obj_id.lower()
+                    if not any(k in low for k in ("ip", "ssid", "signal", "connection_type", "network_type")):
+                        continue
+                    parts = obj_id.split("_")
+                    for i in range(1, len(parts)):
+                        _net_idx.setdefault("_".join(parts[:i]), []).append(ent)
+            return _net_idx
 
         def _apply_net_info(radio: dict, entities: list) -> None:
             """Copy IP/SSID/signal/connection-type fields onto `radio` from
@@ -752,6 +878,8 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
     # Preserve the older "receivers" device list under a clearer name too.
     if "bermuda_devices" not in snapshot:
         snapshot["bermuda_devices"] = snapshot.get("receivers") or []
+
+    _phase_done("ha")
 
     # --- Derived "objects" list (entities + BLE addresses) ---
     # This is the core data structure the UI consumes.  It merges three sources:
@@ -1067,6 +1195,13 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
                         continue  # already resolved
                     if not _is_rpa_addr(addr):
                         continue  # not a rotating address
+                    # An address with its own identity (a label, an HA device
+                    # or entity) is its own device: bridged, Bob's labelled tag
+                    # was shown as "Alice tag" at Bob's location whenever
+                    # Alice's tag was quiet for a few seconds.
+                    if (addr in addr_to_device or addr in addr_to_entities
+                            or (_obj_store_br and _obj_store_br.get_label(addr))):
+                        continue
                     fp = _build_bridge_fingerprint(rec)
                     if not fp:
                         continue
@@ -1345,6 +1480,12 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
                         "service_uuids": [],
                     }
                 pg = _private_groups[cid]
+                # A group is a bridge guess only if none of its addresses
+                # resolved for real: a bridged address met first made an IRK
+                # phone heard on its own address a guess (unidentified, and
+                # dropped from occupancy's people).
+                if pg["canonical"].get("bridge_match") and not canonical.get("bridge_match"):
+                    pg["canonical"] = canonical
                 pg["addrs"].append(addr)
                 # Per-source merge: prefer the FRESHEST (lowest age_s) reading
                 # per scanner source across all rotating MACs — not the strongest
@@ -1420,19 +1561,23 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
                         # 3) Match to private_ble objects by device_id
                         if not addr:
                             for _cid, pg in _private_groups.items():
+                                # pg["device"] is an addr_to_device entry: its
+                                # id is "device_id" (it read "id", never there)
                                 _pg_dev = pg.get("device")
-                                if _pg_dev and _pg_dev.get("id") == ent.device_id:
+                                if _pg_dev and _pg_dev.get("device_id") == ent.device_id:
                                     canonical_id = _cid
                                     addr = pg["best_addr"].upper() if pg.get("best_addr") else ""
                                     all_addrs = sorted(pg.get("addrs") or [])
                                     break
 
-                        # 4) Match to regular BLE objects by device_id
-                        if not addr and ent.device_id:
-                            for _ba, _bd in addr_to_device.items():
-                                if isinstance(_bd, dict) and _bd.get("id") == ent.device_id:
-                                    addr = _ba.upper()
-                                    break
+                        # (A "4) match regular BLE objects by device_id" step
+                        # stood here: a walk over every Bluetooth device in
+                        # addr_to_device for each tag, comparing a "id" key
+                        # those entries do not have ("device_id"). It never
+                        # matched — and could add nothing if it did: the map
+                        # is built from the same dev.connections step 1 just
+                        # read for this device. With Bermuda, tags and devices
+                        # both run to the thousands; removed in 0.38.108.)
 
                 # 5) Check entity state attributes for MAC address hints
                 #    Bermuda entities often expose mac_address/address in attributes
@@ -1703,21 +1848,26 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
             for obj in objects:
                 if obj.get("kind") != "ibeacon":
                     continue
+                # obj["device"] is an addr_to_device entry, keyed "device_id"
+                # — this read "id", so the device match below never fired.
                 dev = obj.get("device")
-                if isinstance(dev, dict) and dev.get("id"):
-                    _ib_by_devid[dev["id"]] = obj
+                if isinstance(dev, dict) and dev.get("device_id"):
+                    _ib_by_devid[dev["device_id"]] = obj
                 for mac in (obj.get("all_addresses") or []):
                     _ib_by_mac[mac.upper()] = obj
 
             _absorbed_keys: set[str] = set()  # keys of objects merged into an iBeacon
+            _merged_by_device = 0             # of those, matched by HA device (opt-in report)
             for obj in objects:
                 if obj.get("kind") not in ("ble", "private_ble"):
                     continue
                 # Match by HA device_id
                 target_ib = None
                 dev = obj.get("device")
-                if isinstance(dev, dict) and dev.get("id"):
-                    target_ib = _ib_by_devid.get(dev["id"])
+                if isinstance(dev, dict) and dev.get("device_id"):
+                    target_ib = _ib_by_devid.get(dev["device_id"])
+                    if target_ib:
+                        _merged_by_device += 1
                 # Match by MAC address overlap
                 if not target_ib:
                     obj_addr = (obj.get("address") or "").upper()
@@ -1787,6 +1937,7 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
             # Remove absorbed objects from the list
             if _absorbed_keys:
                 objects = [o for o in objects if o.get("key", "") not in _absorbed_keys]
+            (snapshot.get("raw_counts") or {})["merged_by_device"] = _merged_by_device
         except Exception as _merge_err:
             _LOGGER.debug("Object merge error: %s", _merge_err)
 
@@ -2299,6 +2450,7 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
         # Merge cached objects not seen this cycle back into the list
         # Skip keys absorbed by deduplication — they are ghosts of merged objects
         _cached_added = 0
+        _bermuda_purged = 0
         for key, cached_obj in list(_cache.items()):
             if key in _current_keys:
                 continue  # already in this cycle's list
@@ -2366,6 +2518,27 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
             if not is_identified and stale_s > _HISTORY_TTL:
                 del _cache[key]
                 continue
+            # 0.38.105 made a Bermuda device's Floor, Area Last Seen and each
+            # "Distance to" sensor objects of their own. The selection never
+            # makes them now; replayed, they sat frozen in their old rooms
+            # (an entity is never away), a labelled copy for good. Dropped by
+            # the selection's own rule, and saved with the history.
+            if _all_bermuda_entry_ids and cached_obj.get("kind") == "entity":
+                _cached_eid = cached_obj.get("entity_id") or ""
+                if _cached_eid:
+                    try:
+                        _cached_ent = er.async_get(_cached_eid)
+                        if (_cached_ent and _cached_ent.device_id
+                                and _cached_ent.config_entry_id in _all_bermuda_entry_ids):
+                            _cached_st = hass.states.get(_cached_eid)
+                            if _bermuda_never_an_object(
+                                    _cached_eid, (_cached_st.attributes or {}) if _cached_st else {},
+                                    _cached_ent.device_id):
+                                del _cache[key]
+                                _bermuda_purged += 1
+                                continue
+                    except Exception:
+                        pass
             # Heal pre-cap poisoned address histories in place: cache entries
             # persisted before _ALL_ADDR_CAP existed can carry tens of
             # thousands of addresses, and resurrection shipped them uncapped —
@@ -2390,6 +2563,10 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
                 ]
             objects.append(obj_copy)
             _cached_added += 1
+        if _bermuda_purged:
+            # The opt-in report (#152): once after an upgrade from 0.38.105, then none.
+            from .telemetry import bump as _bump  # noqa: PLC0415
+            _bump(hass, "bermuda_history_purged", _bermuda_purged)
 
         # Second dedup pass: catch cached objects that were reintroduced
         if _cached_added > 0:
@@ -2492,15 +2669,20 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
                 from homeassistant.helpers.storage import Store as _Store
                 _hist_store = _Store(hass, 1, OBJECT_HISTORY_STORE_KEY)
                 _dom["_obj_hist_store"] = _hist_store
-            # Strip non-serializable fields before saving
-            _save_data = {}
-            for _k, _v in _cache.items():
-                _sv = dict(_v)
-                # Remove any fields that might not be JSON-serializable
-                _sv.pop("_smoothed", None)
-                _sv.pop("_stale", None)
-                _save_data[_k] = _sv
-            await _hist_store.async_save(_save_data)
+            # Strip non-serializable fields before saving. Scheduled, not
+            # awaited: the save (~6 MB at 7,800 entries: serialise, write,
+            # fsync - far slower on an SD card) ran inside the snapshot lock
+            # every interval, holding up the panel's and the presence poll's
+            # builds. HA calls the data function when it writes.
+            def _hist_data(cache=_cache) -> dict:
+                out = {}
+                for _k, _v in cache.items():
+                    _sv = dict(_v)
+                    _sv.pop("_smoothed", None)
+                    _sv.pop("_stale", None)
+                    out[_k] = _sv
+                return out
+            _hist_store.async_delay_save(_hist_data, 1)
             _dom["_obj_hist_last_save"] = _now_ts
 
         # Send first_seen to frontend, strip internal cache fields
@@ -2544,6 +2726,8 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
     except Exception as _obj_err:
         _LOGGER.warning("Objects list build failed: %s", _obj_err, exc_info=True)
         snapshot["objects"] = {"list": [], "summary": {"total": 0, "identified": 0, "unidentified": 0, "entities": 0, "ble": 0, "common_prefixes": {}}}
+
+    _phase_done("objects")
 
     # ── Enrich objects with stable padspan_id from DeviceRegistry ──
     try:
@@ -2763,6 +2947,7 @@ async def _build_live_snapshot(hass: HomeAssistant) -> dict:
     except Exception:
         pass
 
+    _phase_done("enrich")
     return snapshot
 
 
@@ -2773,8 +2958,10 @@ def cap_object_history(cache: dict[str, dict[str, Any]], cap: int, current_keys:
     (`current_keys`), is never dropped. Returns how many went."""
     if len(cache) <= cap:
         return 0
+    # An IRK phone is someone's too, labelled or not (low_memory.py says so).
     unid = [(o.get("_last_seen_ts") or 0, k) for k, o in cache.items()
-            if not (o.get("identified") or o.get("user_label"))]
+            if not (o.get("identified") or o.get("user_label")
+                    or o.get("kind") == "private_ble" or str(k).startswith("irk:"))]
     if len(unid) <= cap:
         return 0
     excess = len(unid) - int(cap * 0.9)
@@ -2806,6 +2993,8 @@ def _prune_lost_and_found_strangers(hass: HomeAssistant, lf: Any, objects: list)
     ident_now = {o.get("key") for o in objects if isinstance(o, dict) and obj_is_identified(o)}
 
     def keep(key: str, rec: dict[str, Any]) -> bool:
+        if rec.get("identified"):
+            return True     # recorded for someone's device (lost_and_found_store)
         mac = key[4:].upper() if key.startswith("ble:") else ""
         if len(mac) != 17 or mac.count(":") != 5:
             return True
@@ -2821,6 +3010,8 @@ def _prune_lost_and_found_strangers(hass: HomeAssistant, lf: Any, objects: list)
         n = lf.prune(keep)
         if n:
             _LOGGER.info("Lost & Found: removed %d records of devices nobody tracks", n)
+            from .telemetry import bump as _bump  # noqa: PLC0415
+            _bump(hass, "lost_and_found_pruned", n)
     except Exception as err:
         _LOGGER.debug("Lost & Found stranger prune: %s", err)
 
@@ -2857,9 +3048,16 @@ async def ws_live_snapshot(hass: HomeAssistant, connection, msg) -> None:
     try:
         pc = hass.data.get(DOMAIN, {}).get("presence_coordinator")
         if pc and pc.data:
+            # The pin fields too (issue #89): a pinned beacon's declared
+            # position and its drift from the solve. The coordinator has
+            # always set them; left off this list, Overview could not draw a
+            # pinned beacon at its pin, and Calibration's matrix never got
+            # its anchor rows.
             _MERGE_KEYS = ("x_m", "y_m", "floor_id", "knn_confidence",
                            "room", "room_confidence", "rssi_margin_confidence",
-                           "outside", "_smoothed", "_stale")
+                           "outside", "_smoothed", "_stale",
+                           "_pinned", "anchor_true_x_m", "anchor_true_y_m",
+                           "anchor_true_floor_id", "anchor_drift_m", "anchor_drift_severity")
             obj_list = (snap.get("objects") or {}).get("list") or []
             for obj in obj_list:
                 key = obj.get("key", "")
@@ -2892,6 +3090,8 @@ async def ws_live_snapshot(hass: HomeAssistant, connection, msg) -> None:
         from .presence_coordinator import obj_is_identified  # noqa: PLC0415
         _away_s = away_timeout_s(hass)
         _lost_and_found = hass.data.get(DOMAIN, {}).get(DATA_LOST_AND_FOUND)
+        _lf_st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
+        _lf_followed = {str(f).upper() for f in ((_lf_st.data if _lf_st else {}).get("followed_addrs") or [])}
         if _lost_and_found:
             _prune_lost_and_found_strangers(hass, _lost_and_found,
                                             (snap.get("objects") or {}).get("list") or [])
@@ -2913,7 +3113,11 @@ async def ws_live_snapshot(hass: HomeAssistant, connection, msg) -> None:
                             label=_obj.get("user_label") or _obj.get("name"),
                             padspan_id=_obj.get("padspan_id"),
                             seen_at=time.time() - float(_obj.get("age_s") or 0),
-                            identified=obj_is_identified(_obj),
+                            # Followed counts too: the Follow button needs
+                            # no label, and the prune keeps followed devices.
+                            identified=(obj_is_identified(_obj)
+                                        or str(_obj.get("address") or "").upper() in _lf_followed
+                                        or _key.upper() in _lf_followed),
                         )
             _obj["room"] = ""
             _obj["away"] = True
@@ -3019,19 +3223,10 @@ async def ws_live_snapshot(hass: HomeAssistant, connection, msg) -> None:
     except Exception:
         pass
 
-    # ── Traceback: record AFTER all overlays (k-NN, stale injection) ─────────
-    # Objects now have x_m, y_m, floor_id, room (smoothed),
-    # room_confidence — everything the traceback view needs for precise placement.
-    try:
-        from .const import DATA_TRACEBACK  # noqa: PLC0415
-        _tb_store = hass.data.get(DOMAIN, {}).get(DATA_TRACEBACK)
-        if _tb_store:
-            _tb_objs = (snap.get("objects") or {}).get("list") or []
-            _tb_followed = set(_get_settings(hass).get("followed_addrs") or [])
-            _tb_store.record_frame(_tb_objs, followed_set=_tb_followed)
-            await _tb_store.async_maybe_save()
-    except Exception:
-        pass
+    # (Traceback recorded here, from a panel's request — so nothing was
+    # recorded while no PadSpan panel was open, and overnight playback was
+    # empty. It records from the presence poll now, which always runs:
+    # PresenceCoordinator._async_update_data.)
 
     # ── Expose suspend status ──────────────────────────────────────────────
     try:

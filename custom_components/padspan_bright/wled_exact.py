@@ -147,6 +147,12 @@ class WledLooksStore:
         await self.store.async_save(self.data)
 
 
+# The other edition's domain. The full edition's name is spelled in two
+# parts so the Bright build's rename of it leaves this one alone.
+_FULL_DOMAIN = "padspan" + "_ha"
+_OTHER_EDITION_DOMAIN = "padspan_bright" if DOMAIN == _FULL_DOMAIN else _FULL_DOMAIN
+
+
 def _store(hass: HomeAssistant) -> WledLooksStore | None:
     return (hass.data.get(DOMAIN) or {}).get(DATA_WLED_LOOKS)
 
@@ -914,12 +920,21 @@ async def _plain_calls(hass: HomeAssistant, targets: list[tuple[str, int | None]
     """Plain HA light calls, noted so their own state changes coming back
     through HA are never taken for a member switched from outside."""
     sent = hass.data.setdefault(DOMAIN, {}).setdefault(_PLAIN_SENT, {})
+    # Every member is tried: one that is offline used to end the loop, so
+    # the members after it never switched. The first failure is raised once
+    # they all have been, so the caller still hears about it.
+    first_err: Exception | None = None
     for eid, bri in targets:
         sent[eid] = _mono()
         try:
             await _plain_call(hass, eid, on, bri, transition)
+        except Exception as err:  # noqa: BLE001 - HA raises HomeAssistantError and others
+            _LOGGER.warning("Team member %s did not switch: %s", eid, err)
+            first_err = first_err or err
         finally:
             sent[eid] = _mono()
+    if first_err is not None:
+        raise first_err
 
 
 async def async_power(hass: HomeAssistant, entity_id: str, on: bool, brightness: int | None = None, *,
@@ -1194,6 +1209,46 @@ _LIVE_KEYS = ("send", "recv", "sgrp", "rgrp")
 _SWITCH_KEYS = ("join", "exact", "sync_off", "prior_sync")
 
 
+def restore_keeps_switch_state(current: dict | None, restored: Any) -> Any:
+    """A backup restore brings looks back, not what PadSpan did to each
+    device: whether it runs the device (join/exact), the sync it switched off
+    and the ORIGINAL sync it keeps to put back (prior_sync), and its team,
+    all describe the device's flash now. An older backup carried an earlier
+    picture - a device switched since read "WLED sync" while its sync stayed
+    off, and switching it again captured the already-off settings as the
+    originals. The live fields stay; a device only the live store knows
+    stays whole."""
+    if not isinstance(restored, dict):
+        return restored
+    live = (current or {}).get("devices") or {}
+    devices = dict(restored.get("devices") or {})
+    for mac, rec in live.items():
+        if not isinstance(rec, dict):
+            continue
+        old = devices.get(mac)
+        if isinstance(old, dict):
+            devices[mac] = {**old, **{k: copy.deepcopy(rec.get(k)) for k in (*_SWITCH_KEYS, "team_id")}}
+        elif rec.get("exact") or rec.get("team_id"):
+            devices[mac] = copy.deepcopy(rec)
+    return {**restored, "devices": devices}
+
+
+def restore_keeps_team_state(current_teams: Any, restored_teams: Any) -> list:
+    """The same for teams in settings: a team's mode and the members' prior
+    sync it keeps are the devices' state now. A team PadSpan runs now is
+    kept even if the backup predates it - dropping it would leave its
+    members with sync off and nothing that knows how to give it back."""
+    live = {t.get("id"): t for t in (current_teams or []) if isinstance(t, dict) and t.get("id")}
+    out = []
+    for t in (restored_teams or []):
+        if isinstance(t, dict) and t.get("id") in live:
+            cur = live.pop(t["id"])
+            t = {**t, "mode": cur.get("mode"), "prior": copy.deepcopy(cur.get("prior"))}
+        out.append(t)
+    out.extend(copy.deepcopy(t) for t in live.values() if t.get("mode") == "padspan")
+    return out
+
+
 def _sync_blocks(cfg: dict) -> dict:
     sync = (((cfg or {}).get("if") or {}).get("sync")) or {}
     return {"send": copy.deepcopy(sync.get("send") or {}), "recv": copy.deepcopy(sync.get("recv") or {})}
@@ -1359,6 +1414,54 @@ async def switch_to_wled(hass: HomeAssistant, rec: dict, tgt: dict) -> dict:
     if isinstance(res, dict) and res.get("waiting"):
         res.update(waiting=False, replaced=True, error="Not sent — the light was given back to WLED sync")
     return {"backup": backup, "before": before, "after": after}
+
+
+async def async_give_back_all(hass: HomeAssistant) -> list[str]:
+    """PadSpan is being removed: every device it runs gets its WLED sync
+    back, as Switch to WLED sync would. Switching to PadSpan writes sync off
+    into the device's saved config and the originals live only in this
+    store, so once PadSpan is gone nothing could put them back. Returns the
+    names of devices that could not be reached (they keep sync off).
+
+    A device the other edition (PadSpan Bright or PadSpan Bright) runs now is
+    left alone: someone who moved between them may run it from there, and
+    this store's record of it is old. Every other device is given back -
+    skipping them all stranded a Bright-to-HA move, whose HA install never
+    holds the original sync of devices it took over."""
+    st = await async_get_store(hass)
+    other = _OTHER_EDITION_DOMAIN
+    other_runs: set[str] = set()
+    try:
+        if hass.config_entries.async_entries(other):
+            from homeassistant.helpers.storage import Store  # noqa: PLC0415
+            _o = await Store(hass, 1, other + WLED_LOOKS_STORE_KEY[len(DOMAIN):]).async_load() or {}
+            other_runs = {str(m).upper() for m, r in (_o.get("devices") or {}).items()
+                          if isinstance(r, dict) and (r.get("join") == "padspan" or r.get("sync_off"))}
+    except Exception:  # noqa: BLE001 - unreadable: nothing is known to be the other's
+        other_runs = set()
+    missed: list[str] = []
+    for mac, rec in list((st.data.get("devices") or {}).items()):
+        if not isinstance(rec, dict) or (rec.get("join") != "padspan" and not rec.get("sync_off")):
+            continue
+        if str(rec.get("mac") or mac).upper() in other_runs:
+            _LOGGER.info("WLED %s is run by %s; left as it is", rec.get("name") or mac, other)
+            continue
+        ident = _identify(hass, device_id=rec.get("device_id"))
+        name = rec.get("name") or rec.get("mac") or "?"
+        if not ident or not ident.get("tgt"):
+            missed.append(name)
+            continue
+        try:
+            async with W.device_lock(hass, ident["tgt"]["host"]):
+                await switch_to_wled(hass, rec, ident["tgt"])
+        except Exception as err:  # noqa: BLE001 - removal must go on
+            _LOGGER.warning("Could not give %s back to WLED sync: %s", name, err)
+            missed.append(name)
+    await st.async_save()
+    if missed:
+        _LOGGER.warning("PadSpan removed; these WLED devices still have sync switched off "
+                        "(turn it back on in each device's Sync settings): %s", ", ".join(missed))
+    return missed
 
 
 # ── Websocket commands ───────────────────────────────────────────────────────

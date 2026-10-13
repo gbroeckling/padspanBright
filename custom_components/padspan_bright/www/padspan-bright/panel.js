@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.106";
-const RELEASE_BUILD_ID = "20261012T202252Z";
+const APP_VERSION = "0.38.122";
+const RELEASE_BUILD_ID = "20261013T160404Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -39,13 +39,26 @@ const BUILD_ID = (() => {
     return RELEASE_BUILD_ID;
   }
 })();
-const CHANNEL = "beta";
+const CHANNEL = "stable";
 
 // ── Editions and tiers ───────────────────────────────────────────────────────
 // Which surfaces this build shows (views/editions.js). Loaded with the same
 // cache-buster as everything else; a failure here must not take the panel
 // down, so the fallback is "show everything" — the full edition's answer.
 let EDITIONS = null;
+// What to do when the backend isn't the build this page loaded. An open
+// panel keeps running the JS it loaded, so a wall screen left on through an
+// update ran the old UI against the new backend until someone reloaded it.
+// Build ids are YYYYMMDDTHHMMSSZ, so they compare as times. A newer backend
+// is an update: a kiosk screen reloads itself, once per build (a reload that
+// didn't help must not loop). An older one is a page newer than the running
+// backend: files updated, HA not restarted yet (or a downgrade).
+function staleBuildAction(pageBuild, backendBuild, kiosk, reloadedFor){
+  if(!pageBuild || !backendBuild || pageBuild === backendBuild) return null;
+  const newer = backendBuild > pageBuild;
+  return { newer, reload: newer && !!kiosk && reloadedFor !== backendBuild };
+}
+
 const _editionsPromise = import(`./views/editions.js?b=${BUILD_ID}`)
   .then(m => { EDITIONS = m; })
   .catch(err => console.warn("PadSpan: editions module failed to load", err));
@@ -474,8 +487,9 @@ class PadSpanHaApp extends HTMLElement {
       versionInfo: null,
       settings: {},               // full settings dict from settings_get
       // Followed beacons — persisted to localStorage
-      followedAddrs: new Set(JSON.parse(localStorage.getItem("padspan_followed") || "[]")),
-      followAddr: localStorage.getItem("padspan_followAddr") || "",
+      // Read guarded: a browser that blocks storage threw here and left a blank panel.
+      followedAddrs: new Set((() => { try { return JSON.parse(localStorage.getItem("padspan_followed") || "[]"); } catch (e) { return []; } })()),
+      followAddr: (() => { try { return localStorage.getItem("padspan_followAddr") || ""; } catch (e) { return ""; } })(),
     };
 
     // ── Shadow DOM references (set in connectedCallback) ─────────────────
@@ -657,6 +671,7 @@ class PadSpanHaApp extends HTMLElement {
             </span>
           </div>
           <div id="toast" class="toast hidden"></div>
+          <div id="staleBuild" class="stale-build hidden"></div>
           <div id="modal" class="modal hidden"></div>
           <div id="content"></div>
         </main>
@@ -699,7 +714,11 @@ class PadSpanHaApp extends HTMLElement {
       } catch(e) {}
     };
     requestAnimationFrame(() => this._fitHeight());
-    window.addEventListener("resize", () => this._fitHeight());
+    // One listener: connectedCallback runs again on every sidebar re-entry
+    // and watchdog rebuild, and each run added another that nothing removed.
+    if(this._resizeHandler) window.removeEventListener("resize", this._resizeHandler);
+    this._resizeHandler = () => this._fitHeight();
+    window.addEventListener("resize", this._resizeHandler);
 
     this.$("#refresh").addEventListener("click", ()=>this._refreshAll(true));
     this.$("#autodiag").addEventListener("click", ()=>this._runAutoDiag(true));
@@ -1190,6 +1209,10 @@ class PadSpanHaApp extends HTMLElement {
       window.removeEventListener("keydown", this._modalEsc);
       this._modalEsc = null;
     }
+    if(this._resizeHandler){
+      window.removeEventListener("resize", this._resizeHandler);
+      this._resizeHandler = null;
+    }
   }
 
   // ── Anti-blank system ─────────────────────────────────────────────────────
@@ -1533,6 +1556,14 @@ class PadSpanHaApp extends HTMLElement {
           if(Date.now() - (this._settingsPollTs || 0) > 30000){
             this._settingsPollTs = Date.now();
             await this._fetchSettings();
+          }
+          // The build check also runs every 10 minutes: a wall screen never
+          // refreshes in full, and across an HA restart the panel can keep
+          // its connection object, so the refresh that carries it never ran.
+          if(Date.now() - (this._versionPollTs || 0) > 600000){
+            this._versionPollTs = Date.now();
+            await this._getVersionInfo();
+            try { this._checkBuild(); } catch(e){}
           }
         })(),
         timeout,
@@ -1885,6 +1916,35 @@ class PadSpanHaApp extends HTMLElement {
     }
   }
 
+  /** The backend's build arrives with every full refresh: first load, and
+   *  each reconnect after Home Assistant restarts. */
+  _checkBuild(){
+    const vi = this.state.versionInfo;
+    const be = (vi && typeof vi.build_id === "string") ? vi.build_id : "";
+    let reloadedFor = "";
+    try { reloadedFor = sessionStorage.getItem("padspan_reloaded_for") || ""; } catch(e) {}
+    const act = staleBuildAction(RELEASE_BUILD_ID, be, this.state.kioskMode, reloadedFor);
+    if(act && act.reload){
+      let remembered = false;
+      try { sessionStorage.setItem("padspan_reloaded_for", be); remembered = true; } catch(e) {}
+      if(remembered){ location.reload(); return; }   // can't remember it: show the bar, don't risk a loop
+    }
+    const bar = this.$("#staleBuild");
+    if(!bar) return;
+    bar.textContent = "";
+    if(!act){ bar.classList.add("hidden"); return; }
+    const theirs = (vi && vi.version) || "?";
+    bar.appendChild(document.createTextNode(act.newer
+      ? `PadSpan was updated to v${theirs}. This page is still running v${APP_VERSION}.`
+      : `This page is v${APP_VERSION}, but Home Assistant is running PadSpan v${theirs}. If you just updated, restart Home Assistant.`));
+    const btn = document.createElement("button");
+    btn.className = "btn inline";
+    btn.textContent = "Reload";
+    btn.addEventListener("click", () => location.reload());
+    bar.appendChild(btn);
+    bar.classList.remove("hidden");
+  }
+
   async _getStatus(){
     const res = await this._callWS({ type: "padspan_bright/status" });
     const entry = (res?.entries && res.entries[0]) ? res.entries[0] : {};
@@ -2089,6 +2149,8 @@ class PadSpanHaApp extends HTMLElement {
     this._recomputeDerived();
     try { this.state.timing.lastRefreshMs = Math.round(performance.now() - t0); } catch(e){}
     try { this._updateBadges(); } catch(e){}
+    this._versionPollTs = Date.now();
+    try { this._checkBuild(); } catch(e){}
     this._scheduleRender();
   }
 
@@ -2149,6 +2211,7 @@ class PadSpanHaApp extends HTMLElement {
     if(!active.length){
       banner.classList.add("hidden");
       if(mobilePill) mobilePill.classList.add("hidden");
+      this._emergencyListSig = "";
       return;
     }
     banner.classList.remove("hidden");
@@ -2156,6 +2219,12 @@ class PadSpanHaApp extends HTMLElement {
     if(mobilePill){ mobilePill.classList.remove("hidden"); mobilePill.textContent = `🚨 ${active.length}`; }
 
     listEl.className = "emergency-banner-list";
+    // Rebuilt only when the set of alarms changes: this runs on every poll,
+    // and rebuilding wiped a Reset -> Yes/No confirm within a second or five,
+    // so Yes was nearly impossible to press.
+    const _sig = active.map(([eid]) => eid + "=" + (this._hass?.states?.[eid]?.attributes?.friendly_name || "")).sort().join("|");
+    if(this._emergencyListSig === _sig && listEl.childElementCount) return;
+    this._emergencyListSig = _sig;
     listEl.innerHTML = "";
     for(const [eid] of active){
       const name = this._hass?.states?.[eid]?.attributes?.friendly_name || eid;
@@ -2182,6 +2251,7 @@ class PadSpanHaApp extends HTMLElement {
           yes.addEventListener("click", async (e2) => {
             e2.stopPropagation();
             wrap.innerHTML = "";
+            this._emergencyListSig = "";     // the next update rebuilds the row, Reset and all
             try { await this._callWS({ type: "padspan_bright/flood_reset", entity_id: eid }); await this._loadSettings(); }
             catch(err){ console.warn("flood reset failed", err); wrap.appendChild(makeResetBtn()); }
           });
@@ -2257,6 +2327,13 @@ class PadSpanHaApp extends HTMLElement {
           this.state._traceback._animTimer = null;
           this.state._traceback.playing = false;
         }
+      }
+      // Leaving Calibration ends any confirm it had open (Delete radio, an
+      // overlapping-map popup): the render guard reads these flags panel-wide,
+      // so a pending one kept every other view from rendering.
+      if (this.state.view === "calibration" && id !== "calibration") {
+        if (this.state._calibTune) this.state._calibTune._confirming = false;
+        if (this.state._calibBeacon) this.state._calibBeacon._confirming = false;
       }
       this.state.view = id;
       this._logEvent("view_change", id);
@@ -2695,10 +2772,13 @@ class PadSpanHaApp extends HTMLElement {
     if(this._modalEsc) window.removeEventListener("keydown", this._modalEsc);
     const esc = (e)=>{ if(e.key === "Escape"){ this._closeModal(); } };
     this._modalEsc = esc;
-    window.addEventListener("keydown", esc, { once: true });
+    // Not { once: true }: typing a letter in the modal's own box (Tag,
+    // Rename) used the listener up, and Escape stopped closing it.
+    window.addEventListener("keydown", esc);
   }
 
   _closeModal(){
+    if(this._modalEsc){ window.removeEventListener("keydown", this._modalEsc); this._modalEsc = null; }
     if(!this.$modal) return;
     this.$modal.classList.add("hidden");
     this.$modal.innerHTML = "";
@@ -3449,7 +3529,7 @@ class PadSpanHaApp extends HTMLElement {
   // but user interactions are sacred (never destroy mid-action).
   _renderCurrentView(fromPoll){
     if(this.state._factoryResetInProgress) return;
-    if(this.state._calibTune?._dragging || this.state._calibBeacon?._dragging || this.state._calibTune?._confirming || this.state._calibBeacon?._confirming) return;
+    if(this.state.view === "calibration" && (this.state._calibTune?._dragging || this.state._calibBeacon?._dragging || this.state._calibTune?._confirming || this.state._calibBeacon?._confirming)) return;
     if(this.state.maps?._stackDragging || this.state.maps?._editDragging) return;
     if(this.state._traceback?.active && this.state.view === "traceback") return;
     // Maps upload/stack/edit tabs have fragile state (file inputs, drag handles)

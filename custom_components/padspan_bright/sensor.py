@@ -25,6 +25,7 @@ Automation example:
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -39,45 +40,16 @@ from .const import (
     DOMAIN,
     DATA_SETTINGS,
     DATA_DEVICE_REGISTRY,
-    DEFAULT_REF_POWER,
-    DEFAULT_PATH_LOSS_EXP,
 )
 from .presence_coordinator import PresenceCoordinator
-from .presence_rules import away_timeout_s
+from .presence_rules import away_timeout_s, calc_distance as _calc_distance
+from .entity_identity import alternates_of, pick_uid_key, registry_ready, uid_safe
 
 _LOGGER = logging.getLogger(__name__)
 
 # The away rule lives in presence_rules; this alias keeps existing call sites
 # reading naturally while there is exactly one implementation.
 _away_timeout_s = away_timeout_s
-
-
-def _distance_params(hass: HomeAssistant) -> tuple[float, float]:
-    """Return (ref_power, path_loss_exp) from settings, with safe defaults."""
-    st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
-    data = (st.data or {}) if st else {}
-    ref = float(data.get("ref_power", DEFAULT_REF_POWER))
-    exp = float(data.get("path_loss_exp", DEFAULT_PATH_LOSS_EXP))
-    return max(-100.0, min(0.0, ref)), max(1.0, min(4.0, exp))
-
-
-def _calc_distance(rssi: float, obj: dict, hass: HomeAssistant) -> float:
-    """Calculate distance using path-loss formula, preferring device's own RSSI@1m."""
-    ref, n = _distance_params(hass)
-    # A device-advertised reference is only usable when it is a plausible
-    # RSSI@1m (e.g. iBeacon measured power, ~-59 dBm).  BLE AD 0x0A
-    # "Tx Power Level" is radiated power (0..+12 dBm), NOT RSSI@1m — using it
-    # raw yields ~900 m distances.  Mirror the coordinator's spatial-path
-    # validation: only trust values in [-90, -30], else keep configured ref.
-    tx_power = obj.get("tx_power")
-    if tx_power is not None:
-        try:
-            _tp = float(tx_power)
-        except (TypeError, ValueError):
-            _tp = None
-        if _tp is not None and -90.0 <= _tp <= -30.0:
-            ref = _tp
-    return round(max(0.0, 10 ** ((ref - rssi) / (10.0 * n))), 1)
 
 
 async def async_setup_entry(
@@ -106,10 +78,14 @@ async def async_setup_entry(
     # always prefers the coordinator entry with the lowest age_s (freshest
     # data), on the theory that whichever key is currently reporting live
     # data is the one still attached to the real device.
+    _since = time.monotonic()
+
     @callback
     def _check_new() -> None:
         if not coordinator.data:
             return
+        if not registry_ready(hass, _since):
+            return   # its saved ids decide the unique_ids (entity_identity)
         st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
         _sd = (st.data or {}) if st else {}
         _area_on = _sd.get("ha_entity_area_enabled", True)
@@ -123,59 +99,73 @@ async def async_setup_entry(
             ((k, o) for k, o in coordinator.data.items() if _should_track(o)),
             key=lambda kv: kv[1].get("age_s") if isinstance(kv[1].get("age_s"), (int, float)) else 999999,
         )
+        by_label: dict[str, list[tuple[str, str]]] = {}
+        alt_label: dict[str, list[str]] = {}
+        for key, obj in items:
+            by_label.setdefault(obj["user_label"], []).append((key, _stable_uid_key(hass, key, obj)))
+            alt_label.setdefault(obj["user_label"], []).extend(alternates_of(key, obj))
+
+        def _fresher(key: str, obj: dict[str, Any], cur_key: str) -> bool:
+            if key == cur_key:
+                return False
+            age = obj.get("age_s")
+            old_age = (coordinator.data or {}).get(cur_key, {}).get("age_s")
+            return isinstance(age, (int, float)) and (not isinstance(old_age, (int, float)) or age < old_age)
+
         for key, obj in items:
             if not _should_track(obj):
                 continue
             label = obj["user_label"]
-            if key not in created:
-                if label in label_sensors:
-                    # Label already has entities — migrate keys if this one is fresher
-                    existing = label_sensors[label]
-                    if existing:
-                        old_key = existing[0]._key
-                        old_obj = (coordinator.data or {}).get(old_key, {})
-                        old_age = old_obj.get("age_s")
-                        age = obj.get("age_s")
-                        if (isinstance(age, (int, float)) and
-                            (not isinstance(old_age, (int, float)) or age < old_age)):
-                            for ent in existing:
-                                _LOGGER.debug(
-                                    "Migrating sensor '%s' from key %s to fresher key %s",
-                                    label, ent._key, key,
-                                )
-                                ent._key = key
-                else:
-                    sensors: list[SensorEntity] = []
-                    if _area_on:
-                        s = PadSpanAreaSensor(coordinator, key)
-                        new.append(s)
-                        sensors.append(s)
-                    if _dist_on:
-                        s = PadSpanDistanceSensor(coordinator, key)
-                        new.append(s)
-                        sensors.append(s)
-                    label_sensors[label] = sensors
-                created.add(key)
+            if label in label_sensors:
+                # Every poll, not only when a new key appears: once both keys
+                # of a label were known, a sensor stayed on the one that went
+                # quiet (not_home) while the tracker followed the live one.
+                existing = label_sensors[label]
+                if existing and _fresher(key, obj, existing[0]._key):
+                    for ent in existing:
+                        _LOGGER.debug(
+                            "Migrating sensor '%s' from key %s to fresher key %s",
+                            label, ent._key, key,
+                        )
+                        ent._key = key
+            elif key not in created:
+                uid = pick_uid_key(hass, "sensor", lambda u: [f"padspan_bright__{uid_safe(u)}__area",
+                                                              f"padspan_bright__{uid_safe(u)}__distance"],
+                                   by_label[label], alt_label.get(label))
+                sensors: list[SensorEntity] = []
+                if _area_on:
+                    s = PadSpanAreaSensor(coordinator, key, uid)
+                    new.append(s)
+                    sensors.append(s)
+                if _dist_on:
+                    s = PadSpanDistanceSensor(coordinator, key, uid)
+                    new.append(s)
+                    sensors.append(s)
+                label_sensors[label] = sensors
+            created.add(key)
             # Per-scanner distance sensors — one per device × scanner pair
             if _scan_on:
                 for source in (obj.get("_source_rssi") or {}).keys():
                     pair = (key, source)
-                    if pair not in created_scanner:
-                        label_pair = (label, source)
-                        if label_pair in label_scanner_sensors:
-                            # Migrate key if fresher
-                            existing_s = label_scanner_sensors[label_pair]
-                            old_obj = (coordinator.data or {}).get(existing_s._key, {})
-                            old_age = old_obj.get("age_s")
-                            age = obj.get("age_s")
-                            if (isinstance(age, (int, float)) and
-                                (not isinstance(old_age, (int, float)) or age < old_age)):
-                                existing_s._key = key
-                        else:
-                            s = PadSpanScannerDistanceSensor(coordinator, key, source)
-                            new.append(s)
-                            label_scanner_sensors[label_pair] = s
-                        created_scanner.add(pair)
+                    label_pair = (label, source)
+                    if label_pair in label_scanner_sensors:
+                        existing_s = label_scanner_sensors[label_pair]
+                        if _fresher(key, obj, existing_s._key):
+                            existing_s._key = key
+                    elif pair not in created_scanner:
+                        # One already registered keeps its name (an older
+                        # version named a scanner sensor after the key it
+                        # was first heard on); a new one takes the label's
+                        # area/distance identity, so all sit on one device.
+                        _lbl = label_sensors.get(label)
+                        uid = pick_uid_key(
+                            hass, "sensor", lambda u: [f"padspan_bright__{uid_safe(u)}__dist__{uid_safe(source)}"],
+                            by_label[label], alt_label.get(label),
+                            fallback=_lbl[0]._uid_key if _lbl else None)
+                        s = PadSpanScannerDistanceSensor(coordinator, key, source, uid)
+                        new.append(s)
+                        label_scanner_sensors[label_pair] = s
+                    created_scanner.add(pair)
         if new:
             _LOGGER.debug("Adding %d new PadSpan sensor(s)", len(new))
             async_add_entities(new)
@@ -242,14 +232,14 @@ class PadSpanAreaSensor(CoordinatorEntity[PresenceCoordinator], SensorEntity):
     _attr_icon = "mdi:map-marker"
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator: PresenceCoordinator, key: str) -> None:
+    def __init__(self, coordinator: PresenceCoordinator, key: str, uid_key: str | None = None) -> None:
         super().__init__(coordinator)
         self._key = key
         obj = (coordinator.data or {}).get(key, {})
         self._init_label = str(obj.get("user_label") or obj.get("name") or key)
         self._init_uid = _device_uid(obj) or key
         # Snapshot at creation: unique_id must never follow _key migrations
-        self._uid_key = _stable_uid_key(coordinator.hass, key, obj)
+        self._uid_key = uid_key or _stable_uid_key(coordinator.hass, key, obj)
 
     # ── internal helpers ─────────────────────────────────────────────────────
 
@@ -344,14 +334,14 @@ class PadSpanDistanceSensor(CoordinatorEntity[PresenceCoordinator], SensorEntity
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 1
 
-    def __init__(self, coordinator: PresenceCoordinator, key: str) -> None:
+    def __init__(self, coordinator: PresenceCoordinator, key: str, uid_key: str | None = None) -> None:
         super().__init__(coordinator)
         self._key = key
         obj = (coordinator.data or {}).get(key, {})
         self._init_label = str(obj.get("user_label") or obj.get("name") or key)
         self._init_uid = _device_uid(obj) or key
         # Snapshot at creation: unique_id must never follow _key migrations
-        self._uid_key = _stable_uid_key(coordinator.hass, key, obj)
+        self._uid_key = uid_key or _stable_uid_key(coordinator.hass, key, obj)
 
     @property
     def _obj(self) -> dict[str, Any]:
@@ -430,7 +420,7 @@ class PadSpanScannerDistanceSensor(CoordinatorEntity[PresenceCoordinator], Senso
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 1
 
-    def __init__(self, coordinator: PresenceCoordinator, key: str, source: str) -> None:
+    def __init__(self, coordinator: PresenceCoordinator, key: str, source: str, uid_key: str | None = None) -> None:
         super().__init__(coordinator)
         self._key = key
         self._source = source
@@ -438,7 +428,7 @@ class PadSpanScannerDistanceSensor(CoordinatorEntity[PresenceCoordinator], Senso
         self._init_label = str(obj.get("user_label") or obj.get("name") or key)
         self._init_uid = _device_uid(obj) or key
         # Snapshot at creation: unique_id must never follow _key migrations
-        self._uid_key = _stable_uid_key(coordinator.hass, key, obj)
+        self._uid_key = uid_key or _stable_uid_key(coordinator.hass, key, obj)
 
     @property
     def _obj(self) -> dict[str, Any]:

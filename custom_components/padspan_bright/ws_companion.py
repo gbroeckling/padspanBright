@@ -18,9 +18,66 @@ from .const import (
     DOMAIN,
     DATA_SETTINGS,
     DATA_OBJECTS,
-    DATA_COORDINATOR,
 )
 from .bluetooth_live import get_bluetooth_live
+
+
+def _alnum(s: Any) -> str:
+    return "".join(ch for ch in str(s or "").lower() if ch.isalnum())
+
+
+async def _phone_canonical_ids(hass: HomeAssistant, follow_key: str, obj_store: Any, label: str) -> list[str]:
+    """The IRK identity keys companion_follow labelled for this phone (see unfollow)."""
+    found: list[str] = []
+    try:
+        resolver = await _get_ble_resolver(hass)
+        ble_snap = get_bluetooth_live(hass).get_snapshot(max_ads=2000, max_age_s=600)
+        for ad in (ble_snap.get("advertisements") or []):
+            ib = resolver.parse_ibeacon(ad.get("manufacturer_data") or {})
+            if not ib or f"ibeacon:{ib['uuid']}:{ib['major']}:{ib['minor']}".upper() != follow_key:
+                continue
+            resolved = resolver.resolve_address(str(ad.get("address") or "").upper())
+            if resolved and resolved.get("canonical_id"):
+                found.append(str(resolved["canonical_id"]))
+            break
+    except Exception:
+        pass
+    if not found and label:
+        try:
+            same = [k for k, v in (obj_store.all() or {}).items()
+                    if str(k).lower().startswith("irk:")
+                    and str((v or {}).get("label") or "").strip() == label]
+            if len(same) == 1:
+                found = same
+        except Exception:
+            pass
+    return found
+
+
+def mobile_app_notify_service(hass: HomeAssistant, device: Any) -> str | None:
+    """The notify service the Companion App registered for this phone, from
+    the services that exist. The app names it mobile_app_<slugified device
+    name>; the device's ("mobile_app", id) identifier is the app's own random
+    device id, not that slug. Tried first, the identifier always gave a
+    target — so the name was never tried, the command went to a service that
+    does not exist, and the BLE Transmitter never turned on. Names are
+    compared letters and digits only, so slugify's handling of "'" or "-"
+    cannot miss."""
+    try:
+        svcs = [s for s in hass.services.async_services().get("notify", {})
+                if isinstance(s, str) and s.startswith("mobile_app_")]
+    except Exception:
+        return None
+    ids = {f"mobile_app_{i[1]}" for i in (device.identifiers or set())
+           if isinstance(i, tuple) and len(i) == 2 and i[0] == "mobile_app"}
+    for s in svcs:
+        if s in ids:
+            return s
+    want = {_alnum(getattr(device, "name", "")), _alnum(getattr(device, "name_by_user", ""))} - {""}
+    for s in svcs:
+        if _alnum(s[len("mobile_app_"):]) in want:
+            return s
+    return None
 from .private_ble_resolver import PrivateBLEResolver, get_resolver as _get_ble_resolver
 from .util import ha_devices
 from .ws_common import _get_settings, _is_rpa_addr
@@ -361,7 +418,11 @@ async def ws_companion_discover(hass: HomeAssistant, connection, msg) -> None:
         # Companion App registers, even if all sensors are disabled and
         # no entities exist.  This is the most reliable indicator.
         _debug_notify_services: list[str] = []
-        _phones_names_lc = {p.get("device_name", "").lower() for p in phones}
+        # Compared letters and digits only: the service is the SLUGIFIED name
+        # ("Garry's Pixel 8" -> mobile_app_garry_s_pixel_8), so a lowercase
+        # compare never matched an apostrophe or a hyphen, and the phone was
+        # listed twice — once as "sensor not registered".
+        _phones_names_lc = {_alnum(p.get("device_name", "")) for p in phones}
         try:
             all_services = hass.services.async_services()
             notify_svcs = all_services.get("notify", {})
@@ -371,7 +432,7 @@ async def ws_companion_discover(hass: HomeAssistant, connection, msg) -> None:
                     # Derive a human-readable device name
                     dev_slug = svc_name[len("mobile_app_"):]
                     dev_name = dev_slug.replace("_", " ").title()
-                    if dev_name.lower() in _phones_names_lc:
+                    if _alnum(dev_slug) in _phones_names_lc:
                         continue  # already found via entity/device registry
                     # Try to find matching device in device registry
                     _dev_model = ""
@@ -381,8 +442,7 @@ async def ws_companion_discover(hass: HomeAssistant, connection, msg) -> None:
                         from homeassistant.helpers import device_registry as dr
                         dev_reg = dr.async_get(hass)
                         for device in ha_devices(dev_reg):
-                            dn = (device.name or "").lower().replace(" ", "_")
-                            if dn == dev_slug or (device.name_by_user or "").lower().replace(" ", "_") == dev_slug:
+                            if _alnum(dev_slug) in {_alnum(device.name), _alnum(device.name_by_user)} - {""}:
                                 dev_name = device.name or device.name_by_user or dev_name
                                 _dev_model = device.model or ""
                                 _dev_manufacturer = device.manufacturer or ""
@@ -735,18 +795,12 @@ async def ws_companion_follow(hass: HomeAssistant, connection, msg) -> None:
                     dev_reg = dr.async_get(hass)
                     device = dev_reg.async_get(ent_entry.device_id)
                     if device:
-                        # Find the notify service for this mobile_app device.
-                        # Convention: notify.mobile_app_<device_name_slug>
-                        notify_target = None
-                        for ident in device.identifiers:
-                            if ident[0] == "mobile_app":
-                                notify_target = f"mobile_app_{ident[1]}"
-                                break
+                        from .telemetry import bump  # noqa: PLC0415
+                        notify_target = mobile_app_notify_service(hass, device)
                         if not notify_target:
-                            # Fallback: derive from device name
-                            dname = (device.name or "").lower().replace(" ", "_").replace("-", "_")
-                            if dname:
-                                notify_target = f"mobile_app_{dname}"
+                            bump(hass, "companion_tx_no_service")
+                            results.append("No notify service found for this phone — "
+                                           "turn on the BLE Transmitter in the Companion App")
                         if notify_target:
                             await hass.services.async_call(
                                 "notify",
@@ -758,12 +812,15 @@ async def ws_companion_follow(hass: HomeAssistant, connection, msg) -> None:
                                 blocking=True,
                             )
                             transmitter_enabled = True
+                            bump(hass, "companion_tx_sent")
                             results.append("BLE Transmitter command sent to phone")
                             _LOGGER.info(
                                 "Sent command_ble_transmitter turn_on via notify.%s",
                                 notify_target,
                             )
             except Exception as te:
+                from .telemetry import bump as _bump  # noqa: PLC0415
+                _bump(hass, "companion_tx_failed")
                 _LOGGER.warning(
                     "Failed to send BLE Transmitter command for %s: %s",
                     transmitter_eid,
@@ -800,6 +857,10 @@ async def ws_companion_follow(hass: HomeAssistant, connection, msg) -> None:
 @websocket_api.websocket_command({
     "type": "padspan_bright/companion_unfollow",
     vol.Required("ibeacon_key"): str,
+    # Overview's "Track Your Phone" Unfollow sends the name too; a schema
+    # without it made HA refuse the whole call ("extra keys not allowed"),
+    # so that button always failed. Accepted, not needed.
+    vol.Optional("device_name"): str,
 })
 @websocket_api.async_response
 async def ws_companion_unfollow(hass: HomeAssistant, connection, msg) -> None:
@@ -812,9 +873,19 @@ async def ws_companion_unfollow(hass: HomeAssistant, connection, msg) -> None:
         # 1) Remove label from ObjectStore
         obj_store = hass.data.get(DOMAIN, {}).get(DATA_OBJECTS)
         if obj_store:
+            _label = str(((obj_store.get(follow_key) or {}).get("label")) or "").strip()
             await obj_store.async_delete(ibeacon_key)
             await obj_store.async_delete(follow_key)
             results.append("Label removed")
+            # Follow also labelled the phone's IRK identity (its canonical_id),
+            # and unfollow left that label — the phone stayed identified, with
+            # its HA entities, Traceback and Lost & Found. Remove it too: the
+            # one resolved from the phone's iBeacon now, as follow found it,
+            # else the one IRK entry carrying the same label (never when two
+            # share it — that could be another device of the same name).
+            for _cid in await _phone_canonical_ids(hass, follow_key, obj_store, _label):
+                await obj_store.async_delete(_cid)
+                results.append("IRK identity label removed")
 
         # 2) Remove from followed_addrs
         st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
@@ -827,7 +898,7 @@ async def ws_companion_unfollow(hass: HomeAssistant, connection, msg) -> None:
 
         # 3) Clear coordinator state so object doesn't linger as stale
         try:
-            _coord_uf = hass.data.get(DOMAIN, {}).get(DATA_COORDINATOR)
+            _coord_uf = hass.data.get(DOMAIN, {}).get("presence_coordinator")
             if _coord_uf:
                 _coord_uf.clear_object_state(ibeacon_key)
         except Exception:

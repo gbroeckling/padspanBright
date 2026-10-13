@@ -330,3 +330,104 @@ export function tuneReconcileDraft(mapObj, draftRows, fabricPositions, transform
   }
   return next;
 }
+
+// ── Beacon Tune (issue #89) ─────────────────────────────────────────────────
+// Beacon Tune's Save and its after-placement save went through the dirty
+// maps and wrote nothing, so a fixed beacon placed there never reached the
+// fabric. Same rule as the receivers above: EDIT INTENT = DIFFERENCE FROM
+// BASELINE, keyed by beacon key. A beacon is written only when its fractions
+// differ from the ones it had when last synced, or it has no baseline (placed
+// this session). Untouched beacons never post — a pin set in Mapping is never
+// restated from Beacon Tune's copy of it — and the view baselines the
+// tracked objects it pins for display itself, so a phone is never written as
+// a fixed beacon just because Beacon Tune showed it.
+export function tuneBeaconBaseline(draftRows) {
+  const out = {};
+  for (const b of draftRows || []) {
+    if (b && b.key) out[b.key] = { x: b.x, y: b.y };
+  }
+  return out;
+}
+
+// Why a beacon with no fabric pin yet must not get one, or "" (#81): a pin
+// locks the device's room to the spot and adds auto-calibration points there
+// while it is elsewhere, so nothing known to move is pinned, whichever way
+// its row was made (shown at its room's centre, placed from the list,
+// relocated, dragged):
+//   "tracked"  the auto-pin showed it at its room's centre (_tracked);
+//   "phone"    private_ble, live or on its row: an IRK phone or watch, or a
+//              Find My or bridged tag carried across address changes;
+//   "followed" followed by its key or its bare address (follows hold the
+//              address or entity id, an iBeacon's its key; panel.js).
+// Anything else (ble, ibeacon, entity) is pinned where it is placed. A beacon
+// that already has a fabric pin is never asked: moving it moves its pin.
+export function tuneBeaconHeld(row, obj, followedHas) {
+  if (row._tracked) return "tracked";
+  if (row.kind === "private_ble" || (obj && obj.kind === "private_ble")) return "phone";
+  if (typeof followedHas === "function") {
+    const key = String(row.key || "");
+    const ids = [key, key.replace(/^(ble:|entity:|ibeacon:)/, ""), obj && obj.address, obj && obj.entity_id];
+    if (ids.some(id => id && followedHas(id))) return "followed";
+  }
+  return "";
+}
+
+// The toast for the rows tuneBeaconWrites held back: each by name, and why.
+// `capture` false: auto-calibrate is off, so no 60 s capture runs either.
+const _HELD_WHY = {
+  tracked: "is only shown at its room's centre (tracked)",
+  phone: "moves with someone (a phone or Find My tag)",
+  followed: "moves with someone (followed)",
+};
+export function tuneBeaconHeldText(held, capture) {
+  return (held || []).map(h => `${h.label || h.key} ${_HELD_WHY[h.reason] || _HELD_WHY.phone} - not pinned` +
+    (capture === false ? "" : "; its 60 s calibration still runs")).join(". ");
+}
+
+// Returns { writes: [{key,x_m,y_m,floor_id,kind,label,x,y}], invalid: [key…],
+// refused: bool, held: [{key,label,reason,x,y}] }. x/y are the submitted
+// fractions, for the baseline. No z_m: the backend keeps a stored height when
+// it is left out. `guard` (the view's): { pinned: the fabric's beacon pins
+// (model.beacon_positions_m), objs: Map key -> live object, followedHas }.
+// A moved row whose key has a fabric pin is always written; one without is
+// held back when tuneBeaconHeld gives a reason, and reported in `held`.
+export function tuneBeaconWrites(mapObj, draftRows, transforms, baselineMap, guard) {
+  const tf = transforms ? transforms[mapObj.id] : null;
+  const writes = [];
+  const invalid = [];
+  const held = [];
+  const seen = new Set();
+  const base = baselineMap || {};
+  const g = guard || {};
+  const pinned = g.pinned || {};
+  // What changed comes first: a map with nothing to write is not refused for
+  // having no metre placement (it was, and stayed "unsaved" for good).
+  const changed = [];
+  for (const b of draftRows || []) {
+    const key = (b && b.key) || "";
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const was = base[key];
+    if (was && was.x === b.x && was.y === b.y) continue;
+    if (!pinned[key]) {
+      const reason = tuneBeaconHeld(b, g.objs ? g.objs.get(key) : null, g.followedHas);
+      if (reason) { held.push({ key, label: b.label || "", reason, x: b.x, y: b.y }); continue; }
+    }
+    changed.push(b);
+  }
+  if (!changed.length) return { writes, invalid, refused: false, held };
+  if (!tunePlacementReadable(tf)) return { writes: [], invalid: [], refused: true, held };
+  for (const b of changed) {
+    const key = b.key;
+    const fx = _finiteNum(b.x), fy = _finiteNum(b.y);
+    if (fx === null || fy === null) { invalid.push(key); continue; }
+    const m = mapFracToMetres(tf, fx, fy);
+    if (!m || !Number.isFinite(m[0]) || !Number.isFinite(m[1])) {
+      return { writes: [], invalid, refused: true, held };
+    }
+    writes.push({ key, x_m: Math.round(m[0] * 1000) / 1000,
+      y_m: Math.round(m[1] * 1000) / 1000, floor_id: mapObj.floor_id || "main",
+      kind: b.kind || "", label: b.label || "", x: b.x, y: b.y });
+  }
+  return { writes, invalid, refused: false, held };
+}

@@ -174,6 +174,10 @@ def _claim_objects(people: list[dict[str, Any]], objects: list[dict[str, Any]]) 
                 continue
             label = str(obj.get("user_label") or "").strip().lower()
             linked = {str(e) for e in (obj.get("linked_entities") or [])}
+            # An entity object (a Bermuda or other tracker in HA) is the
+            # person's tracker itself; only linked_entities was checked.
+            if obj.get("entity_id"):
+                linked.add(str(obj["entity_id"]))
             if (label and label in person["match_names"]) or (linked & person["trackers"]):
                 obj["_claimed"] = True
                 person["room"] = obj.get("room") or None
@@ -185,6 +189,11 @@ def _irk_phones(objects: list[dict[str, Any]], people: list[dict[str, Any]]) -> 
     """IRK-resolved phones are known people too; match to a person by name, else add one."""
     for obj in objects:
         if obj.get("kind") != "private_ble" or obj.get("_claimed"):
+            continue
+        # A phone, not everything shaped like one: a Find My tag (findmy.py)
+        # and a tag bridged across an address change are private_ble too,
+        # and each counted as another person in the house.
+        if obj.get("findmy") or obj.get("bridge_match"):
             continue
         name = str(obj.get("user_label") or obj.get("name") or "").strip()
         owner = next((p for p in people if name.lower() in p["match_names"]), None) if name else None
@@ -264,21 +273,43 @@ def _fp_distance(fp1: dict[str, float], fp2: dict[str, float]) -> float:
 
 
 def _cluster(fps: dict[str, dict[str, float]], thresh: float) -> list[list[str]]:
-    """Greedy average-linkage merge until every pair is further apart than thresh."""
+    """Greedy average-linkage merge until every pair is further apart than thresh.
+
+    Each pairwise distance is computed once and clusters keep the SUM of
+    their cross distances, updated on a merge (sum(i+j, k) = sum(i, k) +
+    sum(j, k)) - the same merges as recomputing every pair each round, which
+    was roughly cubic in fingerprint distances and took 2.5 s for 150
+    addresses on HA's event loop.
+    """
     addrs = list(fps)
-    clusters: list[list[int]] = [[i] for i in range(len(addrs))]
-    while len(clusters) > 1:
+    n = len(addrs)
+    members: list[list[int]] = [[i] for i in range(n)]
+    sums: list[list[float]] = [[0.0] * n for _ in range(n)]
+    for a in range(n):
+        for b in range(a + 1, n):
+            d = _fp_distance(fps[addrs[a]], fps[addrs[b]])
+            sums[a][b] = sums[b][a] = d
+    alive = list(range(n))
+    while len(alive) > 1:
         best = (thresh, -1, -1)
-        for ci in range(len(clusters)):
-            for cj in range(ci + 1, len(clusters)):
-                dists = [_fp_distance(fps[addrs[a]], fps[addrs[b]]) for a in clusters[ci] for b in clusters[cj]]
-                avg = sum(dists) / len(dists)
+        for x in range(len(alive)):
+            ci = alive[x]
+            ni = len(members[ci])
+            row = sums[ci]
+            for y in range(x + 1, len(alive)):
+                cj = alive[y]
+                avg = row[cj] / (ni * len(members[cj]))
                 if avg < best[0]:
                     best = (avg, ci, cj)
         if best[1] < 0:
             break
-        clusters[best[1]].extend(clusters.pop(best[2]))
-    return [[addrs[i] for i in members] for members in clusters]
+        ci, cj = best[1], best[2]
+        for ck in alive:
+            if ck not in (ci, cj):
+                sums[ci][ck] = sums[ck][ci] = sums[ci][ck] + sums[cj][ck]
+        members[ci].extend(members[cj])
+        alive.remove(cj)
+    return [[addrs[i] for i in members[c]] for c in alive]
 
 
 def _sensor_rooms(hass: HomeAssistant, room_names: dict[str, str], room_floor: dict[str, str]) -> dict[str, Any]:

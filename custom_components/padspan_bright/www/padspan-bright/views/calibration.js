@@ -52,7 +52,8 @@ const { mapXform, worldGauge, metresToWorld, mapFracToMetres,
   await import(`./stack_transform.js${new URL(import.meta.url).search}`);
 const { tuneSavePlanInit, tuneDiffMapDraft, tuneMissingFabricPins, tuneConflictingSources,
         tuneReconcileDraft, tuneSyncTuneDrafts, tuneSnapBaseline,
-        tuneTryAcquire, tuneRelease, tuneLivePhase, tuneWriteBlock, tuneRadioSig } =
+        tuneTryAcquire, tuneRelease, tuneLivePhase, tuneWriteBlock, tuneRadioSig,
+        tuneBeaconBaseline, tuneBeaconWrites, tuneBeaconHeldText } =
   await import(`./tune_save_plan.js${new URL(import.meta.url).search}`);
 tuneSavePlanInit({ mapFracToMetres, metresToMapFrac });
 
@@ -1601,10 +1602,128 @@ function _modelTab(ctx, el, cs, calData) {
   }
   wrap.appendChild(computeCard);
 
+  // Actions (Export / Import / Clear All). Built before the empty-state
+  // return too: with no points is exactly when Import is needed.
+  const _actionsCard = () => {
+    const actCard = el("div", { class: "card" });
+    actCard.appendChild(el("div", { style: "font-weight:700;font-size:14px;margin-bottom:10px" }, "Actions"));
+
+    // Export JSON
+    const expBtn = el("button", { class: "btn inline" }, "Export JSON");
+    expBtn.addEventListener("click", () => {
+      const blob = new Blob([JSON.stringify(calData, null, 2)], { type: "application/json" });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href = url; a.download = "padspan_calibration.json";
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+    });
+    actCard.appendChild(expBtn);
+
+    // Import — the counterpart Export JSON never had (Garry, 2026-09-10:
+    // "do 2-10" -> #10). Mirrors Maps' own "Backup All Maps (JSON)" /
+    // "Restore from Backup" round-trip (maps.js's Export tab), but there is
+    // no batch calibration-restore endpoint — calibration_save_point saves
+    // ONE point and always mints it a fresh id (calibration_store.py's
+    // async_add_point), so a point-by-point loop is correct here, not a
+    // shortcut, and duplicate detection has to happen on the client since the
+    // backend never sees the old id to compare against. The model itself is
+    // deliberately NOT restored from the file — it is a derived artifact of
+    // the points (calibration_compute_model), not raw data; recomputing it
+    // from the restored points is the right move, not re-injecting a stale
+    // serialized one.
+    const impWrap = el("div", { style: "margin-top:14px;border-top:1px solid #1b3526;padding-top:12px" });
+    impWrap.appendChild(el("div", { style: "font-weight:600;font-size:13px;margin-bottom:4px" }, "Import"));
+    impWrap.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+      "Choose a padspan_calibration.json file exported above. Points that already exist (same map, position and collection time) are skipped."));
+
+    const impInput = document.createElement("input");
+    impInput.type = "file"; impInput.accept = ".json,application/json"; impInput.style.display = "none";
+    const impPreview = el("div", { style: "font-size:12px;color:#94a3b8;min-height:18px;margin-top:6px" });
+    const impStatus = el("div", { class: "muted", style: "font-size:12px;min-height:18px;margin-top:4px" });
+    const impBtn = el("button", { class: "btn inline", style: "display:none" }, "Import Points");
+    let _importData = null;
+
+    const _dedupeKey = (p) => `${p.map_id}|${Number(p.x_frac).toFixed(4)}|${Number(p.y_frac).toFixed(4)}|${p.collected_at || ""}`;
+
+    impInput.addEventListener("change", async () => {
+      const file = impInput.files?.[0]; if (!file) return;
+      impPreview.textContent = "Reading…"; impBtn.style.display = "none"; _importData = null;
+      try {
+        const parsed = JSON.parse(await file.text());
+        if (!Array.isArray(parsed.points)) {
+          impPreview.textContent = "❌ Not a valid PadSpan calibration export."; return;
+        }
+        const existingKeys = new Set(pts.map(_dedupeKey));
+        const toImport = parsed.points.filter(p => !existingKeys.has(_dedupeKey(p)));
+        const skipCount = parsed.points.length - toImport.length;
+        impPreview.textContent = `${parsed.points.length} point${parsed.points.length !== 1 ? "s" : ""} in file: ${toImport.length} to import${skipCount ? `, ${skipCount} already present (skipped)` : ""}.`;
+        if (toImport.length) { _importData = toImport; impBtn.style.display = ""; }
+      } catch (e) { impPreview.textContent = "❌ Parse error: " + String(e); }
+    });
+
+    impBtn.addEventListener("click", async () => {
+      if (!_importData?.length) return;
+      if (!confirm(`Import ${_importData.length} calibration point(s)?`)) return;
+      impBtn.disabled = true; let ok = 0, fail = 0;
+      for (let i = 0; i < _importData.length; i++) {
+        const p = _importData[i];
+        impStatus.textContent = `Importing ${i + 1}/${_importData.length}…`;
+        try {
+          await ctx.actions.calibrationSavePoint(p);
+          ok++;
+        } catch (e) { fail++; console.error("Calibration import failed for point", i, e); }
+      }
+      impStatus.textContent = `Imported ${ok} point${ok !== 1 ? "s" : ""}${fail ? ` (${fail} failed)` : ""} ✓ — recompute the model to include them.`;
+      impBtn.disabled = false; _importData = null; impBtn.style.display = "none";
+      ctx.state.calibration = await ctx.actions.calibrationGet();
+      ctx.actions.renderRooms();
+    });
+
+    const impChooseBtn = el("button", { class: "btn inline", onclick: () => impInput.click() }, "Choose File…");
+    impWrap.appendChild(el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [impChooseBtn, impBtn]));
+    impWrap.appendChild(impInput);
+    impWrap.appendChild(impPreview);
+    impWrap.appendChild(impStatus);
+    actCard.appendChild(impWrap);
+
+    // Clear all
+    const clearWrap = el("div", { style: "margin-top:10px;display:flex;gap:8px;align-items:center" });
+    const makeClearBtn = () => {
+      const b = el("button", { class: "btn inline", style: "border-color:#dc2626;color:#fca5a5" },
+        `Clear All (${pts.length})`);
+      b.addEventListener("click", () => {
+        clearWrap.innerHTML = "";
+        const yes = el("button", { class: "btn", style: "background:#7f1d1d;border-color:#dc2626" },
+          `Yes, delete all ${pts.length} points`);
+        const no  = el("button", { class: "btn inline" }, "Cancel");
+        yes.addEventListener("click", async () => {
+          clearWrap.innerHTML = "";
+          try {
+            await ctx.actions.calibrationClear();
+            ctx.state.calibration = { points: [], model: {} };
+            ctx.toast("All calibration data cleared.");
+            ctx.actions.renderRooms();
+          } catch (e) {
+            ctx.toast("Failed: " + String(e), true);
+            clearWrap.appendChild(makeClearBtn());
+          }
+        });
+        no.addEventListener("click", () => { clearWrap.innerHTML = ""; clearWrap.appendChild(makeClearBtn()); });
+        clearWrap.appendChild(yes); clearWrap.appendChild(no);
+      });
+      return b;
+    };
+    clearWrap.appendChild(makeClearBtn());
+    if (pts.length) actCard.appendChild(clearWrap);
+    return actCard;
+  };
+
   if (!pts.length) {
     wrap.appendChild(el("div", { class: "card" }, [
       el("div", { class: "muted" }, "No calibration points yet. Use Tune, Beacon Tune, Pin & Listen, or Roam to collect data."),
     ]));
+    wrap.appendChild(_actionsCard());
     return wrap;
   }
 
@@ -1848,119 +1967,7 @@ function _modelTab(ctx, el, cs, calData) {
   ptsCard.appendChild(ptsList);
   wrap.appendChild(ptsCard);
 
-  // Actions
-  const actCard = el("div", { class: "card" });
-  actCard.appendChild(el("div", { style: "font-weight:700;font-size:14px;margin-bottom:10px" }, "Actions"));
-
-  // Export JSON
-  const expBtn = el("button", { class: "btn inline" }, "Export JSON");
-  expBtn.addEventListener("click", () => {
-    const blob = new Blob([JSON.stringify(calData, null, 2)], { type: "application/json" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href = url; a.download = "padspan_calibration.json";
-    document.body.appendChild(a); a.click();
-    document.body.removeChild(a); URL.revokeObjectURL(url);
-  });
-  actCard.appendChild(expBtn);
-
-  // Import — the counterpart Export JSON never had (Garry, 2026-09-10:
-  // "do 2-10" -> #10). Mirrors Maps' own "Backup All Maps (JSON)" /
-  // "Restore from Backup" round-trip (maps.js's Export tab), but there is
-  // no batch calibration-restore endpoint — calibration_save_point saves
-  // ONE point and always mints it a fresh id (calibration_store.py's
-  // async_add_point), so a point-by-point loop is correct here, not a
-  // shortcut, and duplicate detection has to happen on the client since the
-  // backend never sees the old id to compare against. The model itself is
-  // deliberately NOT restored from the file — it is a derived artifact of
-  // the points (calibration_compute_model), not raw data; recomputing it
-  // from the restored points is the right move, not re-injecting a stale
-  // serialized one.
-  const impWrap = el("div", { style: "margin-top:14px;border-top:1px solid #1b3526;padding-top:12px" });
-  impWrap.appendChild(el("div", { style: "font-weight:600;font-size:13px;margin-bottom:4px" }, "Import"));
-  impWrap.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
-    "Choose a padspan_calibration.json file exported above. Points that already exist (same map, position and collection time) are skipped."));
-
-  const impInput = document.createElement("input");
-  impInput.type = "file"; impInput.accept = ".json,application/json"; impInput.style.display = "none";
-  const impPreview = el("div", { style: "font-size:12px;color:#94a3b8;min-height:18px;margin-top:6px" });
-  const impStatus = el("div", { class: "muted", style: "font-size:12px;min-height:18px;margin-top:4px" });
-  const impBtn = el("button", { class: "btn inline", style: "display:none" }, "Import Points");
-  let _importData = null;
-
-  const _dedupeKey = (p) => `${p.map_id}|${Number(p.x_frac).toFixed(4)}|${Number(p.y_frac).toFixed(4)}|${p.collected_at || ""}`;
-
-  impInput.addEventListener("change", async () => {
-    const file = impInput.files?.[0]; if (!file) return;
-    impPreview.textContent = "Reading…"; impBtn.style.display = "none"; _importData = null;
-    try {
-      const parsed = JSON.parse(await file.text());
-      if (!Array.isArray(parsed.points)) {
-        impPreview.textContent = "❌ Not a valid PadSpan calibration export."; return;
-      }
-      const existingKeys = new Set(pts.map(_dedupeKey));
-      const toImport = parsed.points.filter(p => !existingKeys.has(_dedupeKey(p)));
-      const skipCount = parsed.points.length - toImport.length;
-      impPreview.textContent = `${parsed.points.length} point${parsed.points.length !== 1 ? "s" : ""} in file: ${toImport.length} to import${skipCount ? `, ${skipCount} already present (skipped)` : ""}.`;
-      if (toImport.length) { _importData = toImport; impBtn.style.display = ""; }
-    } catch (e) { impPreview.textContent = "❌ Parse error: " + String(e); }
-  });
-
-  impBtn.addEventListener("click", async () => {
-    if (!_importData?.length) return;
-    if (!confirm(`Import ${_importData.length} calibration point(s)?`)) return;
-    impBtn.disabled = true; let ok = 0, fail = 0;
-    for (let i = 0; i < _importData.length; i++) {
-      const p = _importData[i];
-      impStatus.textContent = `Importing ${i + 1}/${_importData.length}…`;
-      try {
-        await ctx.actions.calibrationSavePoint(p);
-        ok++;
-      } catch (e) { fail++; console.error("Calibration import failed for point", i, e); }
-    }
-    impStatus.textContent = `Imported ${ok} point${ok !== 1 ? "s" : ""}${fail ? ` (${fail} failed)` : ""} ✓ — recompute the model to include them.`;
-    impBtn.disabled = false; _importData = null; impBtn.style.display = "none";
-    ctx.state.calibration = await ctx.actions.calibrationGet();
-    ctx.actions.renderRooms();
-  });
-
-  const impChooseBtn = el("button", { class: "btn inline", onclick: () => impInput.click() }, "Choose File…");
-  impWrap.appendChild(el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, [impChooseBtn, impBtn]));
-  impWrap.appendChild(impInput);
-  impWrap.appendChild(impPreview);
-  impWrap.appendChild(impStatus);
-  actCard.appendChild(impWrap);
-
-  // Clear all
-  const clearWrap = el("div", { style: "margin-top:10px;display:flex;gap:8px;align-items:center" });
-  const makeClearBtn = () => {
-    const b = el("button", { class: "btn inline", style: "border-color:#dc2626;color:#fca5a5" },
-      `Clear All (${pts.length})`);
-    b.addEventListener("click", () => {
-      clearWrap.innerHTML = "";
-      const yes = el("button", { class: "btn", style: "background:#7f1d1d;border-color:#dc2626" },
-        `Yes, delete all ${pts.length} points`);
-      const no  = el("button", { class: "btn inline" }, "Cancel");
-      yes.addEventListener("click", async () => {
-        clearWrap.innerHTML = "";
-        try {
-          await ctx.actions.calibrationClear();
-          ctx.state.calibration = { points: [], model: {} };
-          ctx.toast("All calibration data cleared.");
-          ctx.actions.renderRooms();
-        } catch (e) {
-          ctx.toast("Failed: " + String(e), true);
-          clearWrap.appendChild(makeClearBtn());
-        }
-      });
-      no.addEventListener("click", () => { clearWrap.innerHTML = ""; clearWrap.appendChild(makeClearBtn()); });
-      clearWrap.appendChild(yes); clearWrap.appendChild(no);
-    });
-    return b;
-  };
-  clearWrap.appendChild(makeClearBtn());
-  actCard.appendChild(clearWrap);
-  wrap.appendChild(actCard);
+  wrap.appendChild(_actionsCard());
 
   return wrap;
 }
@@ -3818,7 +3825,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
       el("span", { style: "font-weight:700;font-size:14px;color:#f59e0b" }, "Beacon Tune"),
     ]),
     el("div", { style: "font-size:12px;color:#94a3b8;line-height:1.5" },
-      "Mark where beacons (AirTags, Tiles, key fobs) are right now on the 3D floor stack. Drag a beacon to reposition it — a 60-second radio capture starts automatically. After the timer finishes, calibration data is saved and the beacon returns to live tracking. Green circles show scanner positions for reference."),
+      "Mark where beacons (AirTags, Tiles, key fobs) are right now on the 3D floor stack. Drag a beacon to reposition it — a 60-second radio capture starts automatically. After the timer finishes, calibration data is saved. A beacon you place from the list is pinned there as a fixed beacon, unless PadSpan knows it moves (a phone with its IRK, a Find My tag it has followed across an address change, anything you follow): that one goes back to live tracking after the capture, as does a labelled device shown at its room's centre. Moving a beacon that is already pinned moves its pin. Follow a tag that moves before placing it. Green circles show scanner positions for reference."),
   ]));
 
   // ── Constants & state ─────────────────────────────────────────────────────
@@ -3862,6 +3869,9 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     _guideCanonical: null,
   };
   const bs = ctx.state._calibBeacon;
+  // mapId → {key: {x, y}}: each beacon's fractions when last synced
+  // (tuneBeaconBaseline). The save writes only what differs from it (#89).
+  if (!bs.editBaseline) bs.editBaseline = {};
 
   const _isFollowed = (obj) => ctx.actions.followedHas(obj.address || obj.entity_id || "");
   function _autoPinTracked() {
@@ -3905,8 +3915,12 @@ function _beaconTuneTab(ctx, el, cs, calData) {
         bs.draftBeacons[m.id].push({
           id: "bk_" + Math.random().toString(16).slice(2, 10),
           label: bkLabel, key: obj.key, kind: obj.kind || "ble",
-          x: c[0], y: c[1],
+          x: c[0], y: c[1], _tracked: true,
         });
+        // Shown at its room's centre, not placed by anyone: never written
+        // as a fixed beacon (_tracked), dragged or not - a drag is a
+        // calibration capture where it is, as before #89.
+        (bs.editBaseline[m.id] = bs.editBaseline[m.id] || {})[obj.key] = { x: c[0], y: c[1] };
         pinnedKeys.add((obj.key||"").toUpperCase());
         if (lbl) pinnedLabels.add(lbl);
         for (const a of objAddrs) pinnedAddrs.add(a);
@@ -3930,6 +3944,8 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     for (const id of Object.keys(bs.draftBeacons)) {
       if (!maps_list.find(m => m.id === id)) delete bs.draftBeacons[id];
     }
+    bs.editBaseline = {};
+    for (const m of maps_list) bs.editBaseline[m.id] = tuneBeaconBaseline(bs.draftBeacons[m.id]);
     bs._mapsStamp = mapsStamp;
     _autoPinTracked();
     // Dedup: ensure each beacon key, label, AND address appears at most once.
@@ -4423,6 +4439,8 @@ function _beaconTuneTab(ctx, el, cs, calData) {
         // Un-pin from the fabric first — a batch save never deletes.
         try {
           if (t.bk.key) await ctx.actions.callWS({ type: "padspan_bright/fabric_beacon_remove", key: t.bk.key });
+          // No longer an existing pin: placed again, it is judged as new (a phone is held back).
+          if (t.bk.key && ctx.state.model && ctx.state.model.beacon_positions_m) delete ctx.state.model.beacon_positions_m[t.bk.key];
         } catch(_) {}
         // Auto-save the deletion
         for (const mid of Object.keys(bs.dirtyMaps)) {
@@ -4512,6 +4530,69 @@ function _beaconTuneTab(ctx, el, cs, calData) {
   ctrlRow.appendChild(hgSlider);
   ctrlRow.appendChild(hgLbl);
 
+  // Write the beacons placed, dragged or relocated on these maps to the
+  // fabric, in metres (issue #89: this wrote nothing, and the toast said
+  // "saved"). Only what differs from the baseline goes (tuneBeaconWrites);
+  // a map whose placement cannot be read is refused whole and stays unsaved.
+  // A map's dirty flag clears only when all of its writes landed.
+  async function _saveBeacons(mapIds) {
+    if (bs._saving) return { busy: true, ok: 0, failed: [], refused: [], held: [] };
+    bs._saving = true;
+    let ok = 0;
+    const failed = [];
+    const refused = [];
+    const held = [];
+    try {
+      const tfs = (ctx.state.model && ctx.state.model.map_transforms) || {};
+      // A beacon with a fabric pin is moved whatever it is; one without is
+      // pinned unless it is known to move (tuneBeaconHeld), and that is said.
+      const guard = { pinned: (ctx.state.model && ctx.state.model.beacon_positions_m) || {},
+        objs: new Map((snap?.objects?.list || []).map(o => [o.key, o])),
+        followedHas: ctx.actions.followedHas };
+      for (const mapId of mapIds) {
+        const m = maps_list.find(mm => mm.id === mapId);
+        if (!m) { failed.push(mapId); continue; }
+        const plan = tuneBeaconWrites(m, bs.draftBeacons[mapId] || [], tfs, bs.editBaseline[mapId], guard);
+        held.push(...plan.held);
+        // Held where it stands: judged again only when moved again, never written
+        // later from this spot once the reason (a follow, the live object) is gone.
+        for (const h of plan.held) (bs.editBaseline[mapId] = bs.editBaseline[mapId] || {})[h.key] = { x: h.x, y: h.y };
+        if (plan.refused) { failed.push(mapId); refused.push(mapId); continue; }
+        if (plan.invalid.length) { failed.push(mapId); continue; }
+        let mapOk = true;
+        for (const w of plan.writes) {
+          try {
+            const r = await ctx.actions.callWS({ type: "padspan_bright/fabric_beacon_position_set",
+              key: w.key, x_m: w.x_m, y_m: w.y_m, floor_id: w.floor_id, kind: w.kind, label: w.label });
+            if (r && r.ok === false) { mapOk = false; continue; }
+            ok++;
+            (bs.editBaseline[mapId] = bs.editBaseline[mapId] || {})[w.key] = { x: w.x, y: w.y };
+            try {
+              const lm = ctx.state.model || (ctx.state.model = {});
+              const bpm = lm.beacon_positions_m || (lm.beacon_positions_m = {});
+              bpm[w.key] = Object.assign({}, bpm[w.key] || {}, { x_m: w.x_m, y_m: w.y_m,
+                floor_id: w.floor_id, room: (r && r.room) || "" });
+            } catch (_e) { /* publication is best-effort */ }
+          } catch (e) {
+            mapOk = false;
+            console.warn("[PadSpan] fabric_beacon_position_set failed", w.key, e);
+          }
+        }
+        if (mapOk) bs.dirtyMaps[mapId] = false;
+        else failed.push(mapId);
+      }
+    } finally {
+      bs._saving = false;
+    }
+    // The opt-in report's view of it (telemetry.EVENTS): nothing when off.
+    if (ctx.actions.telemetryEvent) {
+      for (let i = 0; i < ok; i++) ctx.actions.telemetryEvent("beacon_tune_saved");
+      for (const _r of refused) ctx.actions.telemetryEvent("beacon_tune_save_refused");
+      if (failed.length > refused.length) ctx.actions.telemetryEvent("beacon_tune_save_failed");
+    }
+    return { busy: false, ok, failed, refused, held };
+  }
+
   // Save button
   const statusLbl = document.createElement("span");
   statusLbl.style.cssText = "font-size:11px;color:#94a3b8;min-width:90px";
@@ -4527,14 +4608,27 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     saveBtn.disabled = true;
     statusLbl.textContent = "Saving...";
     try {
-      for (const mapId of dirtyIds) {
-        const origMap = maps_list.find(m => m.id === mapId);
-        if (!origMap) continue;
+      const res = await _saveBeacons(dirtyIds);
+      if (res.busy) {
+        statusLbl.textContent = "Already saving";
+        saveBtn.disabled = false;
+        return;
       }
-      bs.dirtyMaps = {};
+      if (res.failed.length) {
+        statusLbl.textContent = `Saved ${res.ok}, ${res.failed.length} map(s) failed`;
+        ctx.toast(`Saved ${res.ok} beacon(s); ${res.failed.length} map(s) could not be saved — kept unsaved` +
+          (res.refused.length ? ". A map that isn't placed in metres yet must be placed in Mapping first." : "") +
+          (res.held.length ? `. ${tuneBeaconHeldText(res.held, false)}` : ""), true);
+        _refreshDirtyLabel();
+        saveBtn.disabled = false;
+        return;
+      }
       bs.selectedBk = null;
       await ctx.actions.mapsRefresh();
-      ctx.toast("Reference positions saved");
+      if (ctx.actions.modelRefresh) await ctx.actions.modelRefresh();
+      const heldText = tuneBeaconHeldText(res.held, false);
+      ctx.toast(res.ok ? `Saved ${res.ok} beacon position(s)` + (heldText ? `. ${heldText}` : "")
+        : (heldText || "No beacon positions changed"));
       saveBtn.disabled = false;
       statusLbl.textContent = "";
     } catch (e) {
@@ -4567,6 +4661,8 @@ function _beaconTuneTab(ctx, el, cs, calData) {
         kind: bk.kind || "", x: Number(bk.x || 0), y: Number(bk.y || 0),
       }));
     }
+    bs.editBaseline = {};
+    for (const m of maps_list) bs.editBaseline[m.id] = tuneBeaconBaseline(bs.draftBeacons[m.id]);
     bs.dirtyMaps = {};
     _autoPinTracked();
     // Dedup: ensure each beacon key, label, AND address appears at most once
@@ -4647,9 +4743,24 @@ function _beaconTuneTab(ctx, el, cs, calData) {
   const isoWrap = document.createElement("div");
   isoWrap.style.cssText = "position:relative;margin-top:6px";
 
+  // isoDiv is the pan/zoom viewport (issue #90, the helper Pin & Listen and
+  // Roam use); isoInner the layer it moves, holding the SVG. Beacons keep
+  // their own drag ([data-bk-id] is excluded) and double-click still places
+  // one, so the helper's double-click reset is off — 0 or ⟲ resets instead.
+  // Placement reads the SVG's getScreenCTM(), which includes the zoom.
   const isoDiv = document.createElement("div");
-  isoDiv.style.cssText = "overflow:auto;border-radius:8px;background:#071008;padding:8px;touch-action:none";
-  isoDiv.innerHTML = buildBeaconSVG(_getFocusZ(bs.focusIdx));
+  isoDiv.style.cssText = "position:relative;overflow:hidden;border-radius:8px;background:#071008;padding:8px;touch-action:none;cursor:grab";
+  const isoInner = document.createElement("div");
+  isoInner.style.cssText = "transform-origin:0 0";
+  isoDiv.appendChild(isoInner);
+  isoInner.innerHTML = buildBeaconSVG(_getFocusZ(bs.focusIdx));
+  const _bkPanZoom = attachPanZoom(isoDiv, isoInner, { exclude: "[data-bk-id]", dblclickReset: false });
+  const _bkViewReset = document.createElement("button");
+  _bkViewReset.className = "btn inline";
+  _bkViewReset.style.cssText = "position:absolute;top:8px;right:8px;z-index:4;padding:2px 8px;font-size:12px";
+  _bkViewReset.textContent = "⟲";
+  _bkViewReset.title = "Reset zoom (or press 0). Scroll to zoom, drag the map to pan.";
+  _bkViewReset.addEventListener("click", () => _bkPanZoom.reset());
 
   // Hover tooltip
   const tipEl = document.createElement("div");
@@ -4659,6 +4770,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     "font-family:ui-monospace,SFMono-Regular,Consolas,monospace;line-height:1.5";
   isoWrap.appendChild(isoDiv);
   isoWrap.appendChild(tipEl);
+  isoWrap.appendChild(_bkViewReset);
 
   isoDiv.addEventListener("mouseover", e => {
     const g = e.target.closest("[data-tip]");
@@ -4937,7 +5049,21 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     const origMap = maps_list.find(m => m.id === mapId);
     if (!origMap) return;
     try {
-      bs.dirtyMaps[mapId] = false;
+      // Saved for real now (#89): a placed beacon reaches the fabric, so the
+      // engine treats it as fixed. A failed save stays unsaved and says so.
+      let res = await _saveBeacons([mapId]);
+      // Another save was running (a second drag straight after the first):
+      // wait for it rather than drop this one without a word.
+      for (let i = 0; res.busy && i < 40; i++) {
+        await new Promise(r => setTimeout(r, 250));
+        res = await _saveBeacons([mapId]);
+      }
+      // This one known to move, and not pinned: say so, not nothing.
+      const mine = res.busy ? [] : res.held.filter(h => h.key === bkObj.key);
+      if (res.busy) ctx.toast("Beacon position not saved yet - press Save", true);
+      else if (mine.length) ctx.toast(tuneBeaconHeldText(mine, ctx.state.settings?.beacon_auto_calibrate !== false));
+      else if (res.refused.length) ctx.toast("Beacon position not saved: this map isn't placed in metres yet. Place it in Mapping first.", true);
+      else if (res.failed.length) ctx.toast("Beacon position not saved — press Save to retry", true);
       _refreshDirtyLabel();
     } catch (e) {
       console.warn("[PadSpan] auto-save failed:", e);
@@ -5133,8 +5259,9 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           if (!confirmPurge) doRelocation = false;
         }
 
-        if (doRelocation) {
-          const protectedIds = new Set(bs._relocSavedIds[bkKey] || []);
+        // Runs only after the new point has saved: a failed save must not
+        // leave the beacon with its old data gone and nothing in its place.
+        const _purgeOldPoints = async (protectedIds) => {
           try {
             const calData = await ctx.actions.calibrationGet();
             const allPts = calData?.points || [];
@@ -5163,7 +5290,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           } catch (e) {
             console.warn("[PadSpan] relocation purge failed:", e);
           }
-        }
+        };
 
         // Transform readings object → scanner_readings array for backend
         const scannerReadings = Object.entries(entry.readings).map(([source, rd]) => ({
@@ -5190,6 +5317,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           } else if (saved?.id) {
             bs._relocSavedIds[bkKey].push(saved.id);
           }
+          if (doRelocation) await _purgeOldPoints(new Set(bs._relocSavedIds[bkKey]));
           const _bkName = entry.bk.label || entry.bk.key;
           const _scanInfo = `${_tActiveRadios.length} scanner(s), ${_tTotalSamples} samples`;
           const _roomInfo = room ? `, room: ${room}` : ", room: (undetected)";
@@ -5206,7 +5334,9 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           }
         } catch (e) {
           const _errMsg = (e && e.message) || String(e);
-          ctx.toast(`SAVE FAILED: ${entry.bk.label || entry.bk.key} — ${_errMsg}`, "error");
+          const _kept = doRelocation ? " (old data kept)" : "";
+          doRelocation = false;
+          ctx.toast(`SAVE FAILED: ${entry.bk.label || entry.bk.key} — ${_errMsg}${_kept}`, "error");
           console.error("[PadSpan] live timer save failed:", e);
         }
         if (doRelocation) {
@@ -5246,7 +5376,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
   function _refreshSVG() {
     if (bs._dragging) return; // Don't rebuild SVG mid-drag
     const scrollTop = isoDiv.scrollTop, scrollLeft = isoDiv.scrollLeft;
-    isoDiv.innerHTML = buildBeaconSVG(_getFocusZ(bs.focusIdx));
+    isoInner.innerHTML = buildBeaconSVG(_getFocusZ(bs.focusIdx));
     isoDiv.scrollTop = scrollTop;
     isoDiv.scrollLeft = scrollLeft;
   }
@@ -5427,6 +5557,8 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           // Un-pin from the fabric first — a batch save never deletes.
           if (removedBk && removedBk.key) {
             await ctx.actions.callWS({ type: "padspan_bright/fabric_beacon_remove", key: removedBk.key });
+            // No longer an existing pin: placed again, it is judged as new.
+            if (ctx.state.model && ctx.state.model.beacon_positions_m) delete ctx.state.model.beacon_positions_m[removedBk.key];
           }
           bs.dirtyMaps[mapId] = false;
         } catch (e) { console.warn("[PadSpan] delete beacon save failed:", e); }
@@ -5753,6 +5885,8 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           if (origMap) {
             // Un-pin from the fabric first — a batch save never deletes.
             if (bk.key) await ctx.actions.callWS({ type: "padspan_bright/fabric_beacon_remove", key: bk.key });
+            // No longer an existing pin: placed again, it is judged as new.
+            if (bk.key && ctx.state.model && ctx.state.model.beacon_positions_m) delete ctx.state.model.beacon_positions_m[bk.key];
             bs.dirtyMaps[map.id] = false;
           }
         } catch(_) {}
@@ -6632,7 +6766,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
   function _refreshSVGPatched() {
     if (bs._dragging) return; // Don't rebuild SVG mid-drag (matches original)
     const scrollTop = isoDiv.scrollTop, scrollLeft = isoDiv.scrollLeft;
-    isoDiv.innerHTML = buildBeaconSVGWrapped(_getFocusZ(bs.focusIdx));
+    isoInner.innerHTML = buildBeaconSVGWrapped(_getFocusZ(bs.focusIdx));
     isoDiv.scrollTop = scrollTop;
     isoDiv.scrollLeft = scrollLeft;
     // Click handler for guide spiral
@@ -6660,7 +6794,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
   wrap.appendChild(beaconListCard);
 
   // After assembly, patch SVG refresh to include guide overlay
-  isoDiv.innerHTML = buildBeaconSVGWrapped(_getFocusZ(bs.focusIdx));
+  isoInner.innerHTML = buildBeaconSVGWrapped(_getFocusZ(bs.focusIdx));
 
   return wrap;
 }

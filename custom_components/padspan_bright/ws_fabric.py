@@ -159,9 +159,9 @@ async def ws_fabric_light_position_set(hass: HomeAssistant, connection, msg) -> 
         color=(msg.get("color") or "").strip(),
         shape=(msg.get("shape") or "").strip(),
         rotation=float(msg.get("rotation") or 0.0),
-        width_cm=float(msg.get("width_cm") or 0.0),
-        height_cm=float(msg.get("height_cm") or 0.0),
-        margin_cm=float(msg.get("margin_cm") or 0.0),
+        width_cm=msg.get("width_cm"),
+        height_cm=msg.get("height_cm"),
+        margin_cm=msg.get("margin_cm"),
         label=(msg.get("label") or "").strip(),
         z_m=msg["z_m"] if "z_m" in msg else KEEP_HEIGHT,
     )
@@ -446,9 +446,12 @@ async def ws_fabric_sync_mode_set(hass: HomeAssistant, connection, msg) -> None:
     {
         "type": "padspan_bright/fabric_scanner_position_set",
         "source": str,
-        "x_m": float,
-        "y_m": float,
-        vol.Optional("z_m"): float,
+        # Coerce, not float: the browser sends 2.0 back as the integer 2, and
+        # a plain float check refused it — so a scanner at a whole-metre
+        # height or position could never be saved again ("Saved N, failed 1").
+        "x_m": vol.Coerce(float),
+        "y_m": vol.Coerce(float),
+        vol.Optional("z_m"): vol.Coerce(float),
         vol.Optional("floor_id"): str,
     }
 )

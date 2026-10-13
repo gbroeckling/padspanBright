@@ -22,7 +22,6 @@ from .const import (
     DATA_MODEL,
     DEFAULT_FLOOR_ID,
     OUTSIDE_FLOOR_ID,
-    DATA_COORDINATOR,
     DATA_CALIBRATION,
     CALIBRATION_STORE_KEY,
     MODEL_STORE_KEY,
@@ -146,13 +145,13 @@ async def ws_calibration_health_check(hass: HomeAssistant, connection, msg) -> N
 
     # ── Per-scanner summary for the UI ────────────────────────────────────────
     # Includes name from live radios, point count, and mean RSSI.
-    coord = hass.data.get(DOMAIN, {}).get(DATA_COORDINATOR)
+    # From the live snapshot: the config holder ('coordinator') has no .data,
+    # so every scanner was listed by the last 12 characters of its MAC.
     live_radios: list[dict[str, Any]] = []
-    if coord:
-        try:
-            live_radios = coord.data.get("ble", {}).get("radios", []) if coord.data else []
-        except Exception:
-            pass
+    try:
+        live_radios = ((await _live_snapshot(hass)).get("ble") or {}).get("radios") or []
+    except Exception:
+        pass
     radio_name_map: dict[str, str] = {}
     for _r in live_radios:
         _src = _r.get("source") or ""
@@ -286,7 +285,7 @@ async def ws_calibration_clear_map(hass: HomeAssistant, connection, msg) -> None
         connection.send_error(msg["id"], "invalid_map_id", "map_id is required")
         return
     cal = await _get_cal_store(hass)
-    count = await cal.async_clear_map(map_id)
+    count = await cal.async_clear_map(map_id, delete=True)
     connection.send_result(msg["id"], {"ok": True, "map_id": map_id, "deleted": count})
 
 
@@ -309,7 +308,7 @@ async def ws_object_evict(hass: HomeAssistant, connection, msg) -> None:
     if not key:
         connection.send_error(msg["id"], "invalid_key", "key is required")
         return
-    _coord = hass.data.get(DOMAIN, {}).get(DATA_COORDINATOR)
+    _coord = hass.data.get(DOMAIN, {}).get("presence_coordinator")   # clear_object_state lives there
     if _coord:
         _coord.clear_object_state(key)
     connection.send_result(msg["id"], {"ok": True, "key": key})
@@ -381,9 +380,19 @@ async def ws_calibration_swap_radio(hass: HomeAssistant, connection, msg) -> Non
 
     cal = await _get_cal_store(hass)
     updated_readings = 0
+    dropped = 0
 
     for pt in cal.data.get("points", []):
-        for sr in pt.get("scanner_readings", []):
+        readings = pt.get("scanner_readings", [])
+        # A point the new scanner already heard keeps its own reading; the
+        # old one's would be a second reading under the same id that nothing
+        # could separate again.
+        if any(sr.get("source") == new_source for sr in readings):
+            kept = [sr for sr in readings if sr.get("source") != old_source]
+            dropped += len(readings) - len(kept)
+            pt["scanner_readings"] = kept
+            continue
+        for sr in readings:
             if sr.get("source") == old_source:
                 sr["source"] = new_source
                 updated_readings += 1
@@ -396,11 +405,14 @@ async def ws_calibration_swap_radio(hass: HomeAssistant, connection, msg) -> Non
             sec[new_source] = sec.pop(old_source)
 
     await cal.store.async_save(cal.data)
+    # The forest's scanner columns are fixed at training time.
+    await cal._async_train_rf()
     connection.send_result(msg["id"], {
         "ok": True,
         "old_source": old_source,
         "new_source": new_source,
         "updated_readings": updated_readings,
+        "dropped_readings": dropped,
     })
 
 
@@ -482,6 +494,7 @@ async def ws_calibration_relearn_radio(hass: HomeAssistant, connection, msg) -> 
             maps_data = ms.data if hasattr(ms, "data") else ms
         cal.compute_model(maps_data=maps_data)
         await cal.store.async_save(cal.data)
+        await cal._async_train_rf()
     except Exception as e:
         _LOGGER.warning("PadSpan Bright relearn model recompute failed: %s", e)
 

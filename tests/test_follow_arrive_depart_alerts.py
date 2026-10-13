@@ -130,3 +130,86 @@ async def test_repeated_arrival_within_60s_is_throttled():
     result = {"ble:AA:BB:CC:DD:EE:FF": {"user_label": "Garry's Phone", "address": "AA:BB:CC:DD:EE:FF"}}
     await coord._run_automations({"ble:AA:BB:CC:DD:EE:FF"}, set(), result, now=1030.0)  # 30s later
     coord.hass.services.async_call.assert_not_awaited()
+
+
+# ── Poll level: who counts as present (the caller, not the helper) ───────────
+#
+# Every test above calls _run_automations with hand-made sets. The sets came
+# from "every key in the result" — and the object history replays a labelled
+# device forever, so a tagged phone never left it: "arrived" fired once, the
+# first time it was seen, and "departed" never. And with nobody present before
+# the first poll, every device "arrived" at each start.
+
+from tests.test_poll_level import ble_object, make_coordinator as _poll_coord, run_poll, snapshot  # noqa: E402
+
+KEY = "ble:AA:BB:CC:DD:EE:01"
+
+
+def _poll(coord, age):
+    return run_poll(coord, snapshot([ble_object(KEY, "AA:BB:CC:DD:EE:01", age_s=age, user_label="Phone")]))
+
+
+def _recording(coord):
+    seen = []
+
+    async def _rec(arrived, departed, result, now, members=None):
+        seen.append((set(arrived), set(departed)))
+    coord._run_automations = _rec
+    return seen
+
+
+def test_a_start_is_a_baseline_not_an_arrival():
+    coord = _poll_coord()
+    seen = _recording(coord)
+    _poll(coord, 1.0)
+    assert seen == []
+
+
+def test_a_tagged_phone_departs_when_it_goes_quiet_and_arrives_when_it_is_back():
+    coord = _poll_coord()                  # away timeout: the 5 min default
+    seen = _recording(coord)
+    _poll(coord, 1.0)                      # baseline
+    _poll(coord, 400.0)                    # quiet past the timeout, still replayed from history
+    _poll(coord, 1.0)                      # heard again
+    _poll(coord, 2.0)                      # still home: nothing
+    assert seen == [(set(), {KEY}), ({KEY}, set())]
+
+
+def test_traceback_records_from_the_poll_without_a_panel_open():
+    """Traceback recorded only from a panel's live_snapshot request, so it had
+    nothing for any time no panel was open. The poll records now — present
+    objects only (an away one keeps its last room in the poll's result)."""
+    from custom_components.padspan_bright.const import DATA_TRACEBACK, DOMAIN
+
+    class _TB:
+        def __init__(self):
+            self.frames = []
+
+        def record_frame(self, objs, followed_set=None):
+            self.frames.append([o.get("key") for o in objs])
+
+        async def async_maybe_save(self):
+            pass
+
+    coord = _poll_coord()
+    tb = _TB()
+    coord.hass.data[DOMAIN][DATA_TRACEBACK] = tb
+    _poll(coord, 1.0)
+    _poll(coord, 400.0)                    # past the away timeout
+    assert tb.frames == [[KEY], []]
+
+
+def test_a_tagged_device_back_from_away_does_not_resume_its_old_room():
+    """The history keeps a labelled device in the result, so the grace loop
+    never marked it stale and its old room's votes survived any absence: home
+    again through the hall, it was reported in the bedroom it left from."""
+    from collections import deque
+    coord = _poll_coord()
+    _poll(coord, 1.0)
+    coord._room_votes[KEY] = deque(["Bedroom"] * 5, maxlen=5)
+    coord._confirmed_room[KEY] = "Bedroom"
+    _poll(coord, 4000.0)                   # gone for over an hour, still replayed
+    assert coord._confirmed_room.get(KEY) == "Bedroom"   # nothing to judge yet
+    _poll(coord, 1.0)                      # heard again
+    assert coord._confirmed_room.get(KEY) != "Bedroom"
+    assert "Bedroom" not in list(coord._room_votes.get(KEY) or [])

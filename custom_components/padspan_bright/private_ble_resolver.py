@@ -63,7 +63,11 @@ _CACHE_TTL_S = 1200
 # RPAs from neighbours' phones that will never be seen again. Entries expired
 # but were never evicted, so the dict only ever grew. Sweeping on insert once
 # it is full keeps the AES-saving cache and bounds the memory.
-_CACHE_MAX = 4096
+# At least twice the addresses a snapshot carries (low_memory.SNAPSHOT_ADS,
+# 5,000): at 4,096 a busy street's 4,500 addresses evicted each other every
+# build, and every address cost an AES check per IRK again (13,500 checks,
+# 0.2 s a build on a desktop, with 5 IRKs).
+_CACHE_MAX = 16384
 
 
 def _looks_generic(name: str, entry_id: str = "") -> bool:
@@ -99,8 +103,11 @@ class PrivateBLEResolver:
 
     async def async_load(self) -> None:
         """Read IRKs from private_ble_device, system Bluetooth bonds, mobile_app, and PadSpan settings."""
-        self._devices.clear()
-        self._source_info: list[dict[str, Any]] = []  # for UI status
+        # Built aside and swapped in at the end: cleared up front, a resolve
+        # during the executor read below saw a half-built list and cached
+        # "unresolved" for 20 minutes for phones whose IRK came later in it.
+        devices: list[dict[str, Any]] = []
+        source_info: list[dict[str, Any]] = []  # for UI status
         seen_irk_hex: dict[str, dict[str, Any]] = {}  # hex → the registered device dict
 
         def _add_device(irk_bytes: bytes, name: str, source: str, entry_id: str = "") -> None:
@@ -134,9 +141,9 @@ class PrivateBLEResolver:
                 "name": name,
                 "irk_bytes": irk_bytes,
             }
-            self._devices.append(dev)
+            devices.append(dev)
             seen_irk_hex[h] = seen_irk_hex[h_rev] = dev
-            self._source_info.append({
+            source_info.append({
                 "name": name, "source": source,
                 "entry_id": entry_id,
             })
@@ -261,16 +268,32 @@ class PrivateBLEResolver:
             except Exception as _ps_err:
                 _LOGGER.debug("PadSpan IRK load: %s", _ps_err)
 
-            if self._devices:
+            if devices:
                 _LOGGER.info(
                     "PrivateBLEResolver loaded %d private device(s): %s",
-                    len(self._devices),
-                    ", ".join(d["name"] for d in self._devices),
+                    len(devices),
+                    ", ".join(d["name"] for d in devices),
                 )
             else:
                 _LOGGER.debug("PrivateBLEResolver: no private BLE devices found")
         except Exception as err:
             _LOGGER.warning("PrivateBLEResolver load failed: %s", err)
+        # Cached answers were given against the old key list: an address
+        # cached as unresolved stayed so for up to 20 minutes after its
+        # phone's IRK was added, though the add said it matched. Cleared
+        # only when the keys changed: cleared on every 5-minute reload, each
+        # address was AES-checked against every key again and counted as a
+        # first sighting again. Names are looked up per resolve, not cached.
+        def _keys(devs: list[dict[str, Any]]) -> set[tuple[str, bytes]]:
+            return {(d["canonical_id"], d["irk_bytes"]) for d in devs}
+        keys_changed = _keys(devices) != _keys(self._devices)
+        self._devices = devices
+        self._source_info = source_info
+        if keys_changed:
+            if self._cache:
+                # The opt-in report (#148): about 0 a day, not every reload.
+                self._count("irk_cache_cleared")
+            self._cache.clear()
         self._loaded_at = time.monotonic()
 
     def resolve_address(self, address: str) -> dict[str, Any] | None:

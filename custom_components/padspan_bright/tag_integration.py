@@ -32,12 +32,44 @@ DATA_TAG_INTEGRATION = "tag_integration"
 # on a real, settled move. 30s is long enough to absorb that flicker while
 # still being short enough that a genuine walk-through-the-house sequence
 # still produces one event per room.
+# A change inside the cooldown is held, not dropped: once the cooldown
+# ends it is sent if the object is still somewhere other than the room
+# last reported (Kitchen -> Hall -> Bedroom 20 s apart used to report
+# Hall and never Bedroom).
 _ROOM_TAG_COOLDOWN_S = 30
 
 
 def _sanitize_tag_id(key: str) -> str:
     """Convert a PadSpan object key to a valid HA tag_id."""
     return "padspan_" + re.sub(r"[^a-z0-9_]", "_", key.lower().strip())
+
+
+def _ha_tag_name(hass: HomeAssistant, tag_id: str) -> str:
+    """The name the user gave this NFC tag in Home Assistant. It lives on the
+    tag's entity (platform "tag", unique_id = the tag id); the tag store's
+    items are plain dicts, so reading .name off one never found it and every
+    object was labelled "NFC: <tag id>"."""
+    try:
+        from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+        reg = er.async_get(hass)
+        eid = reg.async_get_entity_id("tag", "tag", tag_id)
+        if eid:
+            ent = reg.async_get(eid)
+            name = (ent.name or ent.original_name) if ent else None
+            if not name:
+                st = hass.states.get(eid)
+                name = st.attributes.get("friendly_name") if st else None
+            if name:
+                return str(name)
+    except Exception:  # noqa: BLE001 - a missing name falls back to the id
+        pass
+    try:
+        store = hass.data.get("tag")
+        item = store.async_get_item(tag_id) if store is not None and hasattr(store, "async_get_item") else None
+        name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+        return str(name) if name else ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 class TagIntegration:
@@ -47,6 +79,8 @@ class TagIntegration:
         self.hass = hass
         self._unsub: CALLBACK_TYPE | None = None
         self._room_tag_last: dict[str, float] = {}  # key → last emit ts
+        self._room_tag_sent: dict[str, str] = {}    # key → room last reported
+        self._room_tag_held: dict[str, str] = {}    # key → room held by the cooldown
         self._nfc_pending: dict[str, float] = {}  # tag_id → ts of pending NFC identify
 
     async def async_setup(self) -> None:
@@ -85,44 +119,85 @@ class TagIntegration:
         now = time.time()
 
         for key, old_room, new_room in changes:
-            # Only emit for followed objects
-            if key.upper() not in followed_upper:
+            # A first confirmation (no room before it, as after every restart)
+            # is not a room change: it fired padspan_room_change with
+            # from_room None for every followed device on each restart.
+            if not old_room:
+                continue
+            # Only emit for followed objects. The panel follows a BLE or IRK
+            # device by its ADDRESS ("AA:BB:..."), the object's key is
+            # "ble:AA:BB:..." / "irk:...", so comparing the key alone matched
+            # only iBeacons (whose key is what is followed) — the coordinator's
+            # own follow test checks the address too.
+            _obj = result.get(key) or {}
+            _ids = {str(key).upper(), str(_obj.get("address") or "").upper(),
+                    str(_obj.get("canonical_id") or "").upper()}
+            if str(key).lower().startswith("ble:"):
+                _ids.add(str(key)[4:].upper())
+            if not (_ids - {""}) & followed_upper:
                 continue
 
-            # Cooldown per object
+            # Cooldown per object: held, sent when it ends (async_emit_held)
             last = self._room_tag_last.get(key, 0.0)
             if now - last < _ROOM_TAG_COOLDOWN_S:
+                self._room_tag_held[key] = new_room
                 continue
-            self._room_tag_last[key] = now
-
-            tag_id = _sanitize_tag_id(key)
-
-            # Get display label
-            obj = result.get(key) or {}
-            label = obj.get("user_label") or obj.get("name") or key
-
-            try:
-                from homeassistant.components.tag import async_scan_tag
-                await async_scan_tag(self.hass, tag_id, device_id=None)
-                _LOGGER.debug(
-                    "TagIntegration: emitted tag_scanned for %s (%s → %s), tag_id=%s",
-                    label, old_room, new_room, tag_id,
-                )
-            except ImportError:
-                _LOGGER.debug("TagIntegration: HA tag component not available")
+            if not await self._emit_room_change(key, old_room, new_room, result, now):
                 return
-            except Exception as err:
-                _LOGGER.debug("TagIntegration: tag emit failed for %s: %s", key, err)
 
-            # Also fire a custom padspan event with richer data for automations
-            self.hass.bus.async_fire("padspan_room_change", {
-                "object_key": key,
-                "label": label,
-                "from_room": old_room,
-                "to_room": new_room,
-                "tag_id": tag_id,
-                "timestamp": now,
-            })
+    def has_held(self) -> bool:
+        return bool(self._room_tag_held)
+
+    async def async_emit_held(self, result: dict[str, Any]) -> None:
+        """Send the room changes held by the cooldown once it has passed,
+        if the object is still away from the room last reported."""
+        now = time.time()
+        for key, held_room in list(self._room_tag_held.items()):
+            if now - self._room_tag_last.get(key, 0.0) < _ROOM_TAG_COOLDOWN_S:
+                continue
+            self._room_tag_held.pop(key, None)
+            cur = (result.get(key) or {}).get("room") or held_room
+            sent = self._room_tag_sent.get(key)
+            if cur and sent and cur != sent:
+                if not await self._emit_room_change(key, sent, cur, result, now):
+                    return
+
+    async def _emit_room_change(self, key: str, old_room: str | None, new_room: str,
+                                result: dict[str, Any], now: float) -> bool:
+        """tag_scanned + padspan_room_change for one move. False when HA's
+        tag component is missing (nothing more can be sent)."""
+        self._room_tag_last[key] = now
+        self._room_tag_sent[key] = new_room
+
+        tag_id = _sanitize_tag_id(key)
+
+        # Get display label
+        obj = result.get(key) or {}
+        label = obj.get("user_label") or obj.get("name") or key
+
+        try:
+            from homeassistant.components.tag import async_scan_tag
+            await async_scan_tag(self.hass, tag_id, device_id=None)
+            _LOGGER.debug(
+                "TagIntegration: emitted tag_scanned for %s (%s → %s), tag_id=%s",
+                label, old_room, new_room, tag_id,
+            )
+        except ImportError:
+            _LOGGER.debug("TagIntegration: HA tag component not available")
+            return False
+        except Exception as err:
+            _LOGGER.debug("TagIntegration: tag emit failed for %s: %s", key, err)
+
+        # Also fire a custom padspan event with richer data for automations
+        self.hass.bus.async_fire("padspan_room_change", {
+            "object_key": key,
+            "label": label,
+            "from_room": old_room,
+            "to_room": new_room,
+            "tag_id": tag_id,
+            "timestamp": now,
+        })
+        return True
 
     # ── Feature 2 & 3: Handle incoming tag_scanned events ────────────────────
 
@@ -231,16 +306,7 @@ class TagIntegration:
             # Use the tag name if available, otherwise "NFC Tagged Object"
             label = f"NFC: {tag_id[:20]}"
 
-            # Try to get a better name from HA's tag registry
-            try:
-                from homeassistant.helpers import collection
-                tag_store = self.hass.data.get("tag")
-                if tag_store and hasattr(tag_store, "async_get_item"):
-                    tag_item = tag_store.async_get_item(tag_id)
-                    if tag_item and hasattr(tag_item, "name") and tag_item.name:
-                        label = tag_item.name
-            except Exception:
-                pass
+            label = _ha_tag_name(self.hass, tag_id) or label
 
             # Label and follow the object
             follow_key = best_key.upper()

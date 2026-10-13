@@ -57,15 +57,30 @@ export function render(ctx) {
   // under `device`) rather than the raw followed address, which does not
   // always match it (rotating MACs, ibeacon/private_ble keys).
   const movementKey = chosen ? chosen.key : null;
-  if (movementKey && ctx.state._followMovementKey !== movementKey) {
+  // Fetched again every 30 s while the same tag stays selected: fetched only
+  // on a new selection, the log froze at the moment the tag was picked.
+  const _mvStale = Date.now() - (ctx.state._followMovementAt || 0) > 30000;
+  if (movementKey && (ctx.state._followMovementKey !== movementKey || (_mvStale && !ctx.state._followMovementLoading))) {
+    if (ctx.state._followMovementKey !== movementKey) ctx.state._followMovementEntries = null;
     ctx.state._followMovementKey = movementKey;
-    ctx.state._followMovementEntries = null;
-    ctx.actions.wsCall("padspan_bright/movement_history_get", { device: movementKey, limit: 60 }).then(r => {
+    ctx.state._followMovementAt = Date.now();
+    ctx.state._followMovementLoading = true;
+    ctx.actions.wsCall("padspan_bright/movement_history_get", { device: movementKey, limit: 60 }).finally(() => {
+      ctx.state._followMovementLoading = false;
+    }).then(r => {
       if (ctx.state._followMovementKey !== movementKey) return;   // superseded by a later selection
-      ctx.state._followMovementEntries = (r && r.entries) || [];
-      ctx.actions.renderRooms();
+      // Redrawn only for something new, and only on Follow: an unchanged
+      // refresh redrew the whole view outside the poll's guards (flicker,
+      // and an unguarded render of whatever view was open by then).
+      const next = (r && r.entries) || [];
+      const changed = JSON.stringify(next) !== JSON.stringify(ctx.state._followMovementEntries);
+      ctx.state._followMovementEntries = next;
+      if (changed && ctx.state.view === "follow") ctx.actions.renderRooms();
     }).catch(() => {
-      if (ctx.state._followMovementKey === movementKey) ctx.state._followMovementEntries = [];
+      // A failed refresh keeps the log it had; a failed first fetch shows none.
+      if (ctx.state._followMovementKey === movementKey && ctx.state._followMovementEntries == null) {
+        ctx.state._followMovementEntries = [];
+      }
     });
   }
 
@@ -190,6 +205,7 @@ function _buildSelector(ctx, el, helpBtn, allObjects, currentAddr, isBasic) {
   clearBtn.addEventListener("click", (ev) => {
     ev.stopPropagation();
     ctx.state.followAddr = "";
+    try { localStorage.removeItem("padspan_followAddr"); } catch (e) { /* storage blocked */ }
     ctx.actions.renderRooms();
   });
 
@@ -201,6 +217,8 @@ function _buildSelector(ctx, el, helpBtn, allObjects, currentAddr, isBasic) {
     list.style.display = "none";
     input.value = "";
     ctx.state.followAddr = id;
+    // Remembered across reloads (the panel reads it at start; nothing wrote it).
+    try { localStorage.setItem("padspan_followAddr", id || ""); } catch (e) { /* storage blocked */ }
     if (id && !ctx.actions.followedHas(id)) {
       ctx.actions.followedToggle(id);
       return;
@@ -522,7 +540,8 @@ function _buildLog(el, history) {
 function _buildAlerts(ctx, el, helpBtn, addr, chosen, haAreas, dataMode, isBasic) {
   const cfg = ctx.state.followAlertConfig[addr] || {};
   const name = chosen.user_label || chosen.name || addr || "tag";
-  const saved = !!(cfg.email && (cfg.on_room_change || cfg.on_arrive || cfg.on_depart));
+  // An email, or a picked notify target (a phone needs no email).
+  const saved = !!((cfg.email || cfg.notify_service) && (cfg.on_room_change || cfg.on_arrive || cfg.on_depart));
 
   const card = el("div", { class: "card" });
   card.appendChild(el("div", { class: "card-head" }, [
@@ -550,6 +569,16 @@ function _buildAlerts(ctx, el, helpBtn, addr, chosen, haAreas, dataMode, isBasic
   const _noSvcHint = el("div", { style: "font-size:10px;color:#f59e0b;margin-top:2px;display:none" },
     "No notify services found — add SMTP or another notification integration in HA Settings → Integrations");
   serviceSelect.appendChild(el("option", { value: "" }, "Auto-detect"));
+  // A saved target that is gone (phone renamed or removed) is not in the
+  // list: shown and selected anyway, so the picker says what alerts use and
+  // choosing anything else, Auto-detect included, is a change.
+  const _showSavedTarget = () => {
+    const s = cfg.notify_service, list = ctx.state._notifyServices || [];
+    if (!s || list.includes(s)) return;
+    const opt = el("option", { value: s }, list.length ? s + " (not found)" : s);
+    opt.selected = true;
+    serviceSelect.appendChild(opt);
+  };
   if(!ctx.state._notifyServices){
     ctx.state._notifyServices = [];
     ctx.actions.wsCall("padspan_bright/notify_services_list", {}).then(r => {
@@ -561,7 +590,13 @@ function _buildAlerts(ctx, el, helpBtn, addr, chosen, haAreas, dataMode, isBasic
         if(cfg.notify_service === svc) opt.selected = true;
         serviceSelect.appendChild(opt);
       }
-    }).catch(() => { _noSvcHint.style.display = "block"; });
+      _showSavedTarget();
+    }).catch(() => {
+      // Not cached as "no services": a failed fetch is tried again next render.
+      ctx.state._notifyServices = null;
+      _noSvcHint.style.display = "block";
+      _showSavedTarget();
+    });
   } else {
     if (!ctx.state._notifyServices.length) _noSvcHint.style.display = "block";
     for(const svc of ctx.state._notifyServices){
@@ -569,6 +604,7 @@ function _buildAlerts(ctx, el, helpBtn, addr, chosen, haAreas, dataMode, isBasic
       if(cfg.notify_service === svc) opt.selected = true;
       serviceSelect.appendChild(opt);
     }
+    _showSavedTarget();
   }
   serviceSelect.addEventListener("change", () => {
     cfg.notify_service = serviceSelect.value || undefined;
@@ -617,21 +653,24 @@ function _buildAlerts(ctx, el, helpBtn, addr, chosen, haAreas, dataMode, isBasic
     }
   });
 
-  const testBtn = el("button", { class: "btn", style: "margin-top:10px" }, "Send Test Email");
+  const testBtn = el("button", { class: "btn", style: "margin-top:10px" }, "Send Test");
   testBtn.addEventListener("click", async () => {
     const email = (emailInput.value || "").trim();
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-      saveStatus.textContent = "Enter a valid email first."; saveStatus.style.color = "#f87171"; return;
+    // The target alerts use (cfg), even before the picker's list arrives.
+    const chosenSvc = cfg.notify_service || "";
+    // A picked notify target (a phone) needs no email; an email typed must be valid.
+    if ((!email && !chosenSvc) || (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))) {
+      saveStatus.textContent = "Enter a valid email or pick where to send."; saveStatus.style.color = "#f87171"; return;
     }
     if (dataMode !== "live") { saveStatus.textContent = "Switch to Live mode first."; return; }
     saveStatus.textContent = "Sending test…"; saveStatus.style.color = "";
     testBtn.disabled = true;
     try {
-      const svc = serviceSelect ? serviceSelect.value : "";
-      await ctx.actions.wsCall("padspan_bright/notify_test", { email, service: svc || undefined });
-      saveStatus.textContent = "Test sent — check your inbox."; saveStatus.style.color = "#52b788";
+      await ctx.actions.wsCall("padspan_bright/notify_test", { email: email || undefined, service: chosenSvc || undefined });
+      saveStatus.textContent = email ? "Test sent — check your inbox." : "Test sent — check your phone."; saveStatus.style.color = "#52b788";
     } catch (e) {
-      saveStatus.textContent = "Test failed: " + (e?.message || String(e)).slice(0, 60);
+      // Whole: cut at 60 it lost the advice ("pick where to send again").
+      saveStatus.textContent = "Test failed: " + (e?.message || String(e));
       saveStatus.style.color = "#f87171";
     } finally { testBtn.disabled = false; }
   });

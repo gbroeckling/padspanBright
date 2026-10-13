@@ -151,3 +151,101 @@ async def test_leaving_the_same_room_again_later_is_a_new_record_with_its_own_ti
     await store.record("ble:AA", "Kitchen", seen_at=wednesday)
     assert store.get_all()["ble:AA"]["ts"] == wednesday
     store.store.async_delay_save.assert_called_once()
+
+
+def test_a_backup_carries_lost_and_found_and_a_restore_takes_it_back():
+    """The store exists so a last-seen room "never resets to Unknown" — and a
+    restore reset all of it: it was never in a backup. Its live data is
+    `records`, which the backup reads; the restore joins the backup's into the
+    running store (async_merge), so the next save can't put the old ones back
+    and a record made since the backup isn't lost."""
+    import inspect
+    from custom_components.padspan_bright import ws_backup
+    from custom_components.padspan_bright.const import DATA_LOST_AND_FOUND, LOST_AND_FOUND_STORE_KEY
+    from custom_components.padspan_bright.ws_common import _ALL_STORE_KEYS, _DATA_KEY_MAP
+    assert LOST_AND_FOUND_STORE_KEY in _ALL_STORE_KEYS
+    assert _DATA_KEY_MAP[LOST_AND_FOUND_STORE_KEY] == DATA_LOST_AND_FOUND
+    src = inspect.getsource(ws_backup)
+    assert "stores_data[store_key] = store_obj.records" in src
+    assert "await lf_obj.async_merge(data)" in src
+
+
+@pytest.mark.asyncio
+async def test_a_restore_keeps_the_newer_record_per_object_and_saves_what_it_holds():
+    store = _make_store()
+    store.records = {"ble:TAG": {"room": "Garage", "ts": 300.0},
+                     "ble:KEYS": {"room": "Hall", "ts": 300.0},
+                     "ble:PHONE": {"room": "Office", "ts": 150.0}}
+    await store.async_merge({"ble:KEYS": {"room": "Kitchen", "ts": 100.0},
+                             "ble:PHONE": {"room": "Lounge", "ts": 200.0},
+                             "ble:WALLET": {"room": "Bedroom", "ts": 100.0}})
+    assert {k: v["room"] for k, v in store.get_all().items()} == {
+        "ble:TAG": "Garage", "ble:KEYS": "Hall", "ble:PHONE": "Lounge", "ble:WALLET": "Bedroom"}
+    store.store.async_save.assert_awaited_once_with(store.records)
+
+
+@pytest.mark.asyncio
+async def test_a_restored_record_with_a_bad_time_is_skipped_not_the_whole_merge():
+    store = _make_store()
+    store.records = {"ble:TAG": {"room": "Garage", "ts": 300.0}}
+    await store.async_merge({"ble:TAG": {"room": "Kitchen", "ts": "monday"},
+                             "ble:ODD": {"room": "Hall", "ts": [1]},
+                             "ble:WALLET": {"room": "Bedroom", "ts": 100.0}})
+    assert {k: v["room"] for k, v in store.get_all().items()} == {"ble:TAG": "Garage", "ble:WALLET": "Bedroom"}
+    store.store.async_save.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_report_counts_each_restore_merge_and_the_records_it_kept():
+    """#150 from the field: lost_and_found_restore_merged once per merge, and
+    lost_and_found_restore_kept_current the records here newer than the
+    backup's (the ones a replacing restore rolled back); none, nothing sent."""
+    from types import SimpleNamespace
+    from custom_components.padspan_bright.const import DATA_SETTINGS, DOMAIN
+    from custom_components.padspan_bright.telemetry import _DATA_COUNTERS
+    store = _make_store()
+    store.hass = SimpleNamespace(data={DOMAIN: {DATA_SETTINGS: SimpleNamespace(data={"telemetry_enabled": True})}})
+    store.records = {"ble:TAG": {"room": "Garage", "ts": 300.0},
+                     "ble:KEYS": {"room": "Hall", "ts": 300.0},
+                     "ble:PHONE": {"room": "Office", "ts": 150.0}}
+    await store.async_merge({"ble:TAG": {"room": "Garage", "ts": 300.0},       # the same record
+                             "ble:KEYS": {"room": "Kitchen", "ts": 100.0},     # older: this one kept
+                             "ble:PHONE": {"room": "Lounge", "ts": 200.0},
+                             "ble:WALLET": {"room": "Bedroom", "ts": 100.0}})
+    counters = store.hass.data[DOMAIN][_DATA_COUNTERS]
+    assert counters == {"lost_and_found_restore_merged": 1, "lost_and_found_restore_kept_current": 1}
+    await store.async_merge({"ble:BAG": {"room": "Hall", "ts": 100.0}})
+    assert counters == {"lost_and_found_restore_merged": 2, "lost_and_found_restore_kept_current": 1}
+
+
+async def test_a_record_for_someones_device_survives_the_startup_prune(tmp_path):
+    """The once-per-start prune judged records by whether the device was still
+    heard, so an HA-linked tag away for two days lost its record at restart.
+    Records are marked when made; only unmarked (pre-0.38.106 stranger)
+    records are judged."""
+    import time as _t
+    from unittest.mock import MagicMock
+    from tests.conftest import MockHass
+    from custom_components.padspan_bright.lost_and_found_store import LostAndFoundStore
+    lf = LostAndFoundStore(MockHass(tmp_path))
+    lf.store = MagicMock()
+    await lf.record("ble:AA:BB:CC:DD:EE:02", "Garage", label="Suitcase tag", seen_at=_t.time() - 2 * 86400)
+    lf.records["ble:AA:BB:CC:DD:EE:09"] = {"room": "Street", "ts": 1.0}     # an old stranger
+    from custom_components.padspan_bright.snapshot_builder import _prune_lost_and_found_strangers
+    from custom_components.padspan_bright.const import DOMAIN, DATA_DEVICE_REGISTRY, DATA_OBJECTS, DATA_SETTINGS
+    from types import SimpleNamespace
+    dev_reg = MagicMock(); dev_reg.get_label_by_key.return_value = None
+    dev_reg.get.return_value = None; dev_reg.resolve.return_value = None
+    obj_store = MagicMock(); obj_store.get_label.return_value = None
+    hass = SimpleNamespace(data={DOMAIN: {DATA_DEVICE_REGISTRY: dev_reg, DATA_OBJECTS: obj_store,
+                                          DATA_SETTINGS: SimpleNamespace(data={"followed_addrs": []})}})
+    _prune_lost_and_found_strangers(hass, lf, [])
+    assert list(lf.records) == ["ble:AA:BB:CC:DD:EE:02"]
+
+
+def test_a_followed_unlabelled_device_is_recorded():
+    """The Follow button needs no label; the snapshot passed identified=
+    obj_is_identified(obj) alone, so a followed device was never recorded."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "custom_components" / "padspan_bright" / "snapshot_builder.py").read_text(encoding="utf-8")
+    assert 'or str(_obj.get("address") or "").upper() in _lf_followed' in src

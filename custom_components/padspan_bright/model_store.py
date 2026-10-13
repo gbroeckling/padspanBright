@@ -414,6 +414,16 @@ class ModelStore:
         """Return {room_name: {floor_id, color}} for every known room."""
         return dict(self.data.get("room_meta", {}))
 
+    async def async_remove_room_meta(self, room: str) -> bool:
+        """Forget a room's colour and floor (its HA area was deleted).
+        async_update merges room_meta, so it could add but never remove."""
+        rm = self.data.get("room_meta") or {}
+        if room not in rm:
+            return False
+        rm.pop(room, None)
+        await self.store.async_save(self.data)
+        return True
+
     # ── Fabric accessors ────────────────────────────────────────────────────
 
     def get_scanner_mappings(self) -> tuple[dict[str, str], dict[str, str]]:
@@ -503,14 +513,14 @@ class ModelStore:
 
         # Keep any floor the fabric still uses but the registry has dropped —
         # deleting it here would strand its rooms outside the stack entirely.
-        used = set()
-        fab = getattr(self, "fabric", None)
-        if fab:
-            try:
-                used = {str((g or {}).get("floor_id") or "")
-                        for g in (fab.room_geometry_m() or {}).values()}
-            except Exception:
-                used = set()
+        # (FabricStore has no room_geometry_m - that is ModelStore's own
+        # read-through; calling it on the fabric raised, so `used` was always
+        # empty and a floor with rooms was dropped with its heights.)
+        try:
+            used = {str((g or {}).get("floor_id") or "")
+                    for g in (self.room_geometry_m() or {}).values()}
+        except Exception:
+            used = set()
         reg_ids = {str(f["id"]) for f in incoming}
         kept = [prev for fid, prev in stored.items() if fid not in reg_ids and fid in used]
 
@@ -1334,7 +1344,8 @@ class ModelStore:
     async def async_set_light_position_m(
         self, entity_id: str, x_m: float, y_m: float, floor_id: str,
         color: str = "", shape: str = "", rotation: float = 0.0,
-        width_cm: float = 0.0, height_cm: float = 0.0, margin_cm: float = 0.0,
+        width_cm: float | None = None, height_cm: float | None = None,
+        margin_cm: float | None = None,
         label: str = "", z_m: Any = KEEP_HEIGHT,
     ) -> None:
         """Place a light in real-world metres — the only way a light is placed.
@@ -1353,6 +1364,15 @@ class ModelStore:
         entry.update(light_appearance(color=color, shape=shape, rotation=rotation,
                                       width_cm=width_cm, height_cm=height_cm,
                                       margin_cm=margin_cm))
+        # The map sends a size of 0 for "the default marker" and leaves the
+        # margin out for the scale-aware inset. Stored, those came back as a
+        # real 1 cm fixture (drawn at half size) and a 0 cm inset (on the wall
+        # line), so they stay unset, as a migrated light's are.
+        for k, v in (("width_cm", width_cm), ("height_cm", height_cm)):
+            if not v:
+                entry.pop(k, None)
+        if margin_cm is None:
+            entry.pop("margin_cm", None)
         if label:
             entry["label"] = str(label)[:120]
         if z_m is not KEEP_HEIGHT:
@@ -1709,6 +1729,17 @@ class ModelStore:
         count = 0
         positions = self.scanner_positions_m()
         barriers_m = self.rf_barriers_m()
+        # Floors stack on one footprint, so "lands inside this image" holds
+        # for every storey's devices; only this map's floor is drawn on it.
+        # The map's own floor first: moving a map in the Stack table leaves
+        # the old stack.floor_id behind (nothing writes it any more), and
+        # preferring it drew the old floor's devices on the map.
+        _mf = str(map_dict.get("floor_id") or (map_dict.get("stack") or {}).get("floor_id") or "")
+        map_floors = {_mf} if _mf else set()
+
+        def _other_floor(pos: dict) -> bool:
+            fl = str(pos.get("floor_id") or "")
+            return bool(map_floors and fl and fl not in map_floors)
 
         # ── Receivers ─────────────────────────────────────────────────────
         existing_receivers = map_dict.get("receivers") or []
@@ -1727,7 +1758,7 @@ class ModelStore:
 
         # Anything in the fabric that lands inside this image gets drawn on it.
         for src, pos in positions.items():
-            if src in existing_sources:
+            if src in existing_sources or _other_floor(pos):
                 continue
             fracs = self.metres_to_map_frac(float(pos["x_m"]), float(pos["y_m"]), map_id)
             if fracs and 0.0 <= fracs[0] <= 1.0 and 0.0 <= fracs[1] <= 1.0:
@@ -1768,7 +1799,7 @@ class ModelStore:
 
         # Anything in the fabric that lands inside this image gets drawn on it.
         for bk_key, bm in beacons_m.items():
-            if bk_key in existing_keys:
+            if bk_key in existing_keys or _other_floor(bm):
                 continue
             fracs = self.metres_to_map_frac(float(bm["x_m"]), float(bm["y_m"]), map_id)
             if fracs and 0.0 <= fracs[0] <= 1.0 and 0.0 <= fracs[1] <= 1.0:

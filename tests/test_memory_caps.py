@@ -365,3 +365,254 @@ def test_diag_export_cuts_the_long_lists_but_keeps_every_own_object(tmp_path: Pa
     assert out == {"n": 200, "t": {"total": 5000, "kept": 200}, "mine": 2, "ads": 200,
                    "at": {"total": 5000, "kept": 200}, "radios": 1, "other": 1,
                    "orig": 5000, "small": 1}
+
+
+# ── Bermuda troubleshooting (opt-in report) ───────────────────────────────────
+
+class TestSnapshotBuildDiagnostics:
+    """A third of the installs reporting take 1.4-18 s per snapshot build, all
+    with Bermuda. The report says which phase, how many HA states and how
+    much of it is Bermuda's."""
+
+    def test_the_counts_reach_the_report(self):
+        from custom_components.padspan_bright import perf_sampler as ps
+        hass = MagicMock()
+        snap = {"objects": {"summary": {"total": 5}, "list": []},
+                "raw_counts": {"receivers": 7, "candidate_entities": 120, "saved_entities_missing": 3}}
+        hass.data = {DOMAIN: {"snapshot_cache": (0.0, snap)}}
+        hass.states.async_entity_ids_count.return_value = 31234
+        out = ps.padspan_sizes(hass, {}, estimate=False)
+        assert out["states"] == 31234
+        assert (out["bermuda_rcv"], out["tag_cands"], out["saved_missing"]) == (7, 120, 3)
+
+    @pytest.mark.asyncio
+    async def test_every_build_phase_is_timed(self, monkeypatch):
+        from custom_components.padspan_bright import snapshot_builder as SB
+        from tests.test_findmy_snapshot import _make_house
+        house = _make_house(monkeypatch, labels={}, followed=[])
+        seen = []
+        monkeypatch.setattr(SB, "record_duration", lambda h, m, ms: seen.append((m, ms)))
+        await house.poll(0, [])
+        assert [m for m, _ in seen] == ["snap_ble", "snap_ha", "snap_objects", "snap_enrich"]
+        assert all(ms >= 0 for _, ms in seen)
+
+
+class TestBermudaTagAddresses:
+    """The entity objects Bermuda's area sensors become: each one's address
+    comes from its HA device (connections, then a MAC-shaped identifier). A
+    fourth step walked every Bluetooth device per tag comparing a key the
+    entries never had — removed; addresses resolve exactly as before."""
+
+    def _house(self, monkeypatch, n_tags):
+        from types import SimpleNamespace as NS
+        from custom_components.padspan_bright import snapshot_builder as SB
+        from tests.test_findmy_snapshot import _make_house
+        house = _make_house(monkeypatch, labels={}, followed=[])
+        states, ents, devs = [], {}, []
+        for i in range(n_tags):
+            eid = f"sensor.tag{i}_area_last_seen"
+            states.append(NS(entity_id=eid, state="Kitchen", attributes={"friendly_name": f"Tag {i}"}, name=eid))
+            ents[eid] = NS(entity_id=eid, device_id=f"d{i}", platform="bermuda", config_entry_id="b1",
+                           area_id=None, domain="sensor")
+            ident = {("bermuda", _mac(i).lower())} if i % 2 == 0 else {("bermuda", f"irk_{i}")}
+            devs.append(NS(id=f"d{i}", connections=set(), identifiers=ident, name=f"Tag {i}",
+                           name_by_user=None, model="", manufacturer="", config_entries={"b1"}, sw_version=""))
+        for j in range(n_tags):         # Bluetooth devices the dead step walked
+            devs.append(NS(id=f"p{j}", connections={("bluetooth", _mac(10_000 + j))}, identifiers=set(),
+                           name=f"P{j}", name_by_user=None, model="", manufacturer="", config_entries=set(), sw_version=""))
+        by = {s.entity_id: s for s in states}
+        house.hass.states = NS(async_all=lambda *a: states, get=lambda e: by.get(e))
+        er = NS(async_get=lambda eid: ents.get(eid), entities=ents)
+        dr = NS(devices={d.id: d for d in devs}, async_get=lambda i: None)
+        ar = NS(async_list_areas=lambda: [NS(id="k", name="Kitchen")])
+        monkeypatch.setattr(SB.entity_registry, "async_get", lambda h: er)
+        monkeypatch.setattr(SB.device_registry, "async_get", lambda h: dr)
+        monkeypatch.setattr(SB.area_registry, "async_get", lambda h: ar)
+        return house
+
+    @pytest.mark.asyncio
+    async def test_a_mac_identifier_still_gives_the_address(self, monkeypatch):
+        house = self._house(monkeypatch, 4)
+        objs, _x = await house.poll(0, [])
+        assert objs["entity:sensor.tag0_area_last_seen"]["address"] == _mac(0)
+        assert objs["entity:sensor.tag2_area_last_seen"]["address"] == _mac(2)
+        # no MAC on its device: unresolved, as it always was
+        assert objs["entity:sensor.tag1_area_last_seen"]["address"] is None
+
+    @pytest.mark.asyncio
+    async def test_thousands_of_bermuda_tags_build_in_linear_time(self, monkeypatch):
+        import time as _t
+        house = self._house(monkeypatch, 3000)
+        await house.poll(0, [])
+        t0 = _t.perf_counter()
+        objs, _x = await house.poll(5, [])
+        assert sum(1 for k in objs if k.startswith("entity:")) == 3000
+        # 1,500 unresolved tags x 3,000 Bluetooth devices: ~4.5M dead iterations,
+        # 0.63 s -> 0.06 s for this build when the step was removed
+        assert _t.perf_counter() - t0 < 5.0
+
+    @pytest.mark.asyncio
+    async def test_missing_saved_tags_share_one_walk_over_the_states(self, monkeypatch):
+        from types import SimpleNamespace as NS
+        from custom_components.padspan_bright.const import DATA_COORDINATOR
+        house = self._house(monkeypatch, 4)
+        st_all = house.hass.states.async_all
+        cat = NS(entity_id="sensor.my_cat_room_sensor", state="Kitchen", attributes={}, name="cat")
+        states = list(st_all()) + [cat]
+        calls = []
+
+        def _all(*a):
+            calls.append(1)
+            return states
+        by = {s.entity_id: s for s in states}
+        house.hass.states = NS(async_all=_all, get=lambda e: by.get(e))
+        house.hass.data[DOMAIN][DATA_COORDINATOR] = NS(
+            room_tag_map={"Kitchen": ["tag.dog", "tag.cat", "tag.keys", "tag.fox"]})
+        calls.clear()
+        snap = await __import__("custom_components.padspan_bright.snapshot_builder",
+                                fromlist=["x"])._build_live_snapshot(house.hass)
+        # the main pass + ONE shared fuzzy pass, not one per missing tag
+        assert len(calls) == 2
+        tags = {t["entity_id"] for t in snap["tags"]}
+        assert "sensor.my_cat_room_sensor" in tags               # fuzzy match still found
+        assert snap["raw_counts"]["saved_entities_missing"] == 3   # dog, keys, fox
+
+
+class TestSameDeviceObjectsMerge:
+    """Objects a HA device owns by Bluetooth connection carry it as
+    obj["device"], an addr_to_device entry keyed "device_id". Two matches
+    read "id" instead and never fired: an iBeacon and a plain BLE address of
+    the SAME device stayed two objects unless their MACs overlapped."""
+
+    UUID = "0x" + " 0x".join(["E2"] * 16)
+
+    def _ib(self, addr):
+        md = "0x02 0x15 " + self.UUID + " 0x00 0x01 0x00 0x02 0xC5"
+        return [{"address": addr, "source": "kit", "rssi": -60, "age_s": 1.0, "name": "",
+                 "manufacturer_data": {"76": md}, "service_data": {}, "service_uuids": [],
+                 "connectable": False}]
+
+    def _plain(self, addr):
+        return [{"address": addr, "source": "kit", "rssi": -62, "age_s": 1.0, "name": "Tracker",
+                 "manufacturer_data": {}, "service_data": {}, "service_uuids": [], "connectable": False}]
+
+    def _house(self, monkeypatch, same_device):
+        from types import SimpleNamespace as NS
+        from custom_components.padspan_bright import snapshot_builder as SB
+        from tests.test_findmy_snapshot import _make_house
+        house = _make_house(monkeypatch, labels={}, followed=[])
+        a, b = _mac(1), _mac(2)
+        if same_device:
+            devs = [NS(id="d1", connections={("bluetooth", a), ("bluetooth", b)}, identifiers=set(), name="Fob",
+                       name_by_user=None, model="", manufacturer="", config_entries=set(), sw_version="")]
+        else:
+            devs = [NS(id=f"d{i}", connections={("bluetooth", m)}, identifiers=set(), name=f"Fob{i}",
+                       name_by_user=None, model="", manufacturer="", config_entries=set(), sw_version="")
+                    for i, m in enumerate((a, b))]
+        dr = NS(devices={d.id: d for d in devs}, async_get=lambda i: None)
+        er = NS(async_get=lambda e: None, entities={})
+        monkeypatch.setattr(SB.device_registry, "async_get", lambda h: dr)
+        monkeypatch.setattr(SB.entity_registry, "async_get", lambda h: er)
+        return house, a, b
+
+    @pytest.mark.asyncio
+    async def test_an_ibeacon_and_a_plain_address_of_one_device_are_one_object(self, monkeypatch):
+        house, a, b = self._house(monkeypatch, same_device=True)
+        objs, _x = await house.poll(0, self._ib(a) + self._plain(b))
+        ib = [o for o in objs.values() if o.get("kind") == "ibeacon"]
+        assert len(ib) == 1 and b in (ib[0].get("all_addresses") or [])
+        assert "ble:" + b not in objs
+
+    @pytest.mark.asyncio
+    async def test_different_devices_stay_apart(self, monkeypatch):
+        house, a, b = self._house(monkeypatch, same_device=False)
+        objs, _x = await house.poll(0, self._ib(a) + self._plain(b))
+        assert "ble:" + b in objs
+
+    @pytest.mark.asyncio
+    async def test_a_merge_by_device_is_counted_for_the_report(self, monkeypatch):
+        from custom_components.padspan_bright import snapshot_builder as SB
+        house, a, b = self._house(monkeypatch, same_device=True)
+        await house.poll(0, self._ib(a) + self._plain(b))
+        snap = await SB._build_live_snapshot(house.hass)
+        assert snap["raw_counts"]["merged_by_device"] == 1
+
+
+def test_the_history_cap_never_drops_an_irk_phone():
+    """low_memory.py promises an IRK phone is never dropped; the cap checked
+    only identified/user_label, so an unlabelled one could go."""
+    from custom_components.padspan_bright.snapshot_builder import cap_object_history
+    cache = {f"ble:{i:02X}": {"_last_seen_ts": i} for i in range(20)}
+    cache["irk:abc"] = {"kind": "private_ble", "_last_seen_ts": -1}
+    cap_object_history(cache, 5, set())
+    assert "irk:abc" in cache
+
+
+@pytest.mark.asyncio
+async def test_the_object_history_save_is_not_awaited_inside_the_build(monkeypatch):
+    """The ~6 MB save (serialise, write, fsync) was awaited inside the
+    snapshot lock every interval, holding up the panel's and the presence
+    poll's builds. It is scheduled with async_delay_save."""
+    from tests.test_findmy_snapshot import _make_house
+    from custom_components.padspan_bright.const import DOMAIN
+    house = _make_house(monkeypatch, labels={}, followed=[])
+    calls = []
+
+    class _Rec:
+        async def async_load(self):
+            return None
+
+        async def async_save(self, data):
+            calls.append("save")
+
+        def async_delay_save(self, fn, delay):
+            calls.append("delay")
+            fn()
+    house.hass.data[DOMAIN]["_obj_hist_store"] = _Rec()
+    await house.poll(0, [])
+    await house.poll(120, [])
+    assert "delay" in calls and "save" not in calls
+
+
+@pytest.mark.asyncio
+async def test_a_radios_network_info_is_found_by_its_name_once_per_build(monkeypatch):
+    """The fallback walked the whole entity registry per slug per radio
+    (25,000 Bermuda rows x 20 radios: 240 ms a build); network entities are
+    indexed once. The answer is the same: a proxy named 'off' gets the IP
+    and SSID from sensor.off_ip_address / sensor.off_wifi_ssid."""
+    from types import SimpleNamespace as NS
+    from custom_components.padspan_bright import snapshot_builder as SB
+    from tests.test_findmy_snapshot import _make_house
+    import tests.test_findmy_snapshot as FS
+    monkeypatch.setattr(FS, "RADIOS", FS.RADIOS + [{"source": f"px{i}", "name": f"proxy {i}"} for i in range(10)])
+    house = _make_house(monkeypatch, labels={}, followed=[])
+    states = [NS(entity_id="sensor.off_ip_address", state="10.0.0.9", attributes={}, name="ip"),
+              NS(entity_id="sensor.off_wifi_ssid", state="HomeNet", attributes={}, name="ssid")]
+    ents = {s.entity_id: NS(entity_id=s.entity_id, device_id=None, platform="esphome",
+                            config_entry_id="e", area_id=None) for s in states}
+    for i in range(2000):
+        eid = f"sensor.bermuda_{i}_distance_to_off"
+        ents[eid] = NS(entity_id=eid, device_id=f"d{i}", platform="bermuda", config_entry_id="b", area_id=None)
+    by = {s.entity_id: s for s in states}
+    house.hass.states = NS(async_all=lambda *a: states, get=lambda e: by.get(e))
+    calls = {"n": 0}
+
+    class _Ents(dict):
+        def values(self):
+            calls["n"] += 1
+            return super().values()
+    er = NS(async_get=lambda eid: ents.get(eid), entities=_Ents(ents))
+    monkeypatch.setattr(SB.entity_registry, "async_get", lambda h: er)
+    snap = await SB._build_live_snapshot(house.hass)
+    off = next(r for r in snap["ble"]["radios"] if r["source"] == "off")
+    assert off.get("ip") == "10.0.0.9" and off.get("ssid") == "HomeNet"
+    assert calls["n"] <= 3
+
+
+def test_factory_reset_clears_history_through_the_builders_store():
+    """The history save is a delayed save on the snapshot builder's Store;
+    factory reset saved {} through a second Store, and the pending write put
+    the pre-reset history back. A save on the same Store cancels it."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "custom_components" / "padspan_bright" / "ws_factory_reset.py").read_text(encoding="utf-8")
+    assert 'st = domain.get("_obj_hist_store") or _St(hass, 1, OBJECT_HISTORY_STORE_KEY)' in src

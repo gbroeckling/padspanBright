@@ -24,7 +24,7 @@ something already computed.
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 # A gap between two consecutive frames for the same object longer than this
@@ -37,8 +37,9 @@ MAX_DWELL_GAP_S = 300.0
 
 
 def compute_dwell_stats(
-    frames: list[dict[str, Any]],
+    frames: Iterable[dict[str, Any]],
     tz_name: str = "UTC",
+    presorted: bool = False,
 ) -> dict[str, Any]:
     """Aggregate TracebackStore frames into dwell/entry/occupancy stats.
 
@@ -53,7 +54,7 @@ def compute_dwell_stats(
         "days": ["YYYY-MM-DD", ...] ascending, every day with any data,
         "dwell": {key: {day: {room: seconds}}},
         "entries": {key: {day: {room: count}}},   # times ENTERING that room
-        "occupancy": {day: {hour: {room: distinct_object_count}}},
+        "occupancy": {day: {hour: {room: peak_concurrent_count}}},
       }
 
     A room-change between two consecutive frames is attributed as: the
@@ -76,15 +77,23 @@ def compute_dwell_stats(
     last_ts: dict[str, float] = {}
     dwell: dict[str, dict[str, dict[str, float]]] = {}
     entries: dict[str, dict[str, dict[str, int]]] = {}
-    occupancy_sets: dict[str, dict[str, dict[str, set[str]]]] = {}
+    # Peak concurrent: the most things in a room AT ONCE in that hour. A
+    # distinct count over the hour called Alice at 09:00 and Bob at 09:35 a
+    # peak of 2; and one device on two keys (a label on an iBeacon and an
+    # IRK) is one thing when they share a pid (else each key is its own).
+    occupancy_peak: dict[str, dict[str, dict[str, int]]] = {}
     days_seen: set[str] = set()
 
-    for frame in sorted(frames, key=lambda f: f.get("ts", 0)):
+    # presorted: a stream already in time order (TracebackStore's files),
+    # walked once without holding the week in memory.
+    ordered = frames if presorted else sorted(frames, key=lambda f: f.get("ts", 0))
+    for frame in ordered:
         ts = frame.get("ts")
         if ts is None:
             continue
         day, hour = local_day_hour(ts)
         days_seen.add(day)
+        frame_rooms: dict[str, set[str]] = {}
 
         for o in frame.get("o", []):
             key = o.get("k")
@@ -106,19 +115,21 @@ def compute_dwell_stats(
             last_room[key] = room
             last_ts[key] = ts
 
-            occ_room_sets = (
-                occupancy_sets.setdefault(day, {}).setdefault(hour, {}).setdefault(room, set())
-            )
-            occ_room_sets.add(key)
+            # One device on two keys counts once when they share a padspan_id.
+            # Not by name: two people's unlabelled "iPhone"s are two people.
+            frame_rooms.setdefault(room, set()).add(str(o.get("pid") or key))
+
+        if frame_rooms:
+            by_room = occupancy_peak.setdefault(day, {}).setdefault(hour, {})
+            for room, ids in frame_rooms.items():
+                if len(ids) > by_room.get(room, 0):
+                    by_room[room] = len(ids)
 
     dwell_rounded = {
         key: {day: {room: round(secs, 1) for room, secs in rooms.items()} for day, rooms in by_day.items()}
         for key, by_day in dwell.items()
     }
-    occupancy_counts = {
-        day: {hour: {room: len(keys) for room, keys in rooms.items()} for hour, rooms in by_hour.items()}
-        for day, by_hour in occupancy_sets.items()
-    }
+    occupancy_counts = occupancy_peak
 
     return {
         "objects": names,

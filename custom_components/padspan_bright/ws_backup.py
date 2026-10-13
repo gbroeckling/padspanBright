@@ -30,6 +30,12 @@ from .const import (
     MODEL_STORE_KEY,
     FABRIC_STORE_KEY,
     HOUSE3D_STORE_KEY,
+    DATA_TRACEBACK,
+    TRACEBACK_STORE_KEY,
+    DATA_WLED_LOOKS,
+    WLED_LOOKS_STORE_KEY,
+    DATA_LOST_AND_FOUND,
+    LOST_AND_FOUND_STORE_KEY,
 )
 from .build_info import BUILD_VERSION
 from .ws_common import (
@@ -39,6 +45,27 @@ from .ws_common import (
 from .telemetry import bump as _bump
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _licence_rank(d: dict[str, Any]) -> tuple[int, float]:
+    """(has a working key, its expiry) - higher is better. A working key is
+    one with no expiry or one not past the grace period (ws_common's rule);
+    no expiry ranks above any date."""
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+    from .ws_common import PRO_GRACE_DAYS  # noqa: PLC0415
+    if not str(d.get("forensics_license_key") or "").strip():
+        return (0, 0.0)
+    raw = str(d.get("forensics_license_expires") or "").strip()
+    if not raw:
+        return (2, float("inf"))
+    try:
+        exp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return (2, float("inf"))      # an unreadable date never locks anyone out
+    working = exp - datetime.now(timezone.utc) > -timedelta(days=PRO_GRACE_DAYS)
+    return (2 if working else 1, exp.timestamp())
 
 
 async def _load_backups(hass: HomeAssistant) -> dict[str, Any]:
@@ -196,7 +223,11 @@ async def ws_store_backup_create(hass: HomeAssistant, connection, msg) -> None:
                 unread.append(store_key)
             continue
         # Each store class uses different attribute names for its data
-        if hasattr(store_obj, "data"):
+        if store_key == TRACEBACK_STORE_KEY and hasattr(store_obj, "async_export"):
+            # Traceback: its history is files on disk; a backup carries
+            # the last day of it (traceback_store.BACKUP_WINDOW_S).
+            stores_data[store_key] = await store_obj.async_export()
+        elif hasattr(store_obj, "data"):
             stores_data[store_key] = store_obj.data
         elif hasattr(store_obj, "_data"):
             stores_data[store_key] = store_obj._data
@@ -204,6 +235,8 @@ async def ws_store_backup_create(hass: HomeAssistant, connection, msg) -> None:
             stores_data[store_key] = store_obj.entries
         elif hasattr(store_obj, "frames"):
             stores_data[store_key] = store_obj.frames
+        elif hasattr(store_obj, "records"):
+            stores_data[store_key] = store_obj.records     # Lost & Found
         else:
             # Last resort: read from disk
             try:
@@ -322,6 +355,7 @@ async def ws_store_backup_restore(hass: HomeAssistant, connection, msg) -> None:
     stores_data = backup.get("stores", {})
     selected_keys = msg.get("store_keys")  # None = restore all
     restored = 0
+    wled_touched = False
 
     # ── Maps and Model are ONE fact in two files ─────────────────────────
     #
@@ -421,11 +455,37 @@ async def ws_store_backup_restore(hass: HomeAssistant, connection, msg) -> None:
                         _LOGGER.error("Restore of %s failed: %s", store_key, err)
                 continue
             try:
+                if store_key == TRACEBACK_STORE_KEY:
+                    # Traceback's history is its daily segment files: written
+                    # to the old single file, a restore was gone at restart.
+                    tb_obj = hass.data.get(DOMAIN, {}).get(DATA_TRACEBACK)
+                    if tb_obj is not None and hasattr(tb_obj, "async_merge"):
+                        # Joined by timestamp: replacing it erased every
+                        # movement recorded since the backup was taken.
+                        await tb_obj.async_merge(data)
+                        restored += 1
+                        continue
+                if store_key == LOST_AND_FOUND_STORE_KEY:
+                    # Joined by each record's time, like Traceback: replacing
+                    # it sent every object back to its room at backup time
+                    # and dropped the record of one lost since.
+                    lf_obj = hass.data.get(DOMAIN, {}).get(DATA_LOST_AND_FOUND)
+                    if lf_obj is not None and hasattr(lf_obj, "async_merge"):
+                        await lf_obj.async_merge(data)
+                        restored += 1
+                        continue
                 if store_key == HOUSE3D_STORE_KEY:
                     # Live Aboard's file: a backup with no furniture in it keeps
                     # the furniture placed since (house3d_store.async_restore_data).
                     from .house3d_store import async_restore_data
                     data = await async_restore_data(hass, data)
+                if store_key == WLED_LOOKS_STORE_KEY:
+                    # Looks come back; what PadSpan did to each device's
+                    # flash (sync switched off, the originals kept) stays.
+                    from .wled_exact import restore_keeps_switch_state
+                    _wl = hass.data.get(DOMAIN, {}).get(DATA_WLED_LOOKS)
+                    data = restore_keeps_switch_state(getattr(_wl, "data", None), data)
+                    wled_touched = True
                 st = _St(hass, 1, store_key)
                 await st.async_save(data)
                 restored += 1
@@ -455,6 +515,26 @@ async def ws_store_backup_restore(hass: HomeAssistant, connection, msg) -> None:
                             # its week (settings_store.trial_state_kept).
                             from .settings_store import trial_state_kept
                             data.update(trial_state_kept(store_obj.data or {}, data))
+                            # The licence on this install stays when it is the
+                            # better one: a backup from before a purchase (or
+                            # from a trial) blanked the key or put the old one
+                            # back, locking paid editing. But an expired live
+                            # key never beats a working one in the backup, and
+                            # an install with no key takes the backup's.
+                            _live = store_obj.data or {}
+                            if _licence_rank(_live) >= _licence_rank(data):
+                                for _k in ("forensics_license_key", "forensics_license_expires",
+                                           "license_tier", "license_is_trial"):
+                                    if _k in _live:
+                                        data[_k] = _live[_k]
+                                    else:
+                                        data.pop(_k, None)
+                            # WLED teams: their mode and the members' kept
+                            # sync are the devices' state now (wled_exact).
+                            from .wled_exact import restore_keeps_team_state
+                            data["wled_teams"] = restore_keeps_team_state(
+                                (store_obj.data or {}).get("wled_teams"), data.get("wled_teams"))
+                            wled_touched = True
                             await st.async_save(data)
                         if hasattr(store_obj, "data") and isinstance(data, dict):
                             store_obj.data = data
@@ -464,8 +544,29 @@ async def ws_store_backup_restore(hass: HomeAssistant, connection, msg) -> None:
                             store_obj.entries = data
                         elif hasattr(store_obj, "frames") and isinstance(data, list):
                             store_obj.frames = data
+                        elif isinstance(store_obj, dict) and isinstance(data, dict):
+                            # The object history is a plain dict in hass.data,
+                            # saved every 15 s from memory: replaced in place
+                            # (other holders keep the same dict).
+                            store_obj.clear()
+                            store_obj.update(data)
+                        elif hasattr(store_obj, "async_load"):
+                            # Forensics (.addrs) and the device registry
+                            # (._devices + its index) match none of the above:
+                            # their next save wrote the old data back over the
+                            # restore. They read the restored file back in.
+                            await store_obj.async_load()
             except Exception as e:
                 _LOGGER.warning("Failed to restore %s: %s", store_key, e)
+
+    if wled_touched:
+        # The hold / reconnect / team-follow listener tracks the restored
+        # set of devices, not the one before (it was until a restart).
+        try:
+            from .wled_exact import _refresh_listener
+            _refresh_listener(hass)
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.debug("WLED listener refresh after restore failed: %s", e)
 
     # ── Restore map images to disk ────────────────────────────────────────────
     images_restored = 0

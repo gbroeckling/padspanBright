@@ -42,11 +42,40 @@ export function render(ctx) {
   // ── 3D Iso map setup (mirrors overview) ────────────────────────────────
   const maps_list = (ctx.state.maps?.list) || [];
   if (!maps_list.length) {
+    // No floor plan to replay on - but Insights and Busy Times need none.
+    // They live only here, so returning early left a rooms-only house (or
+    // one whose photos were deleted) with no way to reach either.
     const msg = document.createElement("div");
     msg.className = "card";
-    msg.style.cssText = "text-align:center;padding:30px;color:#94a3b8";
-    msg.textContent = "No maps uploaded yet. Go to Maps to add floor plans, then use Traceback to replay object movement.";
+    msg.style.cssText = "text-align:center;padding:20px;color:#94a3b8";
+    msg.textContent = "No floor plans yet, so there's no map to replay movement on. Add one in Maps. Insights and Busy Times work without one.";
     outer.appendChild(msg);
+    // A render before the maps list arrives lands here too: the deep link
+    // (?view=insights|busytimes) is used up only once the maps have loaded,
+    // or the real render opened plain playback.
+    const initial = ctx.state._tracebackInitialMode;
+    if (ctx.state._mapsLoaded) delete ctx.state._tracebackInitialMode;
+    if (initial === "insights" || initial === "busytimes") ctx.state._tbNoMapMode = initial;
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;gap:6px;margin:10px 0";
+    const pane = document.createElement("div");
+    const show = (mode) => {
+      ctx.state._tbNoMapMode = mode;
+      for (const b of row.children) b.style.fontWeight = b.dataset.mode === mode ? "700" : "400";
+      pane.innerHTML = "";
+      pane.appendChild(mode === "busytimes" ? busyTimesView.render(ctx) : insightsView.render(ctx));
+    };
+    for (const [label, mode] of [["Insights", "insights"], ["Busy Times", "busytimes"]]) {
+      const b = document.createElement("button");
+      b.className = "btn inline";
+      b.dataset.mode = mode;
+      b.textContent = label;
+      b.addEventListener("click", () => show(mode));
+      row.appendChild(b);
+    }
+    outer.appendChild(row);
+    outer.appendChild(pane);
+    show(ctx.state._tbNoMapMode || "insights");
     return outer;
   }
 
@@ -1419,6 +1448,9 @@ export function render(ctx) {
       _stopPlayback();
       tb.startTs = new Date(sVal).getTime() / 1000;
       tb.endTs = new Date(eVal).getTime() / 1000;
+      // Typed the wrong way round: swapped, as Forensics does, instead of
+      // a negative range that always read "No data in range".
+      if (tb.startTs > tb.endTs) [tb.startTs, tb.endTs] = [tb.endTs, tb.startTs];
       tb.rangePreset = Math.round(tb.endTs - tb.startTs);
       await _loadTracebackData();
       _resetStaticBase();
@@ -2413,7 +2445,10 @@ export function render(ctx) {
             const _isRef = _stationarySet.has(String(o.k).toUpperCase());
             if (!objDist[o.k]) objDist[o.k] = {dist_m:0, transitions:0, lastPos:null, lastRoom:null, lastTs:0, label:o.n||o.k, steps:0, jitter_steps:0, max_step:0, isRef: _isRef, _recentSteps: []};
             let pos = null;
-            if (o.x!=null && o.y!=null && o.m) pos = _toMetres(o.x, o.y, o.m);
+            // Recorded positions are metres (x_m/y_m). It read x/y/m, which
+            // no frame carries, so every step fell back to room centres.
+            if (o.x_m != null && o.y_m != null) pos = [o.x_m, o.y_m];
+            else if (o.x!=null && o.y!=null && o.m) pos = _toMetres(o.x, o.y, o.m);
             if (!pos && o.r) pos = _centroid(o.r);
             const od = objDist[o.k];
             if (pos && od.lastPos) {

@@ -557,7 +557,7 @@ function _scannerMap(ctx, el, haFloors){
         try {
           const res = await ctx.actions.calibrationSwapRadio(old_source, new_source);
           ctx.state.calibration = null;  // force reload
-          ctx.toast(`Swapped ${res.updated_readings} reading${res.updated_readings!==1?"s":""} from ${radioName(old_source)} → ${radioName(new_source)}.`);
+          ctx.toast(`Swapped ${res.updated_readings} reading${res.updated_readings!==1?"s":""} from ${radioName(old_source)} → ${radioName(new_source)}.` + (res.dropped_readings ? ` ${res.dropped_readings} point(s) already had ${radioName(new_source)}'s own reading, kept instead.` : ""));
           ctx.actions.renderRooms();
         } catch(e){
           ctx.toast("Swap failed: " + String(e), true);
@@ -1023,7 +1023,8 @@ function _settingsPresence(ctx, el){
       "Once a day PadSpan asks padspan.traks.ca whether a newer version exists and " +
       "notifies you when one is available. The request contains only your installed " +
       "version number; the server sees your IP address (as any web request does) and " +
-      "stores nothing else about you. Turn it off here if you prefer no contact."
+      "stores nothing else about you. Turning it off stops this check. If you've entered " +
+      "a licence key, it is still checked with traks.ca once a day, so a refunded key stops working."
     ),
     el("div", { style: rowStyle }, [
       el("div", { style: "font-size:13px;color:#a7f3d0;min-width:130px" }, "Update check"),
@@ -1216,37 +1217,11 @@ function _settingsPresence(ctx, el){
     ),
   ]));
 
-  // ── Signal Loss Linger ───────────────────────────────────────────────────
-  const currentLinger = (settings.signal_loss_linger_s != null ? Number(settings.signal_loss_linger_s) : 90);
-  const lingerPolls = Math.max(2, Math.round(currentLinger / _pollInt));
-  const lingerInp = el("input", {
-    type: "number", min: "10", max: "300", step: "10", value: String(currentLinger), style: inpStyle,
-  });
-  const lingerSaveBtn = el("button", { class: "btn" }, "Save");
-  lingerSaveBtn.addEventListener("click", async () => {
-    const v = Math.max(10, Math.min(300, parseInt(lingerInp.value) || 90));
-    try {
-      await ctx.actions.settingsSet({ signal_loss_linger_s: v });
-      ctx.toast(`Signal loss linger set to ${v}s`);
-    } catch(e) { ctx.toast("Failed to save setting", true); }
-  });
-  wrap.appendChild(el("div", { class: "card" }, [
-    el("div", { class: "h2" }, "Signal Loss Linger"),
-    el("div", { class: "muted", style: "font-size:12px;margin-bottom:14px" },
-      "How long to hold a device at its last known room when it disappears from all scanners. " +
-      "Only applies to devices with confident presence (≥60%). " +
-      "Weak or transient devices still use the short 20s grace period."
-    ),
-    el("div", { style: rowStyle }, [
-      el("div", { style: "font-size:13px;color:#a7f3d0;min-width:130px" }, "Linger time"),
-      lingerInp,
-      el("div", { class: "muted", style: "font-size:12px" }, "seconds"),
-      lingerSaveBtn,
-    ]),
-    el("div", { class: "muted", style: "font-size:11px;margin-top:8px" },
-      `Current: ${currentLinger}s (~${lingerPolls} polls). Default: 90s. Range: 10s – 300s.`
-    ),
-  ]));
+  // (A "Signal Loss Linger" card stood here. Its setting has done nothing
+  // since 0.20.16, when the linger logic was removed for a fixed 120 s grace
+  // (presence_coordinator._AWAY_GRACE_S) — the card was left behind, so a
+  // linger time could be set and changed nothing. The backend still accepts
+  // the key, so an older settings file stays valid.)
 
   // ── BLE Advertisement Timeout ─────────────────────────────────────────────
   // Unset means 14400 s: what the backend has always used (low_memory.py).
@@ -2049,31 +2024,11 @@ function _settingsPresence(ctx, el){
   const savedOffsets = settings.scanner_offsets || {};
   const radios = (ctx.state.live?.snapshot?.ble?.radios) || [];
   if(radios.length){
-    // ── Auto-offset mode selector ──
-    const autoMode = settings.auto_offset_mode || "partial";
-    const autoModeRow = el("div",{style:"display:flex;align-items:center;gap:10px;margin-bottom:12px"});
-    autoModeRow.appendChild(el("span",{style:"font-size:12px;color:#94a3b8"},"Auto-Offset:"));
-    for (const [val, label, desc] of [
-      ["off", "Off", "No automatic correction"],
-      ["partial", "Partial", "50% correction — recommended default"],
-      ["full", "Full", "100% correction to fleet median"],
-    ]) {
-      const btn = el("button",{class:"btn inline",style:
-        autoMode === val
-          ? "font-size:11px;padding:3px 10px;background:#0a2a1a;border-color:#52b788;color:#52b788;font-weight:700"
-          : "font-size:11px;padding:3px 10px;color:#94a3b8"
-      }, label);
-      btn.title = desc;
-      btn.addEventListener("click", async () => {
-        try {
-          await ctx.actions.settingsSet({ auto_offset_mode: val });
-          ctx.toast(`Auto-offset: ${label}`);
-          ctx.actions.renderRooms();
-        } catch(e) { ctx.toast("Failed to save", true); }
-      });
-      autoModeRow.appendChild(btn);
-    }
-
+    // (An Auto-Offset Off/Partial/Full selector stood here. Nothing in the
+    // backend ever read auto_offset_mode: positioning applies only the manual
+    // scanner_offsets. The card said auto and manual "stack" and to set manual
+    // to 0 "to use auto only" — which left those scanners uncorrected. The
+    // figure below is now shown for what it is: a suggestion to type in.)
     // ── Compute auto-offsets from live advertisement data ──
     // Uses MEDIAN RSSI per scanner (robust to outliers from distant devices).
     // Remote scanners naturally see weaker signals — that's geography, not hardware.
@@ -2098,9 +2053,9 @@ function _settingsPresence(ctx, el){
     medVals.sort((a, b) => a - b);
     const fleetMedian = medVals.length ? medVals[Math.floor(medVals.length / 2)] : -70;
 
-    // Auto-offset = fleet_median - scanner_median (positive = scanner reads weaker, boost it)
-    // Partial = 50% of the full offset
-    const autoScale = autoMode === "full" ? 1.0 : autoMode === "partial" ? 0.5 : 0;
+    // Suggested offset = 50% of (fleet_median - scanner_median), the former
+    // "Partial" default (positive = scanner reads weaker, boost it). Shown only.
+    const autoScale = 0.5;
 
     const offsetRows = el("div",{style:"display:flex;flex-direction:column;gap:8px;margin-top:8px"});
     for(const radio of radios){
@@ -2123,8 +2078,8 @@ function _settingsPresence(ctx, el){
       });
 
       const autoLabel = autoOff !== 0
-        ? el("span",{style:`font-size:10px;color:${autoOff > 0 ? "#52b788" : "#f59e0b"}`}, `auto: ${autoOff > 0?"+":""}${autoOff.toFixed(1)}`)
-        : el("span",{style:"font-size:10px;color:#64748b"}, "auto: 0");
+        ? el("span",{style:`font-size:10px;color:${autoOff > 0 ? "#52b788" : "#f59e0b"}`, title:"Not applied. Type it into the box and Save to use it."}, `suggested: ${autoOff > 0?"+":""}${autoOff.toFixed(1)}`)
+        : el("span",{style:"font-size:10px;color:#64748b"}, "suggested: 0");
       const medLabel = scanMed != null
         ? el("span",{style:"font-size:10px;color:#64748b"}, `med: ${scanMed}dBm`)
         : null;
@@ -2144,15 +2099,15 @@ function _settingsPresence(ctx, el){
     wrap.appendChild(el("div",{class:"card"},[
       el("div",{class:"h2"},"Scanner RSSI Offsets"),
       el("div",{class:"muted",style:"font-size:12px;margin-bottom:10px"},
-        "Auto-offset normalizes scanner hardware differences using live median RSSI. " +
-        "Partial (default) applies 50% correction — enough to smooth hardware variation without overcorrecting. " +
-        "Remote scanners are NOT penalized — they naturally see weaker signals due to distance, not hardware."
+        "Only the manual offset you save is applied. The suggestion beside it is half the gap between this " +
+        "scanner's median signal and the fleet median, from live data — a starting point for hardware " +
+        "differences; type it in and Save to use it. A remote scanner reads weaker because of distance, " +
+        "not hardware, so don't copy its suggestion blindly."
       ),
-      autoModeRow,
       offsetRows,
       el("div",{class:"muted",style:"font-size:11px;margin-top:8px"},
         `Fleet median: ${fleetMedian} dBm \u2022 Manual range: \u221220 to +20 dB \u2022 ` +
-        "Auto + manual offsets stack. Set manual to 0 to use auto only."
+        "Only the manual offset is applied."
       ),
     ]));
   }
@@ -2489,6 +2444,9 @@ function _settingsPresence(ctx, el){
       const dev = deviceSel.value;
       const ent = entitySel.value;
       if (!dev || !ent) { ctx.toast("Select a device and entity", true); return; }
+      if (ent.startsWith("scene.") && actionSel.value === "turn_off") {
+        ctx.toast("A scene can only be turned on - Home Assistant has no way to turn one off", true); return;
+      }
       const devOpt = deviceOpts.find(d => d.label === dev);
       const newRule = {
         id: "auto_" + Date.now().toString(36),
@@ -2559,9 +2517,12 @@ function _settingsPresence(ctx, el){
       cancelBtn.addEventListener("click", async()=>{
         cancelBtn.disabled=true; cancelBtn.textContent="Resuming\u2026";
         try {
-          await ctx.actions.wsCall("padspan_bright/unsuspend_databases");
+          // The handler answers {ok:false} (not an error) when the coordinator
+          // isn't ready yet; that read as success.
+          const r = await ctx.actions.wsCall("padspan_bright/unsuspend_databases");
+          if (r && r.ok === false) { ctx.toast("Not resumed: " + (r.error || "try again in a moment"), true); return; }
           ctx.toast("Normal pipeline resumed \u2014 smoothing state cleared for fresh start");
-          ctx.actions.refreshLive && ctx.actions.refreshLive();
+          await ctx.actions.refreshSnapshot();   // refreshLive never existed: the card kept offering the old state
         } catch(e){ ctx.toast("Failed: "+String(e), true); }
         finally{ cancelBtn.disabled=false; cancelBtn.textContent="Resume Normal Pipeline"; }
       });
@@ -2573,9 +2534,10 @@ function _settingsPresence(ctx, el){
         if(!confirm("Suspend all learned databases for 60 minutes?\n\nThis clears Kalman filters, vote windows, scanner reliability, and cached positions.\nOnly raw radio RSSI + spatial centroid positioning will be used.\n\nCalibration data and settings are NOT deleted.")) return;
         suspendBtn.disabled=true; suspendBtn.textContent="Suspending\u2026";
         try {
-          await ctx.actions.wsCall("padspan_bright/suspend_databases",{minutes:60});
+          const r = await ctx.actions.wsCall("padspan_bright/suspend_databases",{minutes:60});
+          if (r && r.ok === false) { ctx.toast("Not suspended: " + (r.error || "try again in a moment"), true); return; }
           ctx.toast("Databases suspended \u2014 raw radio mode for 60 minutes");
-          ctx.actions.refreshLive && ctx.actions.refreshLive();
+          await ctx.actions.refreshSnapshot();   // refreshLive never existed: the card kept offering the old state
         } catch(e){ ctx.toast("Failed: "+String(e), true); }
         finally{ suspendBtn.disabled=false; suspendBtn.textContent="Suspend All Databases (60 min)"; }
       });
@@ -2931,6 +2893,12 @@ function _settingsLicence(ctx, el){
   } else if (lapsed) {
     line = "\u26A0 " + (isTrial ? "Your 90-day trial" : keyProd + " licence") + " expired" + (exp ? " on " + exp : "") +
            " \u2014 paid editing is off. Everything you already built is still here, still readable and still exportable.";
+    colour = "#fbbf24";
+  } else if (typeof daysLeft === "number" && daysLeft < 0) {
+    // Expired but inside the grace period: still working, not for long.
+    const graceLeft = Math.max(1, 14 + daysLeft);   // days_left rounds down; the last day is still a day
+    line = "\u26A0 " + (isTrial ? "Your trial" : keyProd + " licence") + " expired" + (exp ? " on " + exp : "") +
+           " \u2014 paid editing stops in " + graceLeft + " day" + (graceLeft === 1 ? "" : "s") + ".";
     colour = "#fbbf24";
   } else if (isTrial) {
     line = "\u2713 Trial active \u00B7 " + daysLeft + " day" + (daysLeft === 1 ? "" : "s") + " left" +

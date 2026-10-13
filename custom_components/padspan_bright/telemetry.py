@@ -78,7 +78,7 @@ import math
 import re
 import time
 import uuid
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -103,6 +103,15 @@ STATS_URL = "https://padspan.traks.ca/api/stats.php"
 SCHEMA = 1
 _INTERVAL = timedelta(hours=24)
 _FIRST_DELAY_S = 600           # after the update check, never during startup
+# The first minutes after a start describe the start, not the day. Sent at
+# _FIRST_DELAY_S, half of all reports were a few minutes of Home Assistant
+# starting, and since an update is a restart, every first report on a new
+# version was one. After a start the report waits for _STEADY_S of samples,
+# unless the install has gone _STALE_DAYS without one: one that restarts
+# more often than that still reports, with the short window its uptime
+# bucket ("<1h") marks.
+_STEADY_S = 6 * 3600
+_STALE_DAYS = 2
 _DATA_UNSUBS = "_telemetry_unsubs"
 _DATA_COUNTERS = "telemetry_counters"
 _DATA_STARTED = "_telemetry_started_mono"
@@ -139,6 +148,32 @@ EVENTS: frozenset[str] = frozenset({
     #               there — the one result that would make the map indicator
     #               dishonest, and it cannot be seen from a single install.
     "scan_mode_flip_auto", "scan_mode_flip_pinned",
+    # Issues #89/#91 (0.38.106-107), so the betas can be judged from the
+    # field: Beacon Tune's save — a beacon that reached the fabric, a map
+    # refused because it is not placed in metres, a write that failed; the
+    # Lost & Found records the one-time stranger cleanup removed (by record);
+    # and a Diag Export built on request.
+    "beacon_tune_saved", "beacon_tune_save_refused", "beacon_tune_save_failed",
+    "lost_and_found_pruned", "diag_export_built",
+    # 0.38.108-110 fixed where Follow alerts go and when arrive/depart fire,
+    # the phone wizard's BLE Transmitter command, and MQTT publishing; these
+    # say whether that holds in houses the tests cannot see. Per event, counts
+    # only: a tagged device's arrive/depart, a Follow alert sent or not, the
+    # wizard's command sent / no phone service found / failed, a failed MQTT
+    # publish.
+    "tagged_arrived", "tagged_departed", "follow_alert_sent", "follow_alert_failed",
+    "companion_tx_sent", "companion_tx_no_service", "companion_tx_failed",
+    "mqtt_publish_failed",
+    # 0.38.122's fixes, from the field: the IRK cache cleared because the keys
+    # changed (#148: about 0 a day, it was every 5-minute reload); an auto
+    # calibration point that dropped its pin's room (#149); a restore that
+    # merged Lost & Found, and the records it kept because the one here was
+    # newer (#150); Follow's Test sent or failed (#151); old Bermuda objects
+    # removed from the object history (#152: once after an upgrade from
+    # 0.38.105, then none).
+    "irk_cache_cleared", "autocal_pin_room_dropped",
+    "lost_and_found_restore_merged", "lost_and_found_restore_kept_current",
+    "follow_test_sent", "follow_test_failed", "bermuda_history_purged",
     # The three guided wizards (v0.38.21): which step was REACHED, once per
     # distinct visit to that step (the wizard dedupes against its own last-
     # counted step, the same way a tab-open event never double-counts a
@@ -374,7 +409,7 @@ _FEATURE_FLAGS: tuple[str, ...] = (
     "lights_panel_enabled", "radio_map_enabled", "distortion_map_enabled",
     "occupancy_hybrid_enabled", "rssi_capture_enabled", "forensics_enabled",
     "mac_rotation_bridging", "beacon_auto_calibrate", "beacon_profiling_enabled",
-    "espresense_mqtt_enabled", "mqtt_publish_enabled", "bermuda_ignore",
+    "espresense_mqtt_enabled", "tasmota_ble_enabled", "mqtt_publish_enabled", "bermuda_ignore",
     "phone_wizard_enabled", "overview_show_walls", "overview_show_outdoor",
     "overview_2d_mode", "overview_persistent_pins",
     "walk_to_identify_enabled",
@@ -448,6 +483,26 @@ PERF_METRICS: dict[str, tuple[str, tuple[str, ...]]] = {
     # heard for a minute), and the Lost & Found records held — whether the
     # skip is doing its job, and that nothing grows without end.
     "loop_ms": ("loop", ("p50", "p95", "max")),
+    # The snapshot build by phase: Bluetooth fetch, the walk over Home
+    # Assistant's states and registries, the object list (history replay,
+    # dedup), enrichment — and how many HA states there are. A third of the
+    # installs reporting take 1.4-18 s per build, all with Bermuda installed.
+    "snap_ble_ms": ("snap_ble", ("p50",)),
+    "snap_ha_ms": ("snap_ha", ("p50",)),
+    "snap_objects_ms": ("snap_objects", ("p50",)),
+    "snap_enrich_ms": ("snap_enrich", ("p50",)),
+    "ha_states_n": ("states", ("max",)),
+    # Bermuda troubleshooting (perf_sampler.padspan_sizes): its entities and
+    # receiver devices, HA entities taken as tag candidates, and saved tags
+    # that resolve to nothing (each one a walk over every state, per build).
+    "bermuda_entities_n": ("bermuda_ents", ("max",)),
+    "bermuda_devices_n": ("bermuda_rcv", ("max",)),
+    "tag_candidates_n": ("tag_cands", ("max",)),
+    "saved_tags_missing_n": ("saved_missing", ("max",)),
+    # BLE/private-BLE objects merged into an iBeacon by their HA device in one
+    # build — the match that never fired before 0.38.109; a large number here
+    # would mean it merges more than it should.
+    "merged_by_device_n": ("dev_merged", ("max",)),
     "smoothed_n": ("smoothed", ("p50", "max")),
     "background_n": ("background", ("max",)),
     "lostfound_n": ("lostfound", ("max",)),
@@ -1174,6 +1229,47 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         "radios_unresolved": sum(1 for r in radios if r.get("device_match") == "none"),
         "radios_matched_partial": sum(1 for r in radios if r.get("device_match") == "partial"),
     }
+    # 0.38.122's fixes, read at the report. Each is left out, not a 0, when
+    # what it reads is not there, and a failure leaves out only that one.
+    # #149: calibration points whose room is no room (an [auto] point with a
+    # pin's device label) — should stop growing.
+    try:
+        if dom.get("calibration") is not None:
+            from homeassistant.helpers import area_registry as _ar  # noqa: PLC0415
+            _known = {str(r) for f in floors.values() if isinstance(f, dict) for r in (f.get("rooms") or {})}
+            _known |= {str(a.name) for a in _ar.async_get(hass).async_list_areas()}
+            _pt_rooms = (str(p.get("room") or "") for p in cal_points if isinstance(p, dict))
+            health["cal_points_phantom_room_n"] = sum(1 for r in _pt_rooms if r and r not in _known)
+    except Exception as err:
+        _LOGGER.debug("Telemetry: cal_points_phantom_room_n left out: %s", err)
+    # #147: Beacon Tune pins on a device that moves (tune_save_plan.js
+    # tuneBeaconHeld: private_ble or followed; a Bermuda entity is a fixed
+    # beacon too, so not counted) —
+    # should not grow.
+    try:
+        if isinstance(objects.get("list"), list):
+            _live = {o.get("key"): o for o in obj_list if isinstance(o, dict)}
+            _followed = {str(f).upper() for f in (settings.get("followed_addrs") or []) if f}
+            _movers = 0
+            for _k in (fab.get("beacon_positions_m") or {}):
+                _o = _live.get(_k)
+                if _o is not None and (_o.get("kind") == "private_ble" or any(
+                        str(_o.get(f) or "").upper() in _followed
+                        for f in ("key", "address", "entity_id", "canonical_id"))):
+                    _movers += 1
+            health["pinned_movers_n"] = _movers
+    except Exception as err:
+        _LOGGER.debug("Telemetry: pinned_movers_n left out: %s", err)
+    # #153: PadSpan trackers and sensors registered again as <entity_id>_2 —
+    # should not grow.
+    try:
+        from homeassistant.helpers import entity_registry as _er  # noqa: PLC0415
+        _ids = {str(e.entity_id) for e in _er.async_get(hass).entities.values()
+                if e.platform == DOMAIN and str(e.entity_id).startswith(("device_tracker.", "sensor."))}
+        _bases = (re.fullmatch(r"(.+)_\d+", _eid) for _eid in _ids)
+        health["entity_dup_n"] = sum(1 for _m in _bases if _m and _m.group(1) in _ids)
+    except Exception as err:
+        _LOGGER.debug("Telemetry: entity_dup_n left out: %s", err)
     try:
         from . import perf_sampler as _ps  # noqa: PLC0415
         _pw = _ps.take_window(hass) if consume else _ps.window(hass)
@@ -1349,6 +1445,16 @@ def _today() -> str:
     return time.strftime("%Y-%m-%d", time.gmtime())
 
 
+def _days_since_report(hass: HomeAssistant) -> int:
+    """Whole UTC days since the last report went (a large number: never)."""
+    st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
+    try:
+        last = date.fromisoformat(str((st.data if st else {}).get("telemetry_last_day") or ""))
+        return (date.fromisoformat(_today()) - last).days
+    except ValueError:
+        return 10_000
+
+
 async def ensure_snapshot(hass: HomeAssistant) -> None:
     """Make sure there IS a snapshot to read the environment from.
 
@@ -1382,7 +1488,7 @@ async def send_now(hass: HomeAssistant, *, force: bool = False) -> dict[str, Any
 
     At most one report per UTC day: the day of the last successful send is
     persisted (`telemetry_last_day`), so a restart or reload does not send
-    again — the scheduler fires 10 minutes after every start. `force` is the
+    again — the scheduler fires after every start (async_setup_telemetry). `force` is the
     "Send a report now" button. The windows (counters, log counts, resolved
     keys) are taken once the report has passed the gate, before the POST is
     awaited — what is counted while it is in flight belongs to the next
@@ -1474,8 +1580,16 @@ def async_setup_telemetry(hass: HomeAssistant) -> None:
         if enabled(hass):
             await send_now(hass)
 
+    async def _first(_now: Any = None) -> None:
+        if _days_since_report(hass) >= _STALE_DAYS:
+            await _run()
+            return
+        unsubs = hass.data.get(DOMAIN, {}).get(_DATA_UNSUBS)
+        if unsubs is not None:          # not stopped meanwhile
+            unsubs.append(async_call_later(hass, _STEADY_S - _FIRST_DELAY_S, _run))
+
     dom[_DATA_UNSUBS] = [
-        async_call_later(hass, _FIRST_DELAY_S, _run),
+        async_call_later(hass, _FIRST_DELAY_S, _first),
         async_track_time_interval(hass, _run, _INTERVAL),
     ]
 

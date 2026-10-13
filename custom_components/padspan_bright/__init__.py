@@ -235,8 +235,13 @@ async def _ensure_stores(hass: HomeAssistant, *, critical_only: bool = False) ->
         critical.append(_init_model())
 
     if critical:
-        results = await asyncio.gather(*critical)
-        for data_key, store, msg in results:
+        # One store that cannot be read must not cost the others theirs
+        # (a plain gather raised the first failure and dropped every result).
+        for res in await asyncio.gather(*critical, return_exceptions=True):
+            if isinstance(res, BaseException):
+                _LOGGER.error("PadSpan store failed to load: %s", res)
+                continue
+            data_key, store, msg = res
             hass.data[DOMAIN][data_key] = store
             _LOGGER.debug(msg)
 
@@ -269,8 +274,11 @@ async def _ensure_stores(hass: HomeAssistant, *, critical_only: bool = False) ->
         deferred.append(_init_wled_looks())
 
     if deferred:
-        results = await asyncio.gather(*deferred)
-        for data_key, store, msg in results:
+        for res in await asyncio.gather(*deferred, return_exceptions=True):
+            if isinstance(res, BaseException):
+                _LOGGER.error("PadSpan store failed to load: %s", res)
+                continue
+            data_key, store, msg = res
             hass.data[DOMAIN][data_key] = store
             _LOGGER.debug(msg)
 
@@ -341,6 +349,16 @@ async def _async_start_live_feeds(hass: HomeAssistant) -> None:
                 _LOGGER.info("ESPresense MQTT ingestion started (prefix: %s)", _prefix)
         except Exception as err:
             _LOGGER.debug("ESPresense MQTT setup skipped: %s", err)
+
+        # Tasmota BLE over MQTT (off by default)
+        try:
+            from .tasmota_ble import DATA_TASMOTA_BLE, async_setup_tasmota_ble
+            _st = dom.get(DATA_SETTINGS)
+            if _st and _st.data.get("tasmota_ble_enabled") and DATA_TASMOTA_BLE not in dom:
+                await async_setup_tasmota_ble(hass)
+                _LOGGER.info("Tasmota BLE ingestion started")
+        except Exception as err:
+            _LOGGER.debug("Tasmota BLE setup skipped: %s", err)
 
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -484,6 +502,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         """Return all tracked BLE devices — equivalent to Bermuda's dump_devices."""
         presence_coord = hass.data.get(DOMAIN, {}).get("presence_coordinator")
         data: dict[str, Any] = dict((presence_coord.data or {}) if presence_coord else {})
+        data = {k: v for k, v in data.items() if not str(k).startswith("__")}   # internal keys
 
         from homeassistant.util import dt as dt_util  # noqa: PLC0415
 
@@ -495,7 +514,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         }
 
         # Also create a persistent notification for easy human inspection
+        # (unless the call said notify: false - it was never read).
         try:
+            if not call.data.get("notify", True):
+                return result
             from homeassistant.components.persistent_notification import async_create  # noqa: PLC0415
             lines = []
             for key, obj in data.items():
@@ -630,6 +652,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.info("Presence coordinator initial fetch deferred (BLE may not be ready yet): %s", err)
 
+    # Bright has no entity platforms, so nothing listened to the presence
+    # coordinator and Home Assistant scheduled no poll after the first:
+    # with the presence tabs revealed, alerts, rules, Traceback and the
+    # Overview's rooms stopped at startup.
+    if not PLATFORMS:
+        _st = hass.data[DOMAIN].get(DATA_SETTINGS)
+        presence_keepalive(hass, bool(_st and _st.data.get("bright_reveal_presence")))
+        entry.async_on_unload(lambda: presence_keepalive(hass, False))
+
     # Daily update check (disclosed in README; update_check_enabled setting)
     try:
         from .update_check import async_setup_update_check
@@ -689,7 +720,84 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.debug("WLED exact look setup failed: %s", err)
 
+    # Home Assistant does not unload integrations when it stops, so the
+    # flushes in async_unload_entry never ran on a restart: up to 5 minutes
+    # of Forensics sessions and 30 s of Traceback were lost every time.
+    from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+    _stop = {"unsub": None}
+
+    async def _flush_on_stop(_event: Any) -> None:
+        _stop["unsub"] = None
+        await _async_flush_history(hass)
+
+    _stop["unsub"] = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop)
+    entry.async_on_unload(lambda: _stop["unsub"] and _stop["unsub"]())
+
     return True
+
+
+def presence_keepalive(hass: HomeAssistant, on: bool) -> None:
+    """Keep the presence coordinator polling with no entity listening
+    (Bright, presence revealed). HA polls a coordinator only while
+    something listens to it."""
+    dom = hass.data.get(DOMAIN, {})
+    unsub = dom.get("_presence_keepalive")
+    coord = dom.get("presence_coordinator")
+    if on and unsub is None and coord is not None:
+        dom["_presence_keepalive"] = coord.async_add_listener(lambda: None)
+    elif not on and unsub is not None:
+        dom.pop("_presence_keepalive", None)
+        unsub()
+
+
+async def _async_flush_history(hass: HomeAssistant) -> None:
+    """Write what Forensics and Traceback hold in memory to disk."""
+    dom = hass.data.get(DOMAIN, {})
+    try:
+        _fs = dom.get(DATA_FORENSICS)
+        if _fs is not None:
+            await _fs.async_save_if_due(force=True)
+    except Exception as err:
+        _LOGGER.debug("Forensics flush at stop failed: %s", err)
+    try:
+        _tb = dom.get(DATA_TRACEBACK)
+        if _tb is not None:
+            await _tb.async_flush()
+    except Exception as err:
+        _LOGGER.debug("Traceback flush at stop failed: %s", err)
+
+
+async def async_remove_config_entry_device(hass: HomeAssistant, entry: ConfigEntry, device: Any) -> bool:
+    """Let a PadSpan device be deleted from HA's device page. A label
+    removed or a factory reset left its entities "no longer provided"
+    for good, with no way to clear them. One still in use is refused:
+    its entities are not created again until a restart, so deleting it
+    lost them (the occupancy sensor's device likewise)."""
+    ids = {i[1] for i in (getattr(device, "identifiers", None) or set())
+           if isinstance(i, tuple) and len(i) == 2 and i[0] == DOMAIN}
+    if "padspan_occupancy" in ids:
+        # Refused only while the sensor is on; switched off (the default),
+        # its leftover device is exactly what this exists to clear.
+        _st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
+        return not bool(_st and (_st.data or {}).get("ha_entity_occupancy_enabled"))
+    coord = hass.data.get(DOMAIN, {}).get("presence_coordinator")
+    for key, obj in ((getattr(coord, "data", None) or {}) if coord else {}).items():
+        if isinstance(obj, dict) and obj.get("user_label"):
+            uid = (obj.get("padspan_id") or obj.get("canonical_id") or obj.get("address")
+                   or obj.get("entity_id") or key)
+            if uid in ids:
+                return False
+    return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """The integration is being deleted: give every WLED device PadSpan runs
+    its own sync back while PadSpan still knows the original settings."""
+    try:
+        from .wled_exact import async_give_back_all
+        await async_give_back_all(hass)
+    except Exception as err:  # noqa: BLE001 - never block the removal
+        _LOGGER.warning("WLED give-back on removal failed: %s", err)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -772,6 +880,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         tag_int = hass.data.get(DOMAIN, {}).pop(DATA_TAG_INTEGRATION, None)
         if tag_int:
             tag_int.unload()
+    except Exception:
+        pass
+
+    # Stop the Tasmota BLE subscriber
+    try:
+        from .tasmota_ble import DATA_TASMOTA_BLE
+        _tbl = hass.data.get(DOMAIN, {}).pop(DATA_TASMOTA_BLE, None)
+        if _tbl:
+            await _tbl.async_stop()
     except Exception:
         pass
 

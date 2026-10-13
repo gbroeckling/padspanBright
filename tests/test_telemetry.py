@@ -225,7 +225,11 @@ def test_nothing_from_the_house_is_in_the_report():
     # load and health.runs is bounded in the full-load-section test below.
     # Raised 4000 -> 4030 for features.low_memory_mode (~25 bytes): issue #91,
     # whether an install runs with the low-memory caps on.
-    assert len(text) < 4030
+    # Raised 4030 -> 4060 for features.tasmota_ble_enabled (~25 bytes).
+    # Raised 4060 -> 4110 for health.cal_points_phantom_room_n, pinned_movers_n
+    # and entity_dup_n (~73 bytes): whether 0.38.122's fixes #149, #147 and
+    # #153 hold in houses the tests cannot see.
+    assert len(text) < 4110
 
 
 def test_presets_are_capped_at_ten_per_report():
@@ -445,7 +449,10 @@ def test_every_event_name_has_a_real_call_site():
     src = "\n".join(p.read_text(encoding="utf-8", errors="ignore")
                     for p in list(root.rglob("*.py")) + list(root.rglob("*.js")) if "telemetry.py" not in p.name)
     dead = [e for e in sorted(T.EVENTS)
-            if not any(f'{fn}({arg}"{e}")' in src for fn in ("bump", "_bump", "self._count", "telemetryEvent", "ctx.actions.telemetryEvent")
+            if not any(f'{fn}({arg}"{e}"{end}' in src for fn in ("bump", "_bump", "self._count", "telemetryEvent", "ctx.actions.telemetryEvent")
+                       # `, ` — bump()'s count argument (lost_and_found_pruned
+                       # counts the records one cleanup removed).
+                       for end in (")", ", ")
                        # Call shapes actually used in the tree. `self.hass, ` is
                        # BluetoothLive's convention (it stores hass unprefixed);
                        # omitting it made a live counter look dead.
@@ -1179,6 +1186,8 @@ def _busy_day(h, hours: float = 24.0):
         w.add("snap", rnd.uniform(900, 8200))
         w.add("cycle", rnd.uniform(40, 2400))
         w.add("loop", rnd.uniform(20, 2000))
+        for ph in ("snap_ble", "snap_ha", "snap_objects", "snap_enrich"):
+            w.add(ph, rnd.uniform(20, 18000))
     # PadSpan's own size on a busy street, and Home Assistant by view
     # (Garry, 2026-10-05: the low-memory version and its minimum requirements).
     for i in range(1440):
@@ -1197,6 +1206,9 @@ def _busy_day(h, hours: float = 24.0):
         w.add("smoothed", rnd.uniform(5, 400))
         w.add("background", rnd.uniform(0, 80000))
         w.add("lostfound", rnd.uniform(10, 90000))
+        w.add("states", rnd.uniform(500, 120000))
+        for m in ("bermuda_ents", "bermuda_rcv", "tag_cands", "saved_missing", "dev_merged"):
+            w.add(m, rnd.uniform(0, 40000))
         for v in ("atlas", "sim", "other", "none"):
             w.add(f"cpu@{v}", rnd.uniform(1, 99.4))
             w.add(f"lag@{v}", rnd.uniform(0.05, 1800))
@@ -1235,7 +1247,12 @@ def test_a_full_load_section_is_small_and_every_word_is_on_the_list():
     # house, takes. The whole report is still held under the 8 KB cap below.
     # 1600 -> 1700 (issue #91): the per-object loop's time, the objects it
     # smoothed vs. listed as background, and the Lost & Found records held.
-    assert section < 1700, section
+    # 1700 -> 1850: the snapshot build by phase and HA's state count — a third
+    # of the installs reporting take 1.4-18 s per build, all with Bermuda,
+    # and only the phase split says where. 1850 -> 2000 for the Bermuda
+    # counts beside it (its entities and devices, tag candidates, saved tags
+    # that resolve to nothing).
+    assert section < 2000, section
     assert len(json.dumps(p)) <= T._MAX_BYTES
 
 
@@ -1377,3 +1394,112 @@ def test_the_readme_and_the_panel_say_the_load_sections_go():
     assert "how hard the machine" in settings and "what class of machine it is" in settings
     panel = (root / "custom_components" / "padspan_bright" / "www" / "padspan-bright" / "panel.js").read_text(encoding="utf-8")
     assert "how hard the machine works and what class of machine it is" in panel
+
+
+def test_the_first_report_after_a_start_waits_for_a_steady_window(monkeypatch):
+    """Sent 10 minutes after every start, half of all reports were a few
+    minutes of Home Assistant starting, and every first report on a new
+    version was one. It waits for 6 hours, unless the install has gone two
+    days without a report."""
+    import sys
+    import types
+    ev = types.ModuleType("homeassistant.helpers.event")
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.event", ev)
+    later = []
+    ev.async_call_later = lambda h, d, cb: later.append((d, cb)) or (lambda: None)
+    ev.async_track_time_interval = lambda h, cb, i: (lambda: None)
+    sent = []
+
+    async def _send(h, **kw):
+        sent.append(1)
+        return {"sent": True}
+
+    monkeypatch.setattr(T, "send_now", _send)
+    import datetime as _dt
+    for last, expect_now in ((T._today(), False),
+                             ((_dt.date.fromisoformat(T._today()) - _dt.timedelta(days=1)).isoformat(), False),
+                             ((_dt.date.fromisoformat(T._today()) - _dt.timedelta(days=2)).isoformat(), True),
+                             ("", True)):
+        h = _hass()
+        h.data[DOMAIN].pop(T._DATA_UNSUBS, None)
+        h.data[DOMAIN][DATA_SETTINGS].data["telemetry_last_day"] = last
+        later.clear(); sent.clear()
+        T.async_setup_telemetry(h)
+        assert later[0][0] == T._FIRST_DELAY_S
+        _run(later[0][1]())
+        if expect_now:
+            assert sent == [1] and len(later) == 1, last
+        else:
+            assert sent == [] and later[1][0] == T._STEADY_S - T._FIRST_DELAY_S, last
+            _run(later[1][1]())
+            assert sent == [1], last
+
+
+# ── 0.38.122's fixes, read at the report ─────────────────────────────────────
+# Each a count, and left out (not a 0 nobody measured) when its source is not
+# there; a failure leaves out that one field and never the report.
+
+def test_calibration_points_with_a_room_that_is_no_room_are_counted(monkeypatch):
+    """#149: a pin's device label stamped into an auto point's room. A room is
+    a fabric room or a Home Assistant area; a point with no room is not one."""
+    from homeassistant.helpers import area_registry as ar_mod
+    monkeypatch.setattr(ar_mod, "async_get", lambda h: SimpleNamespace(
+        async_list_areas=lambda: [SimpleNamespace(name="Hall")]), raising=False)
+    h = _hass()
+    h.data[DOMAIN]["calibration"].data["points"] += [
+        {"room": "Car Keys", "label": "[auto] Car Keys"}, {"room": "Hall"}, {"room": ""}, {}]
+    p = T.build_payload(h)
+    T.assert_shareable(p)
+    assert p["health"]["cal_points_phantom_room_n"] == 1
+    assert "Car Keys" not in json.dumps(p)
+    h.data[DOMAIN].pop("calibration")
+    assert "cal_points_phantom_room_n" not in T.build_payload(h)["health"]
+    monkeypatch.setattr(ar_mod, "async_get", lambda h: 1 / 0, raising=False)
+    h = _hass()
+    p = T.build_payload(h)
+    assert "cal_points_phantom_room_n" not in p["health"] and "pinned_movers_n" in p["health"]
+
+
+def test_beacon_pins_on_a_device_that_moves_are_counted():
+    """#147: a pin on a phone or Find My tag (private_ble) or anything
+    followed — what Beacon Tune no longer pins; an entity (a fixed beacon
+    Bermuda tracks) is not counted. A pin not on the air now is
+    not judged."""
+    h = _hass()
+    pins = {"irk:" + _IRK: {}, "ble:" + _MAC2: {}, "entity:device_tracker.keys": {},
+            "ble:11:22:33:44:55:66": {}, "ble:22:33:44:55:66:77": {}, "ble:not_on_the_air": {}}
+    h.data[DOMAIN][DATA_FABRIC].data["beacon_positions_m"] = pins
+    h.data[DOMAIN]["snapshot_cache"][1]["objects"]["list"] += [
+        {"key": "irk:" + _IRK, "kind": "private_ble"},
+        {"key": "ble:" + _MAC2, "kind": "ble", "address": _MAC2},              # followed by address
+        {"key": "entity:device_tracker.keys", "kind": "entity", "entity_id": "device_tracker.keys"},
+        {"key": "ble:11:22:33:44:55:66", "kind": "ble", "address": "11:22:33:44:55:66"},  # a fixed beacon
+        {"key": "ble:22:33:44:55:66:77", "kind": "ibeacon", "address": "22:33:44:55:66:77"},
+    ]
+    p = T.build_payload(h)
+    T.assert_shareable(p)
+    assert p["health"]["pinned_movers_n"] == 2
+    h.data[DOMAIN][DATA_SETTINGS].data["followed_addrs"].append("ble:22:33:44:55:66:77")   # followed by key
+    assert T.build_payload(h)["health"]["pinned_movers_n"] == 3
+    h.data[DOMAIN].pop("snapshot_cache")
+    assert "pinned_movers_n" not in T.build_payload(h)["health"]
+
+
+def test_padspan_entities_registered_twice_are_counted(monkeypatch):
+    """#153: device_tracker.<label>_2 beside device_tracker.<label>. Only
+    PadSpan's own trackers and sensors, and only when the plain one is there."""
+    from homeassistant.helpers import entity_registry as er_mod
+    ents = {eid: SimpleNamespace(entity_id=eid, platform=plat) for eid, plat in (
+        ("device_tracker.keys", "padspan_bright"), ("device_tracker.keys_2", "padspan_bright"),
+        ("sensor.phone_distance", "padspan_bright"), ("sensor.phone_distance_3", "padspan_bright"),
+        ("sensor.scanner_7", "padspan_bright"),                                   # nothing to be a copy of
+        ("device_tracker.car", "bermuda"), ("device_tracker.car_2", "padspan_bright"),
+        ("light.lamp", "padspan_bright"), ("light.lamp_2", "padspan_bright"),
+    )}
+    monkeypatch.setattr(er_mod, "async_get", lambda h: SimpleNamespace(entities=ents), raising=False)
+    p = T.build_payload(_hass())
+    T.assert_shareable(p)
+    assert p["health"]["entity_dup_n"] == 2
+    monkeypatch.setattr(er_mod, "async_get", lambda h: 1 / 0, raising=False)
+    p = T.build_payload(_hass())
+    assert "entity_dup_n" not in p["health"] and "pinned_movers_n" in p["health"]

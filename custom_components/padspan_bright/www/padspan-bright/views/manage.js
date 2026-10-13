@@ -198,8 +198,11 @@ export function render(ctx){
               delAllWrap.innerHTML = "";
               delAllWrap.appendChild(el("span",{class:"muted",style:"font-size:12px"},"Cleaning up…"));
               // Same stale-tab guard as the single delete: rebuild every
-              // payload from a fresh fetch, never from this tab's copy.
-              await ctx.actions.mapsRefreshQuiet();
+              // payload from a fresh fetch, never from this tab's copy. A
+              // failed fetch says so and puts the button back (it sat at
+              // "Cleaning up…" for good).
+              try { await ctx.actions.mapsRefreshQuiet(); }
+              catch(e){ ctx.toast("Couldn't load the maps: " + String(e), true); delAllWrap.innerHTML = ""; delAllWrap.appendChild(makeDelAll()); return; }
               const freshList = ctx.state.maps?.list || [];
               // Group by map so we do one update per map
               const byMap = new Map();
@@ -891,6 +894,7 @@ function _haEntities(ctx, el){
   wrap.appendChild(_haMqttSection(ctx, el, settings));
   wrap.appendChild(_haBleReseedSection(ctx, el, settings));
   wrap.appendChild(_haEspresenseSection(ctx, el, settings));
+  wrap.appendChild(_haTasmotaSection(ctx, el, settings));
   return wrap;
 }
 
@@ -1637,6 +1641,47 @@ function _haMqttSection(ctx, el, settings){
  * to receive BLE data from ESPresense scanner nodes. Required when HA has
  * no Bluetooth adapter/integration installed.
  */
+// Tasmota BLE over MQTT (tasmota_ble.py): a Tasmota device on an ESP32 that
+// scans for Bluetooth becomes a scanner, read from stat/<topic>/BLE.
+function _haTasmotaSection(ctx, el, settings){
+  const card = el("div",{class:"card",style:"border-color:#8b5cf6"});
+  card.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:6px"},[
+    el("span",{style:"font-weight:700;font-size:14px"},"Tasmota BLE"),
+    el("span",{style:"font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid #8b5cf6;color:#8b5cf6"},"Experimental"),
+  ]));
+  card.appendChild(el("div",{style:"font-size:12px;color:#94a3b8;line-height:1.5;margin-bottom:10px"},
+    "Use Tasmota devices on ESP32 (smart plugs, Sonoff switches) as Bluetooth scanners. PadSpan reads the device list each one publishes on tele/<topic>/BLE over MQTT, and after a Tasmota restart it sends that device BLEDevices to start the list again. Requires HA's MQTT integration."
+  ));
+  const chk = el("input",{type:"checkbox"});
+  chk.checked = settings.tasmota_ble_enabled === true;
+  chk.addEventListener("change", async()=>{
+    try {
+      await ctx.actions.settingsSet({tasmota_ble_enabled: chk.checked});
+      ctx.toast(chk.checked ? "Tasmota BLE enabled — each device appears as a scanner when it next reports." : "Tasmota BLE disabled.");
+      ctx.actions.renderRooms();
+    } catch(e){ ctx.toast("Failed: "+String(e), true); chk.checked = !chk.checked; }
+  });
+  card.appendChild(el("label",{style:"display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px"},[
+    chk, el("span",{},"Read Tasmota BLE over MQTT"),
+  ]));
+  // Tasmota's defaults are built for an occasional device list, not room
+  // presence: a 300 s TelePeriod, a device kept listed 600 s after it was
+  // last heard, and random addresses (phones, tags) filtered out.
+  card.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.6;margin-top:8px"},[
+    el("div",{},"On each Tasmota, in its console:"),
+    el("div",{style:"font-family:monospace;color:#e2e8f0"},"TelePeriod 10"),
+    el("div",{style:"font-family:monospace;color:#e2e8f0"},"BLEMaxAge 30"),
+    el("div",{style:"font-family:monospace;color:#e2e8f0"},"BLEAddrFilter 1"),
+    el("div",{},"Readings older than about 15 s don't count for rooms; a device that left stays listed for BLEMaxAge; and without BLEAddrFilter 1 phones and tags with random addresses are never reported."),
+  ]));
+  if(settings.tasmota_ble_enabled){
+    card.appendChild(el("div",{style:"font-size:11px;color:#64748b;padding:6px 8px;margin-top:8px;background:#0f0a1a;border:1px solid #2d1b4e;border-radius:6px"},
+      "Topics: tele/+/BLE \u2022 stat/+/BLE. Place each Tasmota scanner in its room (Mapping) like any other."
+    ));
+  }
+  return card;
+}
+
 function _haEspresenseSection(ctx, el, settings){
   const card = el("div",{class:"card",style:"border-color:#8b5cf6"});
 
@@ -2045,7 +2090,10 @@ function _buildNotifications(ctx, el){
   const wrap = el("div",{style:"display:flex;flex-direction:column;gap:12px"});
 
   // ── Saved Alerts summary table — read-only view of all persisted configs ──
-  const savedEntries = Object.entries(configs).filter(([,c]) => c && c.email);
+  // An email or a picked notify target: a phone-only alert (no email) is a
+  // saved alert too, and was missing from this list — so it could not be
+  // seen or deleted here.
+  const savedEntries = Object.entries(configs).filter(([,c]) => c && (c.email || c.notify_service));
   const savedCard = el("div",{class:"card"});
   const activeCount = savedEntries.filter(([,c]) => c.on_room_change).length;
   savedCard.appendChild(el("div",{class:"row",style:"margin-bottom:6px"},[
@@ -2096,7 +2144,7 @@ function _buildNotifications(ctx, el){
 
       tbody.appendChild(el("tr",{},[
         el("td",{style:"font-weight:600;font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"},label),
-        el("td",{style:"font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"},cfg.email),
+        el("td",{style:"font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"},cfg.email || "—"),
         el("td",{class:"muted",style:"font-size:11px"},svc),
         el("td",{class:"muted",style:"font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"},rooms),
         el("td",{},
@@ -2226,6 +2274,14 @@ function _buildNotifications(ctx, el){
       if(cfg.notify_service === svc) opt.selected = true;
       serviceSelect.appendChild(opt);
     }
+    // A saved target that is gone has no option: shown and selected anyway
+    // (as in Follow), so choosing anything else, Auto-detect included, is a change.
+    const _saved = cfg.notify_service, _list = ctx.state._notifyServices || [];
+    if(_saved && !_list.includes(_saved)){
+      const opt = el("option",{value:_saved}, _list.length ? _saved + " (not found)" : _saved);
+      opt.selected = true;
+      serviceSelect.appendChild(opt);
+    }
     serviceSelect.addEventListener("change", () => {
       cfg.notify_service = serviceSelect.value || undefined;
       ctx.state.followAlertConfig[addr] = cfg;
@@ -2304,14 +2360,15 @@ function _buildNotifications(ctx, el){
       saveStatus.textContent = "Sending test…"; saveStatus.style.color = "";
       testBtn.disabled = true;
       try {
-        const svc = serviceSelect ? serviceSelect.value : "";
+        // The target alerts use (cfg).
+        const svc = cfg.notify_service || "";
         const payload = { service: svc || undefined };
         if(testEmail) payload.email = testEmail;
         await ctx.actions.wsCall("padspan_bright/notify_test", payload);
         saveStatus.textContent = "Test sent — check your notification app/inbox."; saveStatus.style.color = "#52b788";
       } catch(e){
-        const msg = (e?.message || String(e));
-        saveStatus.textContent = msg.length > 120 ? msg.slice(0, 120) + "…" : msg;
+        // Whole: cut at 120 it lost the advice ("pick where to send again").
+        saveStatus.textContent = (e?.message || String(e));
         saveStatus.style.color = "#f87171";
       } finally { if(!disabled) testBtn.disabled = false; }
     });
@@ -2440,9 +2497,9 @@ function _logs(ctx, el) {
 // auto-grouped by model (iBeacon UUID prefix, manufacturer, BLE name).
 //
 // Features:
-//   - Master toggle to enable/disable beacon profiling
-//   - Per-beacon "Tune" toggle: exclude specific beacons from adaptive tuning
-//   - Group/Ungroup: override auto-grouping for individual beacons
+//   - Show/hide toggle for the report (beacon_profiling_enabled)
+//   - Group/Ungroup: override the report's auto-grouping for one beacon
+//   - Display only: no setting here is read by positioning or adaptive tuning
 //   - Collapsible per-scanner breakdown table (mean RSSI, std, point count)
 //   - All overrides persisted to settings via beacon_tune_disabled and
 //     beacon_group_overrides keys
@@ -2455,19 +2512,22 @@ function _beaconChars(ctx, el){
   wrap.appendChild(el("div",{style:"font-weight:700;font-size:16px;color:#e2e8f0;margin-bottom:8px"},
     "Beacon Signal Profiles"));
   wrap.appendChild(el("div",{style:"font-size:12px;color:#94a3b8;margin-bottom:12px;line-height:1.5"},
-    "Per-beacon signal characteristics computed from calibration data. "
-    + "Beacons are automatically grouped by model (iBeacon UUID prefix, manufacturer, BLE name). "
-    + "Model defaults apply to new beacons of the same type until they build their own profile."));
+    "Per-beacon signal characteristics computed from calibration data, grouped by model "
+    + "(iBeacon UUID prefix, manufacturer, BLE name). A report: it shows how each beacon reads, "
+    + "and nothing here changes positioning."));
 
   // ── Master toggle ──
   const masterEnabled = settings.beacon_profiling_enabled !== false;
   const toggleRow = el("div",{style:"display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:10px 14px;border-radius:8px;"
     + `background:${masterEnabled ? "rgba(22,163,74,.08)" : "rgba(220,38,38,.08)"};border:1px solid ${masterEnabled ? "#16a34a" : "#dc2626"}`});
+  // Show/hide only: nothing in the backend reads beacon_profiling_enabled for
+  // positioning (it said "model defaults applied" / "raw calibration data
+  // only" — neither was true).
   toggleRow.appendChild(el("div",{style:"font-weight:700;font-size:13px;color:#e2e8f0;flex:1"},
-    "Beacon Profiling"));
+    "Beacon profiles"));
   const masterBtn = el("button",{
     style:`font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700;border:1px solid ${masterEnabled?"#16a34a":"#dc2626"};background:${masterEnabled?"#052e16":"#3d0c0c"};color:${masterEnabled?"#4ade80":"#fca5a5"}`,
-  }, masterEnabled ? "Enabled" : "Disabled");
+  }, masterEnabled ? "Shown" : "Hidden");
   masterBtn.addEventListener("click", () => {
     const newVal = !masterEnabled;
     ctx.actions.wsCall("padspan_bright/settings_set", {
@@ -2479,13 +2539,13 @@ function _beaconChars(ctx, el){
   });
   toggleRow.appendChild(masterBtn);
   toggleRow.appendChild(el("div",{style:"font-size:11px;color:#94a3b8"},
-    masterEnabled ? "Profiling active — model defaults applied to new beacons"
-                  : "Profiling disabled — all beacons use raw calibration data only"));
+    masterEnabled ? "Showing the signal profile report"
+                  : "The report is hidden"));
   wrap.appendChild(toggleRow);
 
   if (!masterEnabled) {
     wrap.appendChild(el("div",{style:"color:#94a3b8;font-size:13px;padding:20px;text-align:center"},
-      "Enable beacon profiling above to see signal profiles and model grouping."));
+      "Show beacon profiles above to see the report."));
     return wrap;
   }
 
@@ -2594,7 +2654,7 @@ function _beaconChars(ctx, el){
     // Per-beacon table
     const tbl = el("table",{style:"width:100%;border-collapse:collapse;font-size:11px"});
     const thead = el("tr",{style:"color:#94a3b8;text-align:left;border-bottom:1px solid #334155"});
-    for (const h of ["Beacon","Points","Scanners","Avg Reach","Multi%","Avg RSSI","Variance","Cells","Tune","Group"]) {
+    for (const h of ["Beacon","Points","Scanners","Avg Reach","Multi%","Avg RSSI","Variance","Cells","Group"]) {
       thead.appendChild(el("th",{style:"padding:4px 6px;font-weight:600"},h));
     }
     tbl.appendChild(thead);
@@ -2611,20 +2671,9 @@ function _beaconChars(ctx, el){
       tr.appendChild(el("td",{style:"padding:4px 6px"},b.avg_std != null ? `±${b.avg_std}` : "—"));
       tr.appendChild(el("td",{style:"padding:4px 6px"},String(b.grid_cells_hit)));
 
-      // Tune toggle
-      const tuneTd = el("td",{style:"padding:4px 6px"});
-      const tuneOff = ctx.state._bcTuneDisabled.has(b.device_id);
-      const tuneBtn = el("button",{
-        style:`font-size:10px;padding:2px 6px;border-radius:3px;cursor:pointer;border:1px solid ${tuneOff?"#dc2626":"#16a34a"};background:${tuneOff?"#3d0c0c":"#052e16"};color:${tuneOff?"#fca5a5":"#4ade80"}`,
-      }, tuneOff ? "Off" : "On");
-      tuneBtn.addEventListener("click", () => {
-        if (tuneOff) ctx.state._bcTuneDisabled.delete(b.device_id);
-        else ctx.state._bcTuneDisabled.add(b.device_id);
-        _saveBC();
-        ctx.actions.renderRooms();
-      });
-      tuneTd.appendChild(tuneBtn);
-      tr.appendChild(tuneTd);
+      // (A per-beacon "Tune" On/Off column stood here, labelled "exclude from
+      // adaptive tuning". Adaptive tuning never read beacon_tune_disabled, so
+      // it did nothing. Removed; the setting stays accepted for old files.)
 
       // Group action — the backend auto-groups beacons by model (iBeacon UUID
       // prefix, manufacturer, BLE name) so a new beacon of a known type can
@@ -2648,6 +2697,7 @@ function _beaconChars(ctx, el){
           const ungroupBtn = el("button",{
             style:"font-size:10px;padding:2px 6px;border-radius:3px;cursor:pointer;border:1px solid #f59e0b;background:#451a03;color:#fcd34d",
           },"Ungroup");
+          ungroupBtn.title = "Show this beacon on its own row (the report only)";
           ungroupBtn.addEventListener("click", () => {
             ctx.state._bcGroupOverrides[b.device_id] = `solo:${b.device_id.substring(0,12)}`;
             _saveBC();
@@ -2658,6 +2708,7 @@ function _beaconChars(ctx, el){
           const regroupBtn = el("button",{
             style:"font-size:10px;padding:2px 6px;border-radius:3px;cursor:pointer;border:1px solid #3b82f6;background:#1e3a5f;color:#93c5fd",
           },"Regroup");
+          regroupBtn.title = "Put it back with its model (the report only)";
           regroupBtn.addEventListener("click", () => {
             delete ctx.state._bcGroupOverrides[b.device_id];
             _saveBC();
@@ -2931,7 +2982,7 @@ function _factoryReset(ctx, el){
       ctx.state.objStatus = "all";
       ctx.state.selectedRooms = [];
       ctx.state.tagFilter = "";
-      ctx.state.mode = "all";
+      ctx.state.mode = "live";      // the start-up default: "all" now means intersection
       _logStep("Cleared: followed list, filters, selections");
     } catch(e){
       _logStep("Frontend state reset error: " + e.message, false);

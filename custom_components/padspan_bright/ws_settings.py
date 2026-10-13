@@ -22,7 +22,6 @@ from .const import (
     DOMAIN,
     DATA_SETTINGS,
     DATA_OBJECTS,
-    DATA_COORDINATOR,
     DATA_CALIBRATION,
     DATA_ESPRESENSE_MQTT,
     LIGHT_TYPE_OVERRIDE_KINDS,
@@ -471,6 +470,7 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("mqtt_publish_enabled"): bool,
         vol.Optional("espresense_mqtt_enabled"): bool,
         vol.Optional("espresense_topic_prefix"): str,
+        vol.Optional("tasmota_ble_enabled"): bool,
         vol.Optional("espresense_room_map"): dict,
         vol.Optional("espresense_companion_url"): str,
         vol.Optional("aggressive_ble_reseed"): bool,
@@ -657,7 +657,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             try:
                 _removed_f = _old_followed - set(x.upper() for x in _new_followed)
                 if _removed_f:
-                    _coord_f = hass.data.get(DOMAIN, {}).get(DATA_COORDINATOR)
+                    _coord_f = hass.data.get(DOMAIN, {}).get("presence_coordinator")
                     if _coord_f:
                         for _rf in _removed_f:
                             _coord_f.clear_object_state(_rf)
@@ -925,7 +925,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             payload["ui_skin"] = _skin if _skin in ("classic", "2025") else "classic"
         for key in ("ha_entity_tracker_enabled", "ha_entity_area_enabled",
                     "ha_entity_distance_enabled", "ha_entity_scanner_distance_enabled",
-                    "mqtt_publish_enabled", "espresense_mqtt_enabled", "aggressive_ble_reseed",
+                    "mqtt_publish_enabled", "espresense_mqtt_enabled", "tasmota_ble_enabled", "aggressive_ble_reseed",
                     "ha_entity_occupancy_enabled",
                     "lights_panel_enabled", "atlas_emergency_button", "bermuda_ignore", "bright_reveal_presence",
                     "atlas_weather_enabled",
@@ -1050,6 +1050,8 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     "light", "switch", "scene", "script"
                 ):
                     continue
+                if _domain == "scene" and _action == "turn_off":
+                    continue  # HA has no scene.turn_off: the rule could never run
                 _clean_rules.append({
                     "id": str(r.get("id", "")),
                     "trigger": str(r.get("trigger", ""))[:10],
@@ -1068,6 +1070,12 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             from .house3d_heights import async_move_heights  # noqa: PLC0415
             hass.async_create_task(async_move_heights(hass))
 
+        # ── Bright: presence revealed or hidden → it polls, or stops
+        if "bright_reveal_presence" in payload:
+            from . import PLATFORMS, presence_keepalive  # noqa: PLC0415
+            if not PLATFORMS:
+                presence_keepalive(hass, payload["bright_reveal_presence"])
+
         # ── Excluded scanners changed → retrain the forest (issue #59) ───────
         # k-NN masks per query, but the Random Forest bakes its feature columns
         # in at training time: without a retrain the masked scanner would keep
@@ -1081,6 +1089,20 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     hass.async_create_task(_cal_ex._async_train_rf())
             except Exception as _ex_err:
                 _LOGGER.debug("Excluded-scanner retrain: %s", _ex_err)
+
+        # ── Tasmota BLE toggle (tasmota_ble.py) ───────────────────────────────
+        if "tasmota_ble_enabled" in msg:
+            try:
+                from .tasmota_ble import DATA_TASMOTA_BLE, async_setup_tasmota_ble  # noqa: PLC0415
+                if bool(msg["tasmota_ble_enabled"]):
+                    if DATA_TASMOTA_BLE not in hass.data.get(DOMAIN, {}):
+                        hass.async_create_task(async_setup_tasmota_ble(hass))
+                else:
+                    _tb = hass.data.get(DOMAIN, {}).pop(DATA_TASMOTA_BLE, None)
+                    if _tb:
+                        hass.async_create_task(_tb.async_stop())
+            except Exception:
+                pass
 
         # ── Dynamic ESPresense MQTT toggle ───────────────────────────────────
         if "espresense_mqtt_enabled" in msg:

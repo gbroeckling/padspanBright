@@ -76,7 +76,11 @@ class LostAndFoundStore:
                 and (not padspan_id or prev.get("padspan_id") == padspan_id)
                 and abs(float(prev.get("ts") or 0) - ts) < _SAME_DEPARTURE_S):
             return
-        entry: dict[str, Any] = {"room": room, "ts": ts}
+        # Marked: the start-up prune is for strangers recorded before
+        # `identified` existed, and judged the rest by whether the device was
+        # still heard, so an HA-linked tag away for two days lost its record
+        # at the next restart.
+        entry: dict[str, Any] = {"room": room, "ts": ts, "identified": True}
         if label:
             entry["label"] = label
         if padspan_id:
@@ -94,6 +98,38 @@ class LostAndFoundStore:
         if drop:
             self.store.async_delay_save(lambda: self.records, 10)
         return len(drop)
+
+    async def async_merge(self, records: Any) -> None:
+        """A restore: the backup's records join these, the newer `ts` per key
+        kept. Replacing them sent every object back to the room it was in when
+        the backup was taken, and dropped the only record of one lost since —
+        never reset until explicitly forgotten, as the header says."""
+        if not isinstance(records, dict):
+            return
+        kept = 0
+        for key, rec in records.items():
+            if not isinstance(rec, dict):
+                continue
+            cur = self.records.get(key)
+            try:
+                ts = float(rec.get("ts") or 0)
+                newer = not isinstance(cur, dict) or ts > float(cur.get("ts") or 0)
+            except (TypeError, ValueError):
+                # A ts no PadSpan wrote (a hand-edited backup): that record is
+                # skipped and the one here kept, and the rest still merge. A
+                # new key's is skipped too: record() would trip over it later.
+                continue
+            if newer:
+                self.records[key] = rec
+            elif float(cur.get("ts") or 0) > ts:
+                kept += 1
+        await self.store.async_save(self.records)
+        # The opt-in report (#150): a restore merged, and the records here it
+        # did not roll back.
+        from .telemetry import bump  # noqa: PLC0415
+        bump(self.hass, "lost_and_found_restore_merged")
+        if kept:
+            bump(self.hass, "lost_and_found_restore_kept_current", kept)
 
     def get_all(self) -> dict[str, dict[str, Any]]:
         return self.records

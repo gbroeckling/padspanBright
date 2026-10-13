@@ -59,12 +59,12 @@ Three-stage pipeline applied each poll cycle:
 
 HOME/AWAY PERSISTENCE
 ─────────────────────
-Devices that disappear from the live snapshot are kept in the result dict with a
-synthetic age_s that grows each poll.  A 2-poll grace period (≈20 s) prevents a
-momentary signal gap from triggering an away event.  Devices with confident
-presence (room_confidence ≥ 0.6) get an extended grace period controlled by the
-signal_loss_linger_s setting (default 90 s / ~9 polls) so that brief BLE dropouts
-don't erase established presence.  Entities read age_s and return "not_home" when
+Devices that disappear from the live snapshot are kept in the result dict for a
+fixed grace of _AWAY_GRACE_S (120 s, converted to polls) so a momentary signal
+gap does not end their presence; after it they are evicted.  (The old
+signal_loss_linger_s setting that tuned this was retired in 0.20.16 and is not
+read.)  Labelled devices also stay in the list through the object history, with
+an age_s that keeps growing.  Entities read age_s and return "not_home" when
 it exceeds the configured away timeout (Settings → Presence → Away timeout;
 default 300 s / 5 min).  Entities never go "unavailable" — "not_home" is a
 permanently valid HA state.
@@ -106,7 +106,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     DOMAIN, DATA_SETTINGS, DATA_CALIBRATION, DATA_ADAPTIVE, DATA_MODEL,
-    DATA_OBJECTS, DATA_CAPTURE, OUTSIDE_FLOOR_ID,
+    DATA_OBJECTS, DATA_CAPTURE, DATA_TRACEBACK, OUTSIDE_FLOOR_ID,
     DEFAULT_KALMAN_Q, DEFAULT_KALMAN_R,
     DEFAULT_REF_POWER, DEFAULT_PATH_LOSS_EXP,
 )
@@ -116,7 +116,7 @@ from .perf_sampler import record_duration
 from .presence_rules import (
     indoor_coverage_floor, is_outdoor_floor, modelled_coverage_floor,
     coverage_evidence, coverage_window_polls, outdoor_attribution,
-    outside_by_coverage,
+    outside_by_coverage, away_timeout_s, is_away,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -195,6 +195,18 @@ _AWAY_GRACE_S: float = 120.0
 # it is, unsmoothed, and its smoothing state is let go. Heard again, it starts
 # fresh — exactly what the re-entry reset below does for one back from away.
 _BACKGROUND_AGE_S: float = 60.0
+
+
+def mqtt_topic_slug(label: str) -> str:
+    """A label as one MQTT topic level: lowercase, spaces as "_" — exactly
+    the topic it always had, so nothing subscribed to it moves — with only
+    the characters a publish topic cannot carry replaced: "#" and "+" are
+    wildcards (the publish raised), "/" split the label into levels, and
+    NUL is not allowed."""
+    slug = str(label or "").lower().replace(" ", "_")
+    for ch in ("#", "+", "/", "\x00"):
+        slug = slug.replace(ch, "_")
+    return slug
 
 
 def obj_is_identified(obj: dict) -> bool:
@@ -598,6 +610,97 @@ def _within_floor_bounds(
     return (b[0] - margin) <= x <= (b[1] + margin) and (b[2] - margin) <= y <= (b[3] + margin)
 
 
+class FollowNotifyNotSent(Exception):
+    """A Follow alert (or Follow's Test) was not sent. `code` is why:
+    not_found (the chosen target is not in HA), send_failed (its call
+    failed), no_notify (nothing chosen and nothing to pick)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+async def async_send_follow_notify(
+    hass: HomeAssistant, preferred: str, email: str, title: str, message: str,
+) -> str:
+    """Send one Follow alert: the one dispatch the alerts
+    (PresenceCoordinator._send_follow_notify) and Follow's Test button
+    (ws_notify_test) share, so a Test that passes is an alert that arrives.
+    A chosen target is tried as a notify entity (send_message), a legacy
+    notify service, then another integration's send service — and only it.
+    With none chosen, the notify targets are auto-picked, mail/smtp first.
+    Returns what it was sent through; raises FollowNotifyNotSent."""
+    services = hass.services.async_services().get("notify", {})
+    has_send_message = "send_message" in services
+    entity_ids = [s.entity_id for s in hass.states.async_all("notify")]
+    alert_data: dict[str, Any] = {"title": title, "message": message}
+    if preferred:
+        # The picker saves "notify.<name>" for both kinds of target. Only one
+        # that exists as a notify ENTITY goes through send_message: a phone
+        # (mobile_app) is a legacy SERVICE, and send_message aimed at an
+        # entity that does not exist logs and returns, no error — so an alert
+        # to a chosen phone counted as sent and went nowhere. A legacy one is
+        # called by its own name, with or without the prefix.
+        slug = preferred.split(".", 1)[1] if preferred.startswith("notify.") else preferred
+        last_err: Exception | None = None
+        if preferred in entity_ids and has_send_message:
+            try:
+                # Message, title and the entity only: send_message refuses any
+                # other key ("extra keys not allowed @ data['target']"), so an
+                # email filled in as well failed every alert to the entity.
+                payload = {**alert_data, "entity_id": preferred}
+                await hass.services.async_call("notify", "send_message", payload)
+                return preferred
+            except Exception as err:  # noqa: BLE001 — reported below
+                last_err = err
+        if slug and slug != "send_message" and slug in services:
+            try:
+                await hass.services.async_call(
+                    "notify", slug, {**alert_data, "target": email} if email else alert_data,
+                )
+                return slug
+            except Exception:  # noqa: BLE001
+                try:
+                    await hass.services.async_call("notify", slug, alert_data)
+                    return slug
+                except Exception as err:  # noqa: BLE001 — reported below
+                    last_err = err
+        if "." in preferred and not preferred.startswith("notify."):
+            # Another integration's send service the picker offers
+            # (telegram_bot.send_message): called as itself.
+            _dom, _svc = preferred.split(".", 1)
+            if hass.services.has_service(_dom, _svc):
+                try:
+                    await hass.services.async_call(_dom, _svc, alert_data)
+                    return preferred
+                except Exception as err:  # noqa: BLE001 — reported below
+                    last_err = err
+        # The chosen target is gone (phone renamed or removed) or its call
+        # failed: counted as failed, never sent to some other phone or
+        # mailbox instead.
+        if last_err is not None:
+            raise FollowNotifyNotSent("send_failed", f"{preferred}: {last_err}")
+        raise FollowNotifyNotSent("not_found", f"{preferred} is not in Home Assistant")
+    auto_targets: list[tuple[str, str, dict[str, Any]]] = []
+    for eid in entity_ids:
+        if has_send_message:
+            auto_targets.append(("send_message", eid, {**alert_data, "entity_id": eid}))
+    for svc in services:
+        if svc != "send_message":
+            auto_targets.append((svc, svc, alert_data))
+    if not auto_targets:
+        raise FollowNotifyNotSent("no_notify", "no notify services available in HA")
+    auto_targets.sort(key=lambda t: (0 if "mail" in t[1].lower() or "smtp" in t[1].lower() else 1))
+    last_auto_err: Exception | None = None
+    for svc_name, label, payload in auto_targets:
+        try:
+            await hass.services.async_call("notify", svc_name, payload)
+            return label
+        except Exception as err:  # noqa: BLE001 — the next one is tried
+            last_auto_err = err
+    raise FollowNotifyNotSent("send_failed", f"auto-detect: {last_auto_err}")
+
+
 class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Central BLE room-presence engine for PadSpan Bright.
 
@@ -767,6 +870,25 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # ── Automation tracking ───────────────────────────────────────────────
         # Set of device keys present in the previous poll result (for arrive/depart)
         self._prev_present: set[str] = set()
+        # The same, by device: one label on two keys (the phone wizard's
+        # iBeacon + IRK) is one device - group -> its present keys, freshest
+        # first. Arrive/depart is decided here, not per key.
+        self._prev_groups: dict[str, list[str]] = {}
+        self._prev_away_s: float | None = None
+        # The first poll after a start only records who is present (see the
+        # arrive/depart block): without it every device "arrived" at startup.
+        self._presence_primed = False
+        # A confirmed room cleared by a short gap (quiet 60 s, never away):
+        # the "from" room of the next confirmation, or that move was lost.
+        self._room_before_gap: dict[str, str] = {}
+        # Follow room alerts held by the 60 s cooldown, and the last room
+        # each one reported (sent when the cooldown ends, as tag events are).
+        self._room_alert_held: dict[str, str] = {}
+        self._room_alert_reported: dict[str, str] = {}
+        # Objects that went quiet for a real absence while still in the result
+        # (labelled ones, replayed by the object history): heard again, they
+        # get the re-entry reset (see _object_loop).
+        self._quiet_keys: set[str] = set()
 
         # Suspend: when set, use only raw radio + spatial centroid (no k-NN, no adaptive)
         self._suspend_until: float = 0.0  # monotonic timestamp when suspend ends
@@ -1298,7 +1420,20 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # If this device was absent (stale) in the previous poll and is now
                     # back, reset the vote window and Kalman state so old-location votes
                     # don't slow down re-assignment.
-                    if self._known_objs.get(key, {}).get("_stale"):
+                    # A labelled object never leaves the result (the object
+                    # history replays it), so the grace loop never marks it
+                    # _stale and its old room's votes survived a ten-hour
+                    # absence: back through the hall, it was reported in the
+                    # bedroom it left from. The grace loop's own rule — a real
+                    # absence is over 60 s — applies to it here.
+                    _age_q = obj.get("age_s")
+                    _quiet_now = isinstance(_age_q, (int, float)) and _age_q >= 60.0
+                    _back = key in self._quiet_keys and not _quiet_now
+                    if _quiet_now:
+                        self._quiet_keys.add(key)
+                    elif _back:
+                        self._quiet_keys.discard(key)
+                    if self._known_objs.get(key, {}).get("_stale") or _back:
                         self._room_votes.pop(key, None)
                         self._room_confidence.pop(key, None)
                         # A device that was away and is back must not be judged on
@@ -1311,8 +1446,13 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._floor_evidence.pop(key, None)
                         self._device_floor.pop(key, None)
                         # A stale room must not anchor first-poll attribution —
-                        # clear the confirmed room and the adaptive novelty vector too
-                        self._confirmed_room.pop(key, None)
+                        # clear the confirmed room and the adaptive novelty vector too.
+                        # Back from a short gap (quiet, never away): the room
+                        # is kept as the next confirmation's "from" room, or
+                        # Kitchen -> Garden after 90 s unheard was never reported.
+                        _was_room = self._confirmed_room.pop(key, None)
+                        if _back and _was_room and key in self._prev_present:
+                            self._room_before_gap[key] = _was_room
                         self._adaptive_last_vec.pop(key, None)
                         self._knn_position.pop(key, None)
                         self._smooth_xy.pop(key, None)
@@ -1572,14 +1712,80 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._evict_object(key)
 
         # ── PadSpan automations: arrive/depart triggers ──────────────────────
-        _cur_present = set(result.keys())
-        _arrived = _cur_present - self._prev_present
-        _departed = set(_evict_keys)  # keys that just got evicted = departed
+        # Present = in the result AND not past the away timeout — the trackers'
+        # own rule (presence_rules.is_away). It was every key in the result,
+        # and the object history replays a labelled device forever, so a
+        # tagged phone never left it: "arrived" fired once, the first time it
+        # was seen, and "departed" never — no on_arrive/on_depart alerts, no
+        # padspan_device_arrived/departed events, no arrive/depart rules.
+        # Departed is "was present, now not": gone quiet, or evicted.
+        _away_s = away_timeout_s(self.hass)
+        _cur_present = {k for k, o in result.items()
+                        if isinstance(o, dict) and not is_away(o, _away_s)}
+        # By device: a label on two keys "left" when one key went quiet while
+        # the other was still heard (depart alert and rules with the phone home).
+        _cur_groups: dict[str, list[str]] = {}
+        for _k in sorted(_cur_present, key=lambda k: (result[k].get("age_s")
+                         if isinstance(result[k].get("age_s"), (int, float)) else 1e12)):
+            _lbl = str(result[_k].get("user_label") or "").strip().lower()
+            _cur_groups.setdefault(f"label:{_lbl}" if _lbl else _k, []).append(_k)
+        # Every key a label is on, present or not: a rule or alert saved under
+        # the key that went quiet first still matches the device's departure.
+        _label_keys: dict[str, set[str]] = {}
+        for _k, _o in result.items():
+            _lbl = str((_o or {}).get("user_label") or "").strip().lower() if isinstance(_o, dict) else ""
+            if _lbl:
+                _label_keys.setdefault(f"label:{_lbl}", set()).add(_k)
+        _members: dict[str, set[str]] = {}
+        if self._presence_primed and _away_s == self._prev_away_s:
+            _arrived, _departed = set(), set()
+            # A device whose label changed (named, renamed, the wizard naming
+            # its second key) is a new group with a key that was already
+            # present: not an arrival, and the old group is not a departure.
+            for _g in _cur_groups.keys() - self._prev_groups.keys():
+                if any(_k in self._prev_present for _k in _cur_groups[_g]):
+                    continue
+                _arrived.add(_cur_groups[_g][0])
+                _members[_cur_groups[_g][0]] = set(_cur_groups[_g]) | _label_keys.get(_g, set())
+            for _g in self._prev_groups.keys() - _cur_groups.keys():
+                if any(_k in _cur_present for _k in self._prev_groups[_g]):
+                    continue
+                _departed.add(self._prev_groups[_g][0])
+                _members[self._prev_groups[_g][0]] = set(self._prev_groups[_g]) | _label_keys.get(_g, set())
+        else:
+            # First poll since start: a baseline, not an arrival of everyone
+            # (that sent every on_arrive alert on each Home Assistant restart).
+            # The same when the away timeout changed: raised, every device
+            # heard within it "arrived"; lowered, they all "departed".
+            self._presence_primed = True
+            _arrived, _departed = set(), set()
+        # A key that went away has no short-gap room to carry (a homecoming
+        # starts fresh, BUG_LOG #30).
+        for _k in self._prev_present - _cur_present:
+            self._room_before_gap.pop(_k, None)
         self._prev_present = _cur_present
+        self._prev_groups = _cur_groups
+        self._prev_away_s = _away_s
+
+        # ── Traceback: recorded from the poll ────────────────────────────────
+        # It was recorded from the panel's live_snapshot request, so playback
+        # had nothing for any time no PadSpan panel was open. The poll always
+        # runs, and its result holds the smoothed room, metres and confidence
+        # the panel's overlay copied in. Away objects keep their last room
+        # here (the snapshot clears it), so they are left out by the same rule.
+        _tb = self.hass.data.get(DOMAIN, {}).get(DATA_TRACEBACK)
+        if _tb is not None:
+            try:
+                _st_tb = self.hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
+                _tb_followed = {str(f).upper() for f in ((_st_tb.data if _st_tb else {}).get("followed_addrs") or [])}
+                _tb.record_frame([o for k, o in result.items() if k in _cur_present], followed_set=_tb_followed)
+                await _tb.async_maybe_save()
+            except Exception as _tb_err:
+                _LOGGER.debug("Traceback record failed: %s", _tb_err)
 
         if _arrived or _departed:
             try:
-                await self._run_automations(_arrived, _departed, result, now)
+                await self._run_automations(_arrived, _departed, result, now, _members)
             except Exception as _auto_err:
                 _LOGGER.warning("Automations error (non-fatal): %s", _auto_err)
 
@@ -1640,6 +1846,20 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception:
                 pass
             self._pending_room_changes.clear()
+        # Follow room alerts held back by their cooldown.
+        if self._room_alert_held:
+            try:
+                await self._flush_held_room_alerts(now, result)
+            except Exception as _held_err:
+                _LOGGER.debug("Held room alerts: %s", _held_err)
+        # Room changes the tag events held back during their cooldown.
+        try:
+            from .const import DATA_TAG_INTEGRATION
+            _ti = self.hass.data.get(DOMAIN, {}).get(DATA_TAG_INTEGRATION)
+            if _ti is not None and _ti.has_held():
+                await _ti.async_emit_held(result)
+        except Exception:
+            pass
 
         # ── Proactive state cleanup ─────────────────────────────────────────────
         # Every 100 polls (~16 min at 10s interval), sweep all per-object state
@@ -1699,25 +1919,42 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
             from homeassistant.components.mqtt import async_publish  # noqa: PLC0415
             import json as _json  # noqa: PLC0415
+            from .presence_rules import calc_distance  # noqa: PLC0415
+            # The same away rule as the HA Area/Distance sensors: "home" used a
+            # fixed 300 s, /area kept the last room while the sensor said
+            # not_home, and /distance was never sent (nothing set "distance").
+            _away_s = away_timeout_s(self.hass)
             for key, obj in result.items():
                 label = obj.get("user_label")
                 if not label:
                     continue
-                slug = label.lower().replace(" ", "_")
+                slug = mqtt_topic_slug(label)
+                if not slug:
+                    continue
                 topic_base = f"padspan/devices/{slug}"
                 # State JSON
+                _away = is_away(obj, _away_s)
                 payload = {
                     "room": obj.get("room"),
                     "rssi": obj.get("rssi"),
                     "age_s": obj.get("age_s"),
-                    "home": not (isinstance(obj.get("age_s"), (int, float)) and obj["age_s"] > 300),
+                    "home": not _away,
                     "room_confidence": obj.get("room_confidence"),
                 }
-                await async_publish(self.hass, f"{topic_base}/state", _json.dumps(payload), retain=True)
-                await async_publish(self.hass, f"{topic_base}/area", obj.get("room") or "unknown", retain=True)
-                dist = obj.get("distance")
-                if dist is not None:
-                    await async_publish(self.hass, f"{topic_base}/distance", str(dist), retain=True)
+                # One device's failure is that device's: the try once wrapped
+                # the whole loop, so one bad publish stopped every device after it.
+                try:
+                    await async_publish(self.hass, f"{topic_base}/state", _json.dumps(payload), retain=True)
+                    await async_publish(self.hass, f"{topic_base}/area",
+                                        "not_home" if _away else (obj.get("room") or "unknown"), retain=True)
+                    rssi = obj.get("rssi")
+                    if not _away and isinstance(rssi, (int, float)):
+                        await async_publish(self.hass, f"{topic_base}/distance",
+                                            str(calc_distance(float(rssi), obj, self.hass)), retain=True)
+                except Exception:
+                    _LOGGER.debug("MQTT publish for %s failed", slug, exc_info=True)
+                    from .telemetry import bump  # noqa: PLC0415
+                    bump(self.hass, "mqtt_publish_failed")
         except ImportError:
             _LOGGER.debug("MQTT component not available — skipping MQTT publish")
         except Exception:
@@ -2875,7 +3112,9 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             key, confirmed, top_room, dict(counts), confidence * 100,
                         )
                         # Track room change for alert processing
-                        self._pending_room_changes.append((key, confirmed, top_room))
+                        _from_room = confirmed if confirmed is not None else self._room_before_gap.pop(key, None)
+                        if _from_room != top_room:
+                            self._pending_room_changes.append((key, _from_room, top_room))
                         _change_mono = time.monotonic()
                         self._last_room_change_mono[key] = _change_mono
                         self._room_dwell_start[key] = _change_mono
@@ -3176,6 +3415,18 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         confidence, and alert state to prevent unbounded memory growth.
         """
         self._known_objs.pop(key, None)
+        self._quiet_keys.discard(key)
+        self._room_before_gap.pop(key, None)
+        self._room_alert_held.pop(key, None)
+        self._room_alert_reported.pop(key, None)
+        # Out of its device group (rebuilt every poll, but not before the
+        # next one, and an unlabelled key is its own group).
+        self._prev_groups.pop(key, None)
+        for _g, _ks in list(self._prev_groups.items()):
+            if key in _ks:
+                _ks.remove(key)
+                if not _ks:
+                    del self._prev_groups[_g]
         self._last_seen.pop(key, None)
         self._away_miss.pop(key, None)
         self._room_votes.pop(key, None)
@@ -3194,7 +3445,10 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._room_dwell_start.pop(key, None)
         self._floor_dwell_start.pop(key, None)
         self._device_floor.pop(key, None)
+        # Cooldowns are kept per alert type ("<key>:room/arrive/depart").
         self._alert_last_sent.pop(key, None)
+        for _sfx in ("room", "arrive", "depart"):
+            self._alert_last_sent.pop(f"{key}:{_sfx}", None)
         self._last_candidate.pop(key, None)
         self._spatial_debug.pop(key, None)
         self._floor_evidence.pop(key, None)
@@ -3299,9 +3553,15 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ── PadSpan automations ─────────────────────────────────────────────────
 
     async def _run_automations(
-        self, arrived: set[str], departed: set[str], result: dict[str, Any], now: float
+        self, arrived: set[str], departed: set[str], result: dict[str, Any], now: float,
+        members: dict[str, set[str]] | None = None,
     ) -> None:
-        """Fire HA events and execute PadSpan automation rules for arrive/depart."""
+        """Fire HA events and execute PadSpan automation rules for arrive/depart.
+
+        arrived/departed hold one key per device; members maps it to all of
+        that device's keys (a label on two keys), so an alert saved under
+        either key and a rule naming either key still match."""
+        members = members or {}
         # Build key→label lookup
         _obj_store = self.hass.data.get(DOMAIN, {}).get(DATA_OBJECTS)
         _key_labels: dict[str, str] = {}
@@ -3315,6 +3575,9 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _key_labels[str(k)] = entry["label"]
 
         # ── Fire HA events for labelled arrive/depart ────────────────────
+        # Counted for the opt-in report too (how often tagged devices come and
+        # go — a flapping one shows as a count far above its owner's day).
+        from .telemetry import bump as _bump  # noqa: PLC0415
         # These events can be used as triggers in HA automations.  Only
         # labelled (user-tagged) devices fire: every rotating-MAC rotation in
         # a busy BLE environment registers as a "new" unlabelled arrival, and
@@ -3330,6 +3593,7 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.hass.bus.async_fire("padspan_device_arrived", {
                 "device_key": key, "label": label, "room": room,
             })
+            _bump(self.hass, "tagged_arrived")
             _LOGGER.info("Device arrived: %s (%s) in %s", label, key[:30], room)
         for key in departed:
             label = _key_labels.get(key, "")
@@ -3338,6 +3602,7 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.hass.bus.async_fire("padspan_device_departed", {
                 "device_key": key, "label": label,
             })
+            _bump(self.hass, "tagged_departed")
             _LOGGER.info("Device departed: %s (%s)", label, key[:30])
 
         # ── Fire follow-alerts for arrive/depart ─────────────────────────
@@ -3360,12 +3625,11 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not label:
                     continue
                 try:
-                    cfg = alert_store.get_config(key)
-                    if not cfg:
-                        _obj = result.get(key) or self._known_objs.get(key) or {}
-                        _addr = _obj.get("address") or ""
-                        if _addr:
-                            cfg = alert_store.get_config(_addr)
+                    cfg = None
+                    for _mk in [key, *sorted(members.get(key, set()) - {key})]:
+                        cfg = self._alert_config(alert_store, _mk, result)
+                        if cfg:
+                            break
                     if not cfg or not cfg.get(f"on_{event}"):
                         continue
                     if (now - self._alert_last_sent.get(f"{key}:{suffix}", 0.0)) < 60:
@@ -3412,11 +3676,13 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if lbl.upper() == device_label.upper():
                         _matched_keys.add(k)
 
-            # Check trigger
+            # Check trigger (against every key of each device that came or went)
+            _arrived_all = set().union(*(members.get(k, {k}) for k in arrived)) if arrived else set()
+            _departed_all = set().union(*(members.get(k, {k}) for k in departed)) if departed else set()
             _fire = False
-            if trigger == "arrive" and _matched_keys & arrived:
+            if trigger == "arrive" and _matched_keys & _arrived_all:
                 _fire = True
-            elif trigger == "depart" and _matched_keys & departed:
+            elif trigger == "depart" and _matched_keys & _departed_all:
                 _fire = True
 
             if _fire:
@@ -3458,6 +3724,21 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
 
     # ── Beacon auto-calibration ────────────────────────────────────────────
+
+    def _autocal_room(self, pin: dict, live_obj: dict | None) -> str:
+        """A pin's room for an auto point: kept only when the live pass applied it.
+
+        The live pass applies a pin's room only when it is a real room (legacy
+        pins hold a device label there); anything else would put a phantom
+        room into k-NN's room vote. Both auto-calibration paths use this.
+        """
+        if pin.get("room") == (live_obj or {}).get("room"):
+            return pin.get("room", "")
+        if pin.get("room"):
+            # The opt-in report (#149): a pin's room kept off an auto point.
+            from .telemetry import bump  # noqa: PLC0415
+            bump(self.hass, "autocal_pin_room_dropped")
+        return ""
 
     async def _inject_beacon_calibration(
         self, now: float, pinned: dict[str, dict], result: dict[str, Any],
@@ -3537,7 +3818,7 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "x_m": pin.get("x_m"),
                     "y_m": pin.get("y_m"),
                     "floor_id": pin.get("floor_id", ""),
-                    "room": pin.get("room", ""),
+                    "room": self._autocal_room(pin, obj),
                     "label": f"[auto] {obj.get('user_label') or key}",
                     "device_id": key,
                     "duration_s": 10,
@@ -3557,11 +3838,18 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Uses fabric beacon positions (metres) when available.
         Falls back to map fracs from beacon dict.
+
+        Only a real fingerprint goes in: the raw samples the auto-calibration
+        has buffered, with the same per-scanner and scanner-count minimums.
+        One smoothed reading per scanner was saved as one scanner's single
+        reading — the auto point AUTOCAL_HYGIENE deletes — on every map save
+        that carried beacons (Restore from backup, migration Revert).
         """
         cal_store = self.hass.data.get(DOMAIN, {}).get(DATA_CALIBRATION)
         if not cal_store:
             return 0
         _model = self.hass.data.get(DOMAIN, {}).get(DATA_MODEL)
+        from .calibration_store import MIN_SCANNER_SAMPLES  # noqa: PLC0415
 
         injected = 0
         now = time.monotonic()
@@ -3569,31 +3857,29 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             key = bk.get("key", "")
             if not key:
                 continue
-            smoothed_rssi = dict(self._ema_rssi.get(key, {}))
-            if not smoothed_rssi:
-                smoothed_rssi = dict(self._ema_rssi.get(key.upper(), {}))
-            if not smoothed_rssi:
-                obj = self._known_objs.get(key) or {}
-                smoothed_rssi = obj.get("_source_rssi") or {}
-            if not smoothed_rssi:
+            ready = {src: list(lst) for src, lst in (self._beacon_autocal_buf.get(key) or {}).items()
+                     if len(lst) >= MIN_SCANNER_SAMPLES}
+            if len(ready) < _KNN_MIN_LIVE_SCANNERS:
                 continue
-            self._beacon_autocal_last[key] = now
             _pt: dict[str, Any] = {
                 "floor_id": floor_id,
                 "label": f"[auto] {(self._known_objs.get(key) or {}).get('user_label') or key}",
                 "device_id": key,
                 "duration_s": 10,
                 "scanner_readings": [
-                    {"source": src, "rssi_samples": [rssi]}
-                    for src, rssi in smoothed_rssi.items()
+                    {"source": src, "rssi_samples": samples}
+                    for src, samples in ready.items()
                 ],
             }
             # Fabric beacon position (metres, primary)
             _fb = (_model.beacon_positions_m().get(key) or {}) if _model else {}
+            # The pin's room, checked against the last poll's live object as
+            # the periodic pass checks it (legacy pins hold a device label).
+            _room = self._autocal_room(_fb, (self.data or {}).get(key))
             if _fb and _fb.get("x_m") is not None:
                 _pt["x_m"] = _fb["x_m"]
                 _pt["y_m"] = _fb["y_m"]
-                _pt["room"] = _fb.get("room", "")
+                _pt["room"] = _room
                 _pt["x_frac"] = 0.5
                 _pt["y_frac"] = 0.5
                 _pt["map_id"] = ""
@@ -3601,9 +3887,11 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _pt["map_id"] = map_id
                 _pt["x_frac"] = float(bk.get("x", 0))
                 _pt["y_frac"] = float(bk.get("y", 0))
-                _pt["room"] = _fb.get("room", "")
+                _pt["room"] = _room
             else:
                 continue
+            self._beacon_autocal_last[key] = now
+            self._beacon_autocal_buf[key] = {}
             try:
                 await cal_store.async_add_point(_pt)
                 await cal_store.async_prune_auto_points(max_per_beacon=50)
@@ -3615,7 +3903,8 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ── Follow-alert processing ────────────────────────────────────────────
 
     async def _process_room_alerts(
-        self, now: float, result: dict[str, Any]
+        self, now: float, result: dict[str, Any],
+        changes: list[tuple[str, str | None, str]] | None = None,
     ) -> None:
         """Send notifications for room changes based on Follow tab alert configs.
 
@@ -3630,20 +3919,22 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not alert_store:
             return
 
-        for key, old_room, new_room in self._pending_room_changes:
+        for key, old_room, new_room in (changes if changes is not None else self._pending_room_changes):
+            # A first confirmation (no room before it — after every restart,
+            # or after the re-entry reset) is not a move: it sent "moved from
+            # unknown to Kitchen" for every followed device on each restart.
+            if not old_room:
+                continue
             try:
-                cfg = alert_store.get_config(key)
-                if not cfg:
-                    # UI saves alert config under address (e.g. "AA:BB:CC:DD:EE:FF")
-                    # but key is prefixed (e.g. "ble:AA:BB:CC:DD:EE:FF"). Try address.
-                    _obj = result.get(key) or self._known_objs.get(key) or {}
-                    _addr = _obj.get("address") or ""
-                    if _addr:
-                        cfg = alert_store.get_config(_addr)
+                cfg = self._alert_config(alert_store, key, result)
                 if not cfg:
                     continue
+                # No email gate here: a phone picked as the notify target needs
+                # none, _send_follow_notify takes email as optional, and the
+                # arrive/depart alerts never required one — a phone-only
+                # room-change alert was silently never sent.
                 email = (cfg.get("email") or "").strip()
-                if not email:
+                if not email and not cfg.get("notify_service"):
                     continue
                 if not cfg.get("on_room_change"):
                     continue
@@ -3653,10 +3944,15 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if watch and new_room not in watch:
                     continue
 
-                # Rate limit: 60s cooldown per device
-                last = self._alert_last_sent.get(key, 0.0)
+                # Rate limit: 60s cooldown per device. Read under the key
+                # _send_follow_notify writes ("<key>:room"); this read the bare
+                # key, which nothing writes, so room changes were never throttled.
+                last = self._alert_last_sent.get(f"{key}:room", 0.0)
                 if now - last < 60:
+                    # Held, not dropped: sent when the cooldown ends if the
+                    # device is still away from the room last reported.
                     _LOGGER.debug("Alert throttled for %s (%.0fs since last)", key, now - last)
+                    self._room_alert_held[key] = new_room
                     continue
 
                 # Get display label
@@ -3668,6 +3964,8 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     key, cfg, f"PadSpan: {label} moved", message, now, "room",
                 )
                 if sent:
+                    self._room_alert_reported[key] = new_room
+                    self._room_alert_held.pop(key, None)
                     _LOGGER.info(
                         "Follow alert sent for %s: %s → %s (to %s via %s)",
                         label, old_room, new_room, email, cfg.get("notify_service") or "auto",
@@ -3677,6 +3975,45 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:
                 _LOGGER.warning("Follow alert failed for %s: %s", key, err)
 
+    async def _flush_held_room_alerts(self, now: float, result: dict[str, Any]) -> None:
+        """Room alerts the 60 s cooldown held: once it has passed, sent from
+        the room last reported to where the device is then (Kitchen -> Hall
+        -> Bedroom 20 s apart reported Hall and never Bedroom)."""
+        changes = []
+        for key, held in list(self._room_alert_held.items()):
+            if now - self._alert_last_sent.get(f"{key}:room", 0.0) < 60:
+                continue
+            self._room_alert_held.pop(key, None)
+            cur = (result.get(key) or {}).get("room") or held
+            reported = self._room_alert_reported.get(key)
+            if cur and reported and cur != reported:
+                changes.append((key, reported, cur))
+        if changes:
+            await self._process_room_alerts(now, result, changes)
+
+    def _alert_config(self, alert_store: Any, key: str, result: dict[str, Any]) -> dict[str, Any] | None:
+        """The Follow alert config for this object. Follow saves it under the
+        object's address as the panel showed it; the object key is prefixed
+        ("ble:AA:..", "irk:.."), and an IRK phone's address rotates — so its
+        alerts stopped at the first rotation (~15 min). Tried: the key, the
+        current address, every address the object has used (all_addresses,
+        which keeps the one it was saved under), then a config whose stored
+        padspan_id or key matches the object's identity."""
+        cfg = alert_store.get_config(key)
+        if cfg:
+            return cfg
+        obj = result.get(key) or self._known_objs.get(key) or {}
+        for a in [obj.get("address"), *(obj.get("all_addresses") or [])]:
+            if a:
+                cfg = alert_store.get_config(str(a)) or alert_store.get_config(str(a).upper())
+                if cfg:
+                    return cfg
+        pid, cid = obj.get("padspan_id"), obj.get("canonical_id")
+        for k, c in (getattr(alert_store, "data", None) or {}).items():
+            if isinstance(c, dict) and ((pid and c.get("padspan_id") == pid) or (cid and k == cid)):
+                return c
+        return None
+
     async def _send_follow_notify(
         self, key: str, cfg: dict[str, Any], title: str, message: str,
         now: float, cooldown_suffix: str,
@@ -3685,9 +4022,9 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _process_room_alerts (on_room_change) and _run_automations
         (on_arrive/on_depart) both call, so the three alert types can never
         disagree about how a notification actually gets sent, or drift
-        apart as one is fixed and the other forgotten. Tries the configured
-        service first (entity-based send_message, then legacy notify.*),
-        falling back to auto-detection (preferring mail/smtp). Returns
+        apart as one is fixed and the other forgotten. It sends through
+        async_send_follow_notify, as Follow's Test button does: the
+        configured target only, else auto-detection (preferring mail/smtp). Returns
         whether it sent. cooldown_suffix keys the 60s per-device throttle
         by ALERT TYPE, not just device — a room-change alert and an arrival
         alert commonly fire in the same poll for a newly-arrived device,
@@ -3695,55 +4032,22 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         second.
         """
         email = (cfg.get("email") or "").strip()
-        services = self.hass.services.async_services().get("notify", {})
-        has_send_message = "send_message" in services
-        entity_ids = [s.entity_id for s in self.hass.states.async_all("notify")]
-        legacy = [k for k in services if k != "send_message"]
-        if not services and not entity_ids:
-            _LOGGER.warning("Alert: no notify services available in HA")
-            return False
-
         preferred = cfg.get("notify_service") or ""
-        alert_data: dict[str, Any] = {"title": title, "message": message}
-        sent = False
-        if preferred.startswith("notify.") and has_send_message:
-            try:
-                payload = {**alert_data, "entity_id": preferred}
-                if email:
-                    payload["target"] = email
-                await self.hass.services.async_call("notify", "send_message", payload)
-                sent = True
-            except Exception:
-                pass
-        if not sent and preferred and preferred in services:
-            try:
-                await self.hass.services.async_call(
-                    "notify", preferred, {**alert_data, "target": email} if email else alert_data,
-                )
-                sent = True
-            except Exception:
-                try:
-                    await self.hass.services.async_call("notify", preferred, alert_data)
-                    sent = True
-                except Exception:
-                    pass
-        if not sent:
-            auto_targets: list[tuple[str, str, dict[str, Any]]] = []
-            for eid in entity_ids:
-                if has_send_message:
-                    auto_targets.append(("send_message", eid, {**alert_data, "entity_id": eid}))
-            for svc in legacy:
-                auto_targets.append((svc, svc, alert_data))
-            auto_targets.sort(key=lambda t: (0 if "mail" in t[1].lower() or "smtp" in t[1].lower() else 1))
-            for svc_name, _label, payload in auto_targets:
-                try:
-                    await self.hass.services.async_call("notify", svc_name, payload)
-                    sent = True
-                    break
-                except Exception:
-                    continue
+        try:
+            await async_send_follow_notify(self.hass, preferred, email, title, message)
+            sent = True
+        except FollowNotifyNotSent as err:
+            _LOGGER.warning("Follow alert not sent via %s: %s", preferred or "auto-detect", err)
+            sent = False
         if sent:
             self._alert_last_sent[f"{key}:{cooldown_suffix}"] = now
+        # The opt-in report's view of Follow alerts (0.38.108-110 fixed where
+        # they go and when they fire): one count per alert, sent or not.
+        from .telemetry import bump  # noqa: PLC0415
+        if sent:
+            bump(self.hass, "follow_alert_sent")
+        else:
+            bump(self.hass, "follow_alert_failed")
         return sent
 
     def clear_scanner(self, source: str) -> int:
@@ -3755,19 +4059,34 @@ class PresenceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Returns the number of device entries that were cleaned.
         """
         cleared = 0
+        # Copy-on-write, never indexing after a check: in cpu_mode single or
+        # dedicated the object loop works on these dicts on the compute
+        # executor while Radio Reset runs this on the event loop, and a
+        # popped address raised KeyError (or a deleted source broke the
+        # loop's iteration of that device).
         for addr in list(self._ema_rssi):
-            if source in self._ema_rssi[addr]:
-                del self._ema_rssi[addr][source]
-                self._kalman_p.get(addr, {}).pop(source, None)
-                cleared += 1
-                if not self._ema_rssi[addr]:
-                    del self._ema_rssi[addr]
-                    self._kalman_p.pop(addr, None)
+            ema = self._ema_rssi.get(addr)
+            if not ema or source not in ema:
+                continue
+            cleared += 1
+            rest = {k: v for k, v in ema.items() if k != source}
+            if rest:
+                self._ema_rssi[addr] = rest
+                kp = self._kalman_p.get(addr)
+                if kp and source in kp:
+                    self._kalman_p[addr] = {k: v for k, v in kp.items() if k != source}
+            else:
+                self._ema_rssi.pop(addr, None)
+                self._kalman_p.pop(addr, None)
         for addr in list(self._silence_miss):
-            if source in self._silence_miss[addr]:
-                del self._silence_miss[addr][source]
-                if not self._silence_miss[addr]:
-                    del self._silence_miss[addr]
+            sm = self._silence_miss.get(addr)
+            if not sm or source not in sm:
+                continue
+            rest = {k: v for k, v in sm.items() if k != source}
+            if rest:
+                self._silence_miss[addr] = rest
+            else:
+                self._silence_miss.pop(addr, None)
         return cleared
 
     async def _record_movement(self, result: dict[str, Any]) -> None:
