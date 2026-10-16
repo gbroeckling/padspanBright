@@ -19,7 +19,7 @@ Organisation:
 
 DOMAIN = "padspan_bright"
 NAME = "PadSpan Bright"
-VERSION = "0.38.124"
+VERSION = "0.38.135"
 
 # ── Config-flow option keys ───────────────────────────────────────────────────
 CONF_ENABLE_CLOUD = "enable_cloud"
@@ -135,7 +135,7 @@ CRITIC_WARNING_ERROR_M = 1.2
 LIGHT_SHAPE_KINDS = frozenset({
     "hex", "circle", "bar", "line", "square", "triangle", "diamond",
     "fan", "sconce", "pendant", "chandelier", "perimeter", "motion",
-    "tempreadout", "humidityreadout", "airquality", "lock", "door", "flood",
+    "tempreadout", "humidityreadout", "airquality", "lock", "door", "flood", "smokealarm",
 })
 
 # ── Light type overrides (Pro) ──────────────────────────────────────────────

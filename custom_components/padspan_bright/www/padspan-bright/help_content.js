@@ -49,10 +49,11 @@ export const HELP = {
   follow_alerts: {
     title: "Movement alerts — Get notified when a tag moves",
     body: [
-      "PadSpan can send you an email every time a tracked tag moves from one room to another.",
-      "Enter the email address where you want notifications sent, check the box to turn it on, then click Save — nothing is active until you save it.",
-      "You can also choose specific rooms to watch — for example, get an alert only when a tag enters the front hallway.",
-      "Emails are sent through Home Assistant's built-in notification system. If emails aren't arriving, check that a notification service (like Gmail or SMTP) is configured in HA Settings → Integrations.",
+      "PadSpan can tell you when a tracked tag moves from one room to another, arrives home, or leaves: on your phone, by email, or both.",
+      "For your phone, pick it under Notify service (the Home Assistant Companion app's notify target); no email is needed. For email, type the address and leave Notify service on Auto-detect, or pick your mail service. Tick what you want to hear about, then press Save — nothing is active until you save it.",
+      "Send Test sends one right now to exactly where alerts go, and says plainly if it couldn't reach your phone or mail service.",
+      "Arrive and leave use the same away timeout as the Away badge, and also fire Home Assistant events (padspan_device_arrived and padspan_device_departed) you can use in your own automations. In Advanced mode you can also pick specific rooms to watch.",
+      "Alerts go out through Home Assistant's notify services. If none arrive, check that the Companion app (for a phone) or a mail integration (like SMTP) is set up in HA Settings → Devices & Services.",
     ],
   },
 
@@ -83,7 +84,8 @@ export const HELP = {
     body: [
       "Objects lists Bluetooth devices your scanners have detected — phones tracked by Home Assistant, Tile trackers, key fobs, AirTags, and anything else broadcasting BLE. By default only devices seen in the last 4 hours are shown; widen the History filter to go further back.",
       "Badge colours tell you the device type: green BLE = standard Bluetooth device, orange BLE? = unidentified, blue Private BLE = phone using rotating MAC address (resolved automatically via IRK), amber iBeacon = Tile / HA Companion App iBeacon grouped by stable UUID. AirTags and other Apple Find My tags (purple Find My badge) change both their MAC and their advertised key — every 15 min near their owner's iPhone, once a day away from it — and do NOT have a stable identifier; see the Naming help below for what works.",
-      "A red Away badge appears when a BLE device hasn't been seen for longer than the configured away timeout (default 5 min). 'Last: Kitchen' shows where it was last detected. The corresponding device_tracker entity in HA also shows not_home.",
+      "A red Away badge appears when a BLE device hasn't been seen for longer than the configured away timeout (default 5 min). The corresponding device_tracker entity in HA also shows not_home.",
+      "Lost & Found: '📍 Kitchen · 2 h ago' under a device is the last room PadSpan was sure it was in, and when. It's kept across Home Assistant restarts, so you can still see where your keys were last seen after a reboot.",
       "Basic mode shows one card per device; click its Details button to open the full detail panel. Advanced/Development mode instead shows a sortable table with a search box (find a device by name, address, company, or device type — try 'apple' or 'tile') and the extra company/device-type/service badges decoded from its BLE advertisement; click anywhere on a row to open the same detail panel.",
     ],
   },
@@ -163,7 +165,7 @@ export const HELP = {
       "Diagnostics — websocket call counts, timing, scanner performance, advertisement freshness, and session info. The Per-Scanner Breakdown table shows each scanner's device count, average RSSI, and quality grade.",
       "Zones — every room as a card sorted by occupancy. Occupied rooms have a coloured border; empty rooms are dimmed. Click a room card to see its detail. Rooms are grouped by floor when configured in HA.",
       "Insights — charts for room occupancy, scanner signal quality, devices moving between rooms, coverage gaps, and devices by type.",
-      "Health — the current System Critics results described below. Diag Export — download the current diagnostics as JSON. Debug — show the values the panel is currently using for troubleshooting.",
+      "Health — the current System Critics results described below. Diag Export — press Build export to collect the current diagnostics as JSON, then copy it (to attach to a support request or a GitHub issue). Long lists are cut to 200 entries, but every device you tagged or follow is always kept. Debug — show the values the panel is currently using for troubleshooting.",
     ],
   },
   zones: {
@@ -574,11 +576,22 @@ export const HELP = {
       "The map editor has four modes, selectable with the buttons at the top:",
       "RADIOS — Place Bluetooth scanner markers on the map. Double-click the map to add a scanner, then drag to position. Click a placed scanner to select it (shows delete button). Each scanner should be positioned where the physical device is mounted.",
       "ROOMS — Draw room boundary polygons. Click the map to add polygon points, double-click to finish the shape. Each polygon becomes a named room. Room names should match your Home Assistant Area names exactly.",
-      "RF BARRIERS — Draw wall/barrier lines that block Bluetooth signal. Click to start, click to add points, double-click to finish. Choose material type: Open (Loft) for areas open to the floor above/below (0dB, no wall — only height-based attenuation applies), Brick (4dB), Concrete (8dB), Metal (12dB), or Custom (6dB) for anything else. Open/Loft markers tell PadSpan that signal flows freely between floors at that boundary, reducing cross-floor stickiness.",
+      "RF BARRIERS — Draw wall/barrier lines that block Bluetooth signal. Click to start, click to add points, double-click to finish. Choose material type: Open (Loft) for areas open to the floor above/below (0dB, no wall — only height-based attenuation applies), Brick (4dB), Concrete (8dB), Metal (12dB), or Custom for anything else (6dB unless you set your own number, 0-30dB). These are rough starting points, not measurements of your house: the Walls Guide (docs/WALLS_GUIDE.md) gives real-world ranges and what to do about old plaster-and-lath or thick stone walls. Open/Loft markers tell PadSpan that signal flows freely between floors at that boundary, reducing cross-floor stickiness.",
       "MEASURE — Click two points you know the real distance between, to set or check the map's scale.",
       "SAVE LAYOUT — Saves all changes (receivers, rooms, barriers) to the server. Changes are not saved automatically.",
       "REVERT — Discards unsaved changes and reloads the last saved state.",
       "Important: Room names must match HA Area names for positioning to work. If a room boundary has a different name than the HA Area, objects won't be correctly positioned in that room.",
+    ],
+  },
+
+  // ── Unknown phone (Occupancy's Counted list) ────────────────────────────
+  unknown_phone: {
+    title: "Unknown phone — what it is and what to do",
+    body: [
+      "An Unknown phone is a phone or watch PadSpan can hear in that room but can't tie to anyone. Phones change their Bluetooth address every few minutes for privacy (iPhones and most Androids do), so on its own the signal says \"a phone is here\" but not whose.",
+      "IF IT'S YOURS (or someone who lives with you): link the phone so PadSpan knows it. The Home Assistant Companion app with its Bluetooth sensor, or the phone's IRK under Private BLE Device in Home Assistant, both work. After that it's counted as that person.",
+      "IF IT'S A VISITOR: nothing to do. It goes when they do.",
+      "IF IT'S A NEIGHBOUR through the wall: it has to be heard by two or more of your receivers, fairly strongly, to be counted. A receiver on a shared wall makes that easy. Move that receiver away from the wall, or draw the wall as a stronger material on the map (see the Walls Guide), and the count should drop.",
     ],
   },
 

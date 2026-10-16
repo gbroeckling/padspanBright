@@ -49,7 +49,9 @@ export const { normBearing, fabricCompass, bearingOfNorth, compassDir, northArro
 // name, and only ever while the feature is on (the host passes no sender
 // otherwise). Words only: never an entity id, a room or a floor.
 export const HOUSE3D_FALLBACK_KINDS = ["no_webgl", "slow_gpu", "context_lost", "error"];
-export const HOUSE3D_EVENTS = ["house3d_opened", ...HOUSE3D_FALLBACK_KINDS.map(k => `house3d_fallback:${k}`)];
+// house3d_wet_window: a window showed open while it rains or snows (the alert
+// below the Motion chip), once per page load.
+export const HOUSE3D_EVENTS = ["house3d_opened", ...HOUSE3D_FALLBACK_KINDS.map(k => `house3d_fallback:${k}`), "house3d_wet_window"];
 const _ALLOWED = new Set(HOUSE3D_EVENTS);
 const _counted = new Set();
 /** Count `name` once per page load, and only a name from the closed list. */
@@ -160,7 +162,12 @@ export function floorCanon(floorList){
     return s === "__outside__" && ids.has("outside") ? "outside" : s;
   };
 }
-export function readFloors(model, floorList){
+/** gap (m): Explode (live_aboard.js) lifts each indoor storey this much more
+ *  than the one under it, so every floor shows with All picked (as
+ *  neonplan3d's explode does). Everything drawn reads its floor's elev, so
+ *  the house, its devices and its picking move together; nothing stored is
+ *  absolute, so nothing saved changes. */
+export function readFloors(model, floorList, gap = 0){
   const reg = Array.isArray(floorList) && floorList.length ? floorList : ((model && model.floors) || []);
   const canon = floorCanon(reg);
   const elev = (model && model.floor_elevations) || {};
@@ -189,6 +196,12 @@ export function readFloors(model, floorList){
   const ground = indoor.length ? Math.min(...indoor) : 0;
   for (const f of floors) if (f.elev === null) f.elev = ground;
   floors.sort((a, b) => a.elev - b.elev || Number(a.outdoor) - Number(b.outdoor));
+  // elev0: where it really is; a stair's rise is always worked from that.
+  for (const f of floors) f.elev0 = f.elev;
+  if (gap > 0) {
+    const levels = [...new Set(floors.filter(f => !f.outdoor).map(f => f.elev))].sort((a, b) => a - b);
+    for (const f of floors) if (!f.outdoor) f.elev += Math.max(0, levels.indexOf(f.elev)) * gap;
+  }
   return { floors, byId, canon, ground };
 }
 
@@ -1464,6 +1477,28 @@ export const TEMP_TINT = { hot: { wash: "#f97316", ink: "#fb923c" }, warm: { was
                            cool: { wash: "#3b82f6", ink: "#93c5fd" } };
 export const tempBand = (t) => (t > TEMP_HOT_OVER ? "hot" : t >= TEMP_WARM_AT ? "warm" : "cool");
 export const STALE_INK = "#94a3b8";
+// The heat map (Temps picked in the class chips, as neonplan3d's climate
+// view): each room's floor in its temperature, blue cool, green comfortable,
+// red warm, graded between (°C).
+export const HEAT_STOPS = [[16, [59, 130, 246]], [21, [34, 197, 94]], [26, [239, 68, 68]]];
+export function heatColor(c){
+  const S = HEAT_STOPS;
+  if (!(c > S[0][0])) return rgbHex(S[0][1]);
+  for (let i = 1; i < S.length; i++) {
+    if (c <= S[i][0]) {
+      const k = (c - S[i - 1][0]) / (S[i][0] - S[i - 1][0]);
+      return rgbHex(S[i - 1][1].map((v, j) => v + (S[i][1][j] - v) * k));
+    }
+  }
+  return rgbHex(S[S.length - 1][1]);
+}
+function rgbHex(c){ return "#" + c.map(v => Math.round(v).toString(16).padStart(2, "0")).join(""); }
+/** A temperature record's reading in °C (its unit says °F: converted), or null. */
+export function tempC(l){
+  const v = l ? Number(l.temperature) : NaN;
+  if (!Number.isFinite(v) || l.temperature === null) return null;
+  return /f/i.test(String(l.air_unit || "")) ? (v - 32) * 5 / 9 : v;
+}
 /** A readout's words and colour: the Atlas's own state word (stateWordOf —
  *  "21°", "57%", "Fair", "409 ppm · Good") while it is live, in the Atlas's
  *  colours; stale or no reading, the device's code, quiet. */
@@ -1516,8 +1551,8 @@ export function floorBadges(model, floorList, house){
  *  state); hidden: the Atlas's hidden lights (a Set). Per floor: its rooms
  *  and its wall pieces, barriers spliced in (a linked one as an opening of
  *  its sensor's kind). */
-export function readHouse(model, floorList, lightsByEid, hidden, overrides){
-  const F = readFloors(model, floorList);
+export function readHouse(model, floorList, lightsByEid, hidden, overrides, gap = 0){
+  const F = readFloors(model, floorList, gap);
   const rooms = readRooms(model, F);
   const barriers = Array.isArray(model && model.rf_barriers_m) ? model.rf_barriers_m : [];
   const kindOf = (b) => openingKind(b, lightsByEid && b && lightsByEid[b.linked_entity_id]);

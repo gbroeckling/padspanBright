@@ -205,6 +205,12 @@ def _get_settings(hass: HomeAssistant) -> dict:
     # A Pro invite's token is what claims it: never for every user either.
     from .pro_invite import SETTINGS_KEY as _INVITE_KEY, public_state as _invite_state  # noqa: PLC0415
     out.update(_invite_state({_INVITE_KEY: out.pop(_INVITE_KEY, None)}))
+    # The free-Pro offers' server switches (update_check._keep_offers): the
+    # panel hides an offer that is off.
+    from .update_check import offer_on as _offer_on  # noqa: PLC0415
+    _switches = {"server_offers": out.pop("server_offers", None)}
+    out["offer_tester"] = _offer_on(_switches, "tester")
+    out["offer_invite"] = _offer_on(_switches, "invite")
     out["pro_has_key"] = state["has_key"]
     out["pro_active"] = state["active"]        # a valid key of any tier
     out["pro_days_left"] = state["days_left"]
@@ -520,6 +526,41 @@ def _norm_mac(value: Any) -> str:
 def _device_label(dev: Any) -> str:
     return str(getattr(dev, "name_by_user", None) or getattr(dev, "name", None)
                or getattr(dev, "id", "") or "")
+
+
+_NAME_MAC_TAIL_RE = re.compile(r"\s*\((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\)\s*$")
+
+
+NAME_FROM: tuple[str, ...] = ("ha_user", "ha", "scanner", "area", "source")
+
+
+def radio_display(radio: dict, device: Any = None) -> tuple[str, str]:
+    """The one name a receiver goes by everywhere in the panel, and where it
+    came from (one of NAME_FROM, for the opt-in report).
+
+    The name the user gave it in Home Assistant first (that's what they see in
+    HA too), then HA's own device name, then the scanner's name with its
+    "(AA:BB:..)" tail dropped, then "<area> receiver", then the raw source.
+    """
+    src = str(radio.get("source") or "")
+    if device is not None:
+        for attr, origin in (("name_by_user", "ha_user"), ("name", "ha")):
+            v = str(getattr(device, attr, None) or "").strip()
+            if v:
+                return v, origin
+    raw = str(radio.get("name") or "").strip()
+    if raw and raw != src:
+        cleaned = _NAME_MAC_TAIL_RE.sub("", raw).strip()
+        if cleaned and _norm_mac(cleaned) == "":
+            return cleaned, "scanner"
+    area = str(radio.get("area_name") or "").strip()
+    if area:
+        return f"{area} receiver", "area"
+    return src, "source"
+
+
+def radio_display_name(radio: dict, device: Any = None) -> str:
+    return radio_display(radio, device)[0]
 
 
 class RadioMatch(NamedTuple):

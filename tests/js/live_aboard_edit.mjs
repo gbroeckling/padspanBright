@@ -576,7 +576,7 @@ function reach(a, b, want, o){
   return got;
 }
 const width = (rec) => Math.hypot(rec.b_m[0] - rec.a_m[0], rec.b_m[1] - rec.a_m[1]);
-await tryCase("widths: drawn or dragged to just over its least width on a sloped wall, Save sends ends the server keeps", async () => {
+await tryCase("widths: drawn or dragged to its least width on a sloped wall, Save sends ends the server keeps", async () => {
   topIds = ["basement"];
   poll();
   await settle();
@@ -591,7 +591,8 @@ await tryCase("widths: drawn or dragged to just over its least width on a sloped
   for (const [c0, c1] of [[[12, -1], [14, -3]], [[12, -1], [10, -3]]]) {
     const L = Math.hypot(c1[0] - c0[0], c1[1] - c0[1]), ux = (c1[0] - c0[0]) / L, uy = (c1[1] - c0[1]) / L;
     for (let k = 0; k < 6; k++) {
-      const s0 = 0.2 + k * 0.43, want = 0.3 + k * 0.0002;
+      // Lengths step 5 cm (DRAFT.SNAP_M): the least a line can be is its least width, 0.30 m exactly.
+      const s0 = 0.2 + k * 0.43, want = 0.3 - 1e-9;
       const p = (s) => where("basement", c0[0] + ux * s, c0[1] + uy * s, WALL_Z);
       const a = p(s0), b = p(s0 + 0.34), before = Object.keys(ed().draft.openings);
       fire("pointerdown", a[0], a[1]);
@@ -607,7 +608,7 @@ await tryCase("widths: drawn or dragged to just over its least width on a sloped
         fire("pointerdown", end[0], end[1]);
         const g = ed().gesture;
         const out = [end[0] + (end[0] - fixed[0]) * 0.2, end[1] + (end[1] - fixed[1]) * 0.2];
-        const len2 = g && g.kind === "drag" ? reach(fixed, out, 0.3 + dragged.length * 0.0003 + 0.00005, {}) : null;
+        const len2 = g && g.kind === "drag" ? reach(fixed, out, 0.3 - 1e-9, {}) : null;
         fire("pointerup", end[0], end[1]);
         dragged.push({ id, kind: g && g.kind, len: len2 });
         await settle();
@@ -619,7 +620,7 @@ await tryCase("widths: drawn or dragged to just over its least width on a sloped
   click("Save", "la3d-tools");
   await settle();
   const narrow = mine.filter(r => !(width(r) >= 0.3 - 1e-6)).map(width);
-  check("widths: drawn or dragged to just over its least width on a sloped wall, Save sends ends the server keeps",
+  check("widths: drawn or dragged to its least width on a sloped wall, Save sends ends the server keeps",
     made.length === 12 && dragged.filter(d => d.kind === "drag" && d.len >= 0.3 - 1e-6 && d.len < 0.302).length === 6 && !narrow.length
     && made.every(m => m.len >= 0.3 - 1e-6 && m.len < 0.302) && payloads.length === n0 + 1 && !ed().dirty,
     { made: made.length, dragged, narrow, lens: made.map(m => m.len), saved: payloads.length - n0, hint: ed().hint });
@@ -1054,4 +1055,56 @@ await tryCase("card: a tag's card closes when its floor is hidden", async () => 
 });
 
 check("the view never failed", !st().failed, { failed: st().failed });
+await tryCase("arcs: a door that swings shows its swing while editing; a sliding one none", async () => {
+  await openEdit();
+  if (ed().tool) await pickTool(ed().tool);
+  await pickTool("door");
+  await settle();
+  const before = ed().arcs, n0 = Object.keys(ed().draft.openings).length;
+  const a = where("main", 4.55, 1, WALL_Z), b = where("main", 4.55, 2, WALL_Z);
+  if (a && b) drag(a, b);
+  await settle(6);
+  const drawn = Object.keys(ed().draft.openings).length - n0, hinged = ed().arcs;
+  const sel = root().querySelectorAll(".la3d-sheet")[0], pick = sel && sel.querySelectorAll("select")[0];
+  if (pick) { pick.value = "sliding"; pick.dispatchEvent({ type: "change" }); }
+  await settle(6);
+  const sliding = ed().arcs;
+  while (click("Undo", "la3d-tools")) await settle();
+  await closeEdit();
+  check("arcs: a door that swings shows its swing while editing; a sliding one none",
+    drawn === 1 && !!pick && hinged === before + 1 && sliding === before, { before, drawn, hinged, sliding, picked: !!pick });
+});
+await tryCase("keys: Delete deletes a door drawn here, Ctrl+Z and Ctrl+Y undo and redo, Escape lets go of a first tap; never while typing", async () => {
+  const key = (k, o = {}) => {
+    const ev = { type: "keydown", key: k, ctrlKey: !!o.ctrl, metaKey: false, shiftKey: !!o.shift, altKey: false, defaultPrevented: false,
+                 target: o.target || canvas(), preventDefault(){ this.defaultPrevented = true; } };
+    for (const fn of [...(winL.keydown || [])]) fn(ev);
+  };
+  await openEdit();
+  if (ed().tool) await pickTool(ed().tool);
+  await pickTool("door");
+  const n = () => Object.keys(ed().draft.openings).length, n0 = n();
+  drag(where("main", 4.55, 1, WALL_Z), where("main", 4.55, 2, WALL_Z));
+  await settle();
+  const drawn = n() - n0, picked = !!(ed().sel && ed().sel.opening);
+  key("Delete", { target: { tagName: "INPUT" } });                      // typing in a box: nothing
+  const kept = n() - n0;
+  key("Delete"); await settle();
+  const deleted = n() - n0;
+  key("z", { ctrl: true }); await settle();
+  const back = n() - n0;
+  key("z", { ctrl: true }); await settle();
+  const none = n() - n0;
+  key("y", { ctrl: true }); await settle();
+  const again = n() - n0;
+  tap(where("main", 0, 6.5, WALL_Z), { kind: "touch", id: 23 });
+  const pend = !!ed().pending;
+  key("Escape"); await settle();
+  const after = { pending: !!ed().pending, editing: ed().editing, failed: st().failed };
+  while (click("Undo", "la3d-tools")) await settle();
+  await closeEdit();
+  check("keys: Delete deletes a door drawn here, Ctrl+Z and Ctrl+Y undo and redo, Escape lets go of a first tap; never while typing",
+    drawn === 1 && picked && kept === 1 && deleted === 0 && back === 1 && none === 0 && again === 1 && pend && !after.pending && after.editing && !after.failed,
+    { drawn, picked, kept, deleted, back, none, again, pend, after });
+});
 console.log(JSON.stringify({ cases, failures, payloads, start: FILE0 }));

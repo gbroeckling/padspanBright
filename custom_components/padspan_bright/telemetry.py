@@ -78,7 +78,7 @@ import math
 import re
 import time
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -245,6 +245,12 @@ EVENTS: frozenset[str] = frozenset({
     # The Atlas emergency lighting test (emergency_test.py): a test started,
     # ended (the lights already on left on), or ended with Force off.
     "emergency_test_on", "emergency_test_off", "emergency_force_off",
+    # Bluetooth → Scanners → Find the one in your hand (0.38.132): started,
+    # something got louder, and Tag was pressed on one of those.
+    "hold_near_started", "hold_near_found", "hold_near_tagged",
+    # Walk-to-Identify (objects.js): "Who's here?" pressed, and Tag pressed on
+    # one of its candidates — the switch is on at a third of installs.
+    "wti_who", "wti_tag",
 })
 # The panel's views (panel.js _VIEW_PATHS — tests/test_telemetry.py asserts
 # equality) and the sub-tabs of the two views that have them.
@@ -327,10 +333,21 @@ UI_ERRORS: frozenset[str] = frozenset(
 TRIAL_SURFACES: tuple[str, ...] = ("overview", "atlas", "placement", "maps", "locate", "busy_times", "settings",
                                    "update_banner", "milestone", "sidebar")
 GETTING_STARTED_STEPS: tuple[str, ...] = ("upload", "scale", "rooms", "scanners", "calibrate", "positioned", "trial")
+# The free-Pro cards (views/pro_invite.js): an invite shown (once per page, on
+# Overview or in Settings → PadSpan licence), put off, claimed, refused by the
+# server, or declined; the one-time "test it, get Pro free" card shown, and
+# its "No thanks" / ✕ (free_pro_card_*: no word of testing or signing up
+# may enter the report, tests/test_tester.py). Whether anyone sees them, and
+# what they do. Never who.
+PRO_OFFER_EVENTS: frozenset[str] = frozenset(
+    {"pro_invite_shown:overview", "pro_invite_shown:settings", "pro_invite_later", "pro_invite_claimed",
+     "pro_invite_claim_failed", "pro_invite_declined", "free_pro_card_shown", "free_pro_card_no"}
+)
 OFFER_EVENTS: frozenset[str] = frozenset(
     {f"{what}:{s}" for what in ("trial_offer_shown", "trial_started", "trial_failed") for s in TRIAL_SURFACES}
     | {f"getting_started_step:{s}" for s in GETTING_STARTED_STEPS}
     | {"getting_started_shown", "getting_started_dismissed", "trial_nudge_dismissed"}
+    | PRO_OFFER_EVENTS
 )
 # Atlas outdoor weather (views/atlas_weather.js — the same three lists there,
 # held equal by tests/test_atlas_weather.py). Each counted once per page load
@@ -368,8 +385,10 @@ WEATHER_EVENTS: frozenset[str] = frozenset(
 # Nothing is sent while the feature is off (settings.atlas_3d_enabled) or the
 # tier is below Pro: the shared card draws no 3D at all then.
 HOUSE3D_FALLBACK_KINDS: tuple[str, ...] = ("no_webgl", "slow_gpu", "context_lost", "error")
+# house3d_wet_window: a window showed open while it rains or snows (Live
+# Aboard's alert, 0.38.127), once per page load.
 HOUSE3D_EVENTS: frozenset[str] = frozenset(
-    {"house3d_opened"} | {f"house3d_fallback:{k}" for k in HOUSE3D_FALLBACK_KINDS}
+    {"house3d_opened", "house3d_wet_window"} | {f"house3d_fallback:{k}" for k in HOUSE3D_FALLBACK_KINDS}
 )
 # Its photo step (ws_house3d_photo.py), counted by the server once per photo
 # sent: photo_read:ok, :no_ai_task (none chosen, gone, can't read pictures, or
@@ -391,7 +410,10 @@ CLIENT_FPS: tuple[str, ...] = ("lt10", "10_24", "24_45", "45up")
 CLIENT_HEAP: tuple[str, ...] = ("lt128m", "128_256m", "256_512m", "512m_1g", "1g_up")
 CLIENT_DEV: tuple[str, ...] = ("mem_lt1g", "mem_1g", "mem_2g", "mem_4g", "mem_8g_up", "mem_unknown",
                                "cores_1_2", "cores_3_4", "cores_5_8", "cores_9_up", "cores_unknown",
-                               "webgl2_yes", "webgl2_no", "touch_yes", "touch_no")
+                               "webgl2_yes", "webgl2_no", "touch_yes", "touch_no",
+                               # Do sensor states reach the panel with last_reported? (a steady
+                               # room's temperature stays fresh by it, 0.38.126)
+                               "lastrep_yes", "lastrep_no")
 CLIENT_EVENTS: frozenset[str] = frozenset(
     {f"client_fps:{v}:{b}" for v in CLIENT_VIEWS for b in CLIENT_FPS}
     | {f"client_heap:{v}:{b}" for v in CLIENT_VIEWS for b in CLIENT_HEAP}
@@ -487,10 +509,30 @@ PERF_METRICS: dict[str, tuple[str, tuple[str, ...]]] = {
     # Assistant's states and registries, the object list (history replay,
     # dedup), enrichment — and how many HA states there are. A third of the
     # installs reporting take 1.4-18 s per build, all with Bermuda installed.
-    "snap_ble_ms": ("snap_ble", ("p50",)),
-    "snap_ha_ms": ("snap_ha", ("p50",)),
-    "snap_objects_ms": ("snap_objects", ("p50",)),
-    "snap_enrich_ms": ("snap_enrich", ("p50",)),
+    "snap_ble_ms": ("snap_ble", ("p50", "p95")),
+    "snap_ha_ms": ("snap_ha", ("p50", "p95")),
+    "snap_objects_ms": ("snap_objects", ("p50", "p95")),
+    "snap_enrich_ms": ("snap_enrich", ("p50", "p95")),
+    # 0.38.133: "ha" was 90%+ of every slow build in the reports (13-16 s on
+    # two VMs with ~5k states, where 12k states elsewhere take 60 ms). Its CPU
+    # time (it never awaits) says whether that is PadSpan's own work or the
+    # process starved by other threads; its parts say which walk it is.
+    "snap_ha_cpu_ms": ("snap_ha_cpu", ("p50", "p95")),
+    "snap_ha_areas_ms": ("snap_ha_areas", ("p50", "p95")),
+    "snap_ha_tags_ms": ("snap_ha_tags", ("p50", "p95")),
+    "snap_ha_radios_ms": ("snap_ha_radios", ("p50", "p95")),
+    # How steady the house's own (identified) objects sit, per poll: how many,
+    # the share with no room, receivers hearing each in the last 30 s, and room
+    # changes per hour (all of them; per object = that over pos_objects_n).
+    # The first measure in the report of whether positioning is any good.
+    "pos_objects_n": ("pos_n", ("p50",)),
+    "pos_unknown_pc": ("pos_unk", ("p50", "p95")),
+    "pos_heard_n": ("pos_heard", ("p50",)),
+    "pos_room_changes": ("pos_chg", ("per_h",)),
+    # Occupancy estimates: Unknown phones counted, and confidence (0 low,
+    # 1 medium, 2 high) and estimates per hour — phones through a wall.
+    "occ_unknown_n": ("occ_unk", ("p50", "max")),
+    "occ_conf": ("occ_conf", ("p50", "per_h")),
     "ha_states_n": ("states", ("max",)),
     # Bermuda troubleshooting (perf_sampler.padspan_sizes): its entities and
     # receiver devices, HA entities taken as tag candidates, and saved tags
@@ -695,6 +737,42 @@ def _hw_payload(hass: HomeAssistant) -> dict[str, Any]:
     return hw
 
 
+# How Home Assistant keeps a placed temperature or humidity readout fresh.
+# The Atlas and Live Aboard show a reading only while it is under an hour old
+# (lights_map.js gatherLights: last_reported, else last_updated). HA moves
+# last_changed only when the number changes, last_updated also on an attribute
+# change, last_reported (2024.3+) on every report, so a steady room goes stale
+# by the first two while its sensor keeps reporting. Counted by each clock
+# (under an hour), how many states carry last_reported at all, and how old
+# the newest report is: whether 0.38.126's switch to last_reported holds in
+# real houses, and how often sensors report. Counts only.
+TEMP_AGES: tuple[str, ...] = ("lt5m", "5_15m", "15_60m", "1_6h", "6h_up")
+
+
+def _temp_fresh_note(st: Any, now: Any, tf: dict[str, Any]) -> None:
+    try:
+        float(st.state)
+    except (TypeError, ValueError, AttributeError):
+        return
+    try:
+        ages = {}
+        for key, attr in (("changed", "last_changed"), ("updated", "last_updated"), ("reported", "last_reported")):
+            t = getattr(st, attr, None)
+            ages[key] = (now - t).total_seconds() if isinstance(t, datetime) else None
+    except Exception:
+        return
+    tf["n"] += 1
+    for key, a in ages.items():
+        if a is not None and 0 <= a < 3600:
+            tf[key] += 1
+    if ages["reported"] is not None:
+        tf["has_lr"] += 1
+    a = ages["reported"] if ages["reported"] is not None else ages["updated"]
+    if a is not None:
+        b = "lt5m" if a < 300 else "5_15m" if a < 900 else "15_60m" if a < 3600 else "1_6h" if a < 21600 else "6h_up"
+        tf["age"][b] = tf["age"].get(b, 0) + 1
+
+
 def _history_days(hass: HomeAssistant) -> float | None:
     try:
         from .ws_common import _object_history_ttl_s  # noqa: PLC0415
@@ -845,7 +923,19 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         "ip_known": sum(1 for r in radios if r.get("ip")),
         "espresense": sum(1 for r in radios if str(r.get("source") or "").lower().startswith("espresense")),
     }
-    scanner_kinds["other"] = max(0, len(radios) - scanner_kinds["ip_known"] - scanner_kinds["espresense"])
+    scanner_kinds["tasmota"] = sum(1 for r in radios if not r.get("ip")
+                                   and str(r.get("source") or "").lower().startswith("tasmota_"))
+    scanner_kinds["other"] = max(0, len(radios) - scanner_kinds["ip_known"] - scanner_kinds["espresense"]
+                                 - scanner_kinds["tasmota"])
+    # Where each receiver's one name came from (ws_common.radio_display,
+    # 0.38.132): the user's HA name, HA's device name, the scanner's own, its
+    # area, or nothing but its source. Fixed words and counts, zeros left out.
+    from .ws_common import NAME_FROM  # noqa: PLC0415
+    scanner_names: dict[str, int] = {}
+    for r in radios:
+        k = r.get("name_from")
+        if k in NAME_FROM:
+            scanner_names[k] = scanner_names.get(k, 0) + 1
     scanner_state = {
         "lost": sum(1 for r in radios if r.get("lost")),
         "disabled": sum(1 for r in radios if r.get("disabled")),
@@ -1025,9 +1115,11 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
     _light_ids = list((fab.get("light_positions_m") or {}).keys())
     placed_by_domain = {
         "light": 0, "fan": 0, "lock": 0, "motion_sensor": 0, "door_sensor": 0,
-        "flood_sensor": 0, "temp_sensor": 0, "humidity_sensor": 0,
+        "flood_sensor": 0, "alarm_sensor": 0, "temp_sensor": 0, "humidity_sensor": 0,
         "air_quality_sensor": 0, "other": 0,
     }
+    _tf: dict[str, Any] = {"n": 0, "changed": 0, "updated": 0, "reported": 0, "has_lr": 0, "age": {}}
+    _tf_now = datetime.now(timezone.utc)
     for _eid in _light_ids:
         _eid = str(_eid)
         if _eid.startswith("light."):
@@ -1045,12 +1137,17 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
                 placed_by_domain["door_sensor"] += 1
             elif _dc == "moisture":
                 placed_by_domain["flood_sensor"] += 1
+            elif _dc in ("smoke", "gas", "carbon_monoxide"):
+                placed_by_domain["alarm_sensor"] += 1
             elif _dc == "humidity":
                 placed_by_domain["humidity_sensor"] += 1
+                _temp_fresh_note(_st, _tf_now, _tf)
             elif _dc in _AQ_DEVICE_CLASSES:
                 placed_by_domain["air_quality_sensor"] += 1
             elif _dc == "temperature" or (_eid.startswith("sensor.") and _dc is None):
                 placed_by_domain["temp_sensor"] += 1
+                if _st is not None:
+                    _temp_fresh_note(_st, _tf_now, _tf)
             else:
                 placed_by_domain["other"] += 1
         else:
@@ -1095,6 +1192,7 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
     env = {
         "scanners": len(radios),
         "scanner_kinds": scanner_kinds,
+        "scanner_names": scanner_names,
         "scanner_state": scanner_state,
         "scan_modes": scan_modes,
         "scan_modes_requested": scan_modes_requested,
@@ -1102,6 +1200,7 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         "rooms": rooms,
         "placed_lights": _len(fab.get("light_positions_m") or {}),
         "placed_by_domain": placed_by_domain,
+        "temp_fresh": _tf if _tf["n"] else None,
         "light_type_overrides_by_kind": type_overrides_by_kind,
         "walls": _len(fab.get("rf_barriers_m") or []),
         "maps": _len(maps.get("maps") or []),
@@ -1314,6 +1413,16 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
     # a day too full for all ten, fewer go, and the counts still do.
     while presets and len(json.dumps(payload)) > _MAX_BYTES:
         presets.pop()
+    # Then the rarest usage counters (fewest counts first), so a day with
+    # more kinds of event than fit still reports; how many went is said.
+    if len(json.dumps(payload)) > _MAX_BYTES and usage:
+        dropped = 0
+        for k in sorted(usage, key=lambda k: (usage[k], k)):
+            del usage[k]
+            dropped += 1
+            health["usage_dropped"] = dropped
+            if len(json.dumps(payload)) <= _MAX_BYTES:
+                break
     return payload
 
 

@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.124";
-const RELEASE_BUILD_ID = "20261013T183318Z";
+const APP_VERSION = "0.38.135";
+const RELEASE_BUILD_ID = "20261016T180716Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -1033,6 +1033,7 @@ class PadSpanHaApp extends HTMLElement {
     }
     const host = PRO_INVITE.inviteHostFromCtx(this._ctx());
     host.rerender = () => this._scheduleRender();
+    host.telemetry = (n) => this._telemetryEvent(n);
     return PRO_INVITE.inviteCard(host, {
       onLater: () => { PRO_INVITE.inviteLater(); v.hidden = true; this._scheduleRender(); },
       onDeclined: () => { v.hidden = true; },
@@ -1057,7 +1058,7 @@ class PadSpanHaApp extends HTMLElement {
         .catch(() => {});
     }
     const hide = () => { v.hidden = true; this._scheduleRender(); };
-    return PRO_INVITE.testerCard({ el, settings: st }, {
+    return PRO_INVITE.testerCard({ el, settings: st, telemetry: (n) => this._telemetryEvent(n) }, {
       onClose: hide,
       onNo: hide,
       onSignUp: () => { v.hidden = true; this._openTesterSignup(); },
@@ -1572,6 +1573,7 @@ class PadSpanHaApp extends HTMLElement {
         viewClass: () => (this.state.view === "maps" && this.state.mapsTab === "lights") ? "atlas" : "other",
         enabled: () => !!this.state.settings?.telemetry_enabled,
         send: (name) => this._telemetryEvent(name),
+        states: () => this._hass && this._hass.states,
       });
     }).catch(() => { this._clientPerfLoading = null; });
   }
@@ -2577,7 +2579,8 @@ class PadSpanHaApp extends HTMLElement {
           const s = String(source || "");
           const radios = (self.state.live?.snapshot?.ble?.radios) || [];
           const r = radios.find(r => String(r.source || "") === s);
-          return (r && r.name && r.name !== s) ? r.name : "";
+          const n = r && (r.display_name || r.name);
+          return (n && n !== s) ? n : "";
         },
         scannerStatus,
         roomColor: (n)=>roomColor(n, this.state.model),
@@ -3471,7 +3474,7 @@ class PadSpanHaApp extends HTMLElement {
       };
     }).sort((a,b) => (b.srcRssi ?? -999) - (a.srcRssi ?? -999));
 
-    const name = scanner.name || scanner.source || "Scanner";
+    const name = scanner.display_name || scanner.name || scanner.source || "Scanner";
     const sid  = radioShortId(scanner.source || "");
     const body = el("div", {style:"display:flex;flex-direction:column;gap:14px"});
 

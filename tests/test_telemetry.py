@@ -141,12 +141,12 @@ def test_nothing_from_the_house_is_in_the_report():
     for secret in _SECRETS:
         assert secret not in text, f"{secret!r} leaked into the report"
     # and it still says the useful things
-    assert payload["env"]["scanners"] == 2 and payload["env"]["scanner_kinds"] == {"ip_known": 1, "espresense": 0, "other": 1}
+    assert payload["env"]["scanners"] == 2 and payload["env"]["scanner_kinds"] == {"ip_known": 1, "espresense": 0, "tasmota": 0, "other": 1}
     assert payload["env"]["rooms"] == 3 and payload["env"]["floors"] == 2
     assert payload["env"]["placed_lights"] == 4 and payload["env"]["walls"] == 1 and payload["env"]["irks"] == 1
     assert payload["env"]["placed_by_domain"] == {
         "light": 1, "fan": 1, "lock": 0, "motion_sensor": 1, "door_sensor": 0,
-        "flood_sensor": 0, "temp_sensor": 1, "humidity_sensor": 0,
+        "flood_sensor": 0, "alarm_sensor": 0, "temp_sensor": 1, "humidity_sensor": 0,
         "air_quality_sensor": 0, "other": 0,
     }
     assert payload["env"]["light_type_overrides_by_kind"] == {"wled": 1}
@@ -229,7 +229,19 @@ def test_nothing_from_the_house_is_in_the_report():
     # Raised 4060 -> 4110 for health.cal_points_phantom_room_n, pinned_movers_n
     # and entity_dup_n (~73 bytes): whether 0.38.122's fixes #149, #147 and
     # #153 hold in houses the tests cannot see.
-    assert len(text) < 4110
+    # Raised 4110 -> 4140 for env.temp_fresh (~22 bytes as null here; ~150
+    # with readouts placed): Garry, 2026-10-15, "make sure opt in understands
+    # the HA temp behaviour" — whether a steady room's reading stays fresh by
+    # last_reported (0.38.126), and how often sensors report.
+    # Raised 4140 -> 4165 for placed_by_domain.alarm_sensor (~19 bytes): Garry,
+    # 2026-10-15, "Widen emergency": smoke, gas and CO alarms joined leaks in
+    # the Emergency class; counted apart from leaks so the report can tell
+    # whether anyone places them.
+    # Raised 4165 -> 4200 for env.scanner_kinds.tasmota and env.scanner_names
+    # (~35 bytes): Garry, 2026-10-16, "All" (more opt-in elements): Tasmota
+    # receivers counted apart, and where each receiver's one name comes from
+    # (0.38.132's one-name fix needed its field signal).
+    assert len(text) < 4200
 
 
 def test_presets_are_capped_at_ten_per_report():
@@ -1186,8 +1198,15 @@ def _busy_day(h, hours: float = 24.0):
         w.add("snap", rnd.uniform(900, 8200))
         w.add("cycle", rnd.uniform(40, 2400))
         w.add("loop", rnd.uniform(20, 2000))
-        for ph in ("snap_ble", "snap_ha", "snap_objects", "snap_enrich"):
+        for ph in ("snap_ble", "snap_ha", "snap_objects", "snap_enrich",
+                   "snap_ha_cpu", "snap_ha_areas", "snap_ha_tags", "snap_ha_radios"):
             w.add(ph, rnd.uniform(20, 18000))
+        w.add("pos_n", rnd.uniform(1, 60))
+        w.add("pos_unk", rnd.uniform(0, 100))
+        w.add("pos_heard", rnd.uniform(0, 12))
+        w.add("pos_chg", 1.0)
+        w.add("occ_unk", rnd.uniform(0, 9))
+        w.add("occ_conf", rnd.choice((0.0, 1.0, 2.0)))
     # PadSpan's own size on a busy street, and Home Assistant by view
     # (Garry, 2026-10-05: the low-memory version and its minimum requirements).
     for i in range(1440):
@@ -1252,7 +1271,10 @@ def test_a_full_load_section_is_small_and_every_word_is_on_the_list():
     # and only the phase split says where. 1850 -> 2000 for the Bermuda
     # counts beside it (its entities and devices, tag candidates, saved tags
     # that resolve to nothing).
-    assert section < 2000, section
+    # 2000 -> 2500 (Garry, 2026-10-16, "All"): p95 for the four phases, the
+    # "ha" phase's CPU time and its three parts (90%+ of every slow build),
+    # how steady identified objects sit, and the occupancy estimate.
+    assert section < 2500, section
     assert len(json.dumps(p)) <= T._MAX_BYTES
 
 
@@ -1503,3 +1525,41 @@ def test_padspan_entities_registered_twice_are_counted(monkeypatch):
     monkeypatch.setattr(er_mod, "async_get", lambda h: 1 / 0, raising=False)
     p = T.build_payload(_hass())
     assert "entity_dup_n" not in p["health"] and "pinned_movers_n" in p["health"]
+
+
+def test_temp_fresh_counts_each_ha_clock_and_the_newest_report():
+    """A steady room: its reading unchanged for two hours (last_changed and
+    last_updated old) while its sensor reported two minutes ago (last_reported,
+    HA 2024.3+). The report says so by each clock, and nothing identifying."""
+    from datetime import datetime, timedelta, timezone
+    h = _hass()
+    now = datetime.now(timezone.utc)
+    steady = SimpleNamespace(state="21.5", attributes={"device_class": "temperature"},
+                             last_changed=now - timedelta(hours=2), last_updated=now - timedelta(hours=2),
+                             last_reported=now - timedelta(minutes=2))
+    motion = SimpleNamespace(attributes={"device_class": "motion"})
+    h.states = SimpleNamespace(get=lambda eid, default=None: steady if eid == _TEMP else motion if eid == _MOTION else default)
+    payload = T.build_payload(h)
+    T.assert_shareable(payload)
+    assert payload["env"]["temp_fresh"] == {"n": 1, "changed": 0, "updated": 0, "reported": 1, "has_lr": 1, "age": {"lt5m": 1}}
+    # An older HA: no last_reported at all, so the panel's clock is last_updated.
+    del steady.last_reported
+    tf = T.build_payload(h)["env"]["temp_fresh"]
+    assert tf == {"n": 1, "changed": 0, "updated": 0, "reported": 0, "has_lr": 0, "age": {"1_6h": 1}}
+
+
+def test_a_day_with_too_many_kinds_of_event_still_reports():
+    """The cap refuses the whole report and a refused one keeps its counters,
+    so an over-full day would silence an install until HA restarts. After the
+    presets, the rarest usage counters go, and the report says how many."""
+    h = _hass()
+    _busy_day(h)
+    names = sorted(T.EVENTS | T.TAB_EVENTS | T.CLIENT_EVENTS)
+    for i, name in enumerate(names):
+        T.bump(h, name, 1 + i)
+    p = T.build_payload(h)
+    T.assert_shareable(p)                                    # fits, so it goes
+    dropped = p["health"].get("usage_dropped", 0)
+    assert dropped > 0 and len(p["usage"]) == len(names) - dropped
+    kept = min(p["usage"].values())
+    assert all(v >= kept for v in p["usage"].values()) and p["usage"][names[-1]] == len(names)

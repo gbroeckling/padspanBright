@@ -74,6 +74,7 @@ const CSS = `
 .la3d-editseg button[aria-pressed="true"]{background:rgba(245,176,65,.28)!important;color:#fff7e6!important}
 .la3d-tools{position:absolute;left:72px;right:10px;top:10px;z-index:4;display:none;flex-wrap:wrap;gap:6px;align-items:center;pointer-events:none}
 .la3d-tools.on{display:flex}
+.la3d:has(.la3d-tools.on) .la3d-tip,.la3d:has(.la3d-tools.on) .la3d-mchip,.la3d:has(.la3d-tools.on) .la3d-wet{visibility:hidden;opacity:0}
 .la3d-tools > *{pointer-events:auto}
 .la3d .la3d-tools button:disabled{opacity:.38;cursor:default}
 .la3d-tools .la3d-save{color:#06210f!important;background:#52b788!important;font-weight:700}
@@ -97,6 +98,7 @@ const CSS = `
   background:#0b1410;color:#e8f0ea;border:1px solid rgba(120,190,155,.35)}
 .la3d-sheet .la3d-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .la3d-sheet .lv-zoomseg{box-shadow:none}
+.la3d-sheet .la3d-row > .lv-zoomseg{grid-column:2 / span 2;justify-self:start;max-width:100%;flex-wrap:wrap}
 .la3d-sheet button.la3d-x{all:unset;cursor:pointer;padding:0 4px;font-size:16px;color:rgba(226,240,232,.6)}
 .la3d-sheet .la3d-del{color:#fca5a5!important}
 .la3d-ask{position:absolute;inset:0;z-index:7;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.46)}
@@ -111,7 +113,16 @@ const CSS = `
 .la3d-dot{position:absolute;z-index:3;display:none;box-sizing:border-box;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;
   border:2px solid #fff;background:#3b82f6;box-shadow:0 0 0 3px rgba(0,0,0,.35);pointer-events:none}
 .la3d-dot.stop{background:#ef4444}
-.la3d-dot.ring{background:transparent;border:3px solid #fbbf24;width:34px;height:34px;margin:-17px 0 0 -17px}`;
+.la3d-dot.ring{background:transparent;border:3px solid #fbbf24;width:34px;height:34px;margin:-17px 0 0 -17px}
+.la3d-hline{position:absolute;z-index:3;display:none;width:0;border-left:2px dashed #fbbf24;transform-origin:0 0;pointer-events:none;
+  filter:drop-shadow(0 0 2px rgba(0,0,0,.7))}
+.la3d-hfoot{position:absolute;z-index:3;display:none;box-sizing:border-box;width:18px;height:9px;margin:-4.5px 0 0 -9px;border-radius:50%;
+  border:2px solid #fbbf24;box-shadow:0 0 0 2px rgba(0,0,0,.3);pointer-events:none}
+.la3d-sheet .la3d-spots{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0 2px}
+.la3d-sheet .la3d-spots button{all:unset;cursor:pointer;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:600;
+  color:rgba(226,240,232,.8);background:rgba(255,255,255,.04);border:1px solid rgba(120,190,155,.28)}
+.la3d-sheet .la3d-spots button:hover{border-color:rgba(120,190,155,.6);color:#fff}
+.la3d-sheet .la3d-spots button[aria-pressed=true]{color:#1a1205;background:#fbbf24;border-color:#fbbf24}`;
 
 /**
  * ctx = {
@@ -200,7 +211,34 @@ export function createEditor(ctx){
   const lenEl = d("div", "la3d-len");
   const ends = [d("div", "la3d-dot"), d("div", "la3d-dot")];
   const ring = d("div", "la3d-dot ring");
-  root.append(lenEl, ends[0], ends[1], ring);
+  // Heights: a dashed line from the picked device down to its spot on its
+  // floor, its height on it, so how high it is reads in the house itself.
+  const hLine = d("div", "la3d-hline"), hFoot = d("div", "la3d-hfoot"), hLab = d("div", "la3d-len");
+  root.append(lenEl, ends[0], ends[1], hLine, hFoot, ring, hLab);
+  // The keyboard, while editing: Ctrl/⌘+Z undo, Ctrl+Y or Ctrl+Shift+Z redo,
+  // Escape lets go (a half-drawn line's first tap, else what is picked), and
+  // Delete or Backspace deletes a door or window drawn here, each exactly as
+  // its button does. Never while typing in a box, or while Edit asks.
+  const typing = (e) => { const t = e.target, tag = t && t.tagName; return !!(t && (t.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT")); };
+  const onKey = guard((e) => {
+    if (!editing || saving || e.defaultPrevented || askEl.classList.contains("on") || typing(e)) return;
+    const k = e.key, mod = e.ctrlKey || e.metaKey;
+    if (mod && !e.altKey && (k === "z" || k === "Z")) { e.preventDefault(); (e.shiftKey ? bRedo : bUndo).click(); return; }
+    if (mod && !e.altKey && (k === "y" || k === "Y")) { e.preventDefault(); bRedo.click(); return; }
+    if (mod || e.altKey) return;
+    if (k === "Escape") {
+      if (pending) { e.preventDefault(); pending = null; hint(["door", "window", "doorway"].includes(tool) ? "Press on a wall and drag along it, or tap its two ends." : DRAW_HINT); paint(); }
+      else if (sel) { e.preventDefault(); select(null); }
+      return;
+    }
+    if ((k === "Delete" || k === "Backspace") && sel && sel.opening && sel.opening.added && tool !== "furnish" && tool !== "strip") {
+      const del = sheet.querySelector(".la3d-del");
+      if (del) { e.preventDefault(); del.click(); }
+    }
+  });
+  // Listened to only while editing: nothing listens at rest.
+  let keysOn = false;
+  const keys = (on) => { if (on === keysOn) return; keysOn = on; window[on ? "addEventListener" : "removeEventListener"]("keydown", onKey); };
   // Furniture (P2 Furnish, live_aboard_furnish.js): a tool of its own on this
   // same draft, so one Save writes doors, windows, heights and furniture.
   const FUR_HINT = "Build adds a piece. Drag a piece to move it; tap it to change it.";
@@ -218,7 +256,7 @@ export function createEditor(ctx){
   const strip = bStrip ? ctx.STRIP.createStrip({
     THREE, HOUSE, RUNS: ctx.RUNS, root, guard, sheet, layer: ctx.layer,
     draft: () => draft, active: () => active() && tool === "strip",
-    change: (fn, group) => change(fn, group), redraw: () => redrawSoon(), render: () => ctx.render(), hint: (text, bad) => hint(text, bad),
+    change: (fn, group) => change(fn, group), redraw: () => redrawSoon(), render: () => ctx.render(), hint: (text, bad) => hint(text, bad), hintText: () => hintMsg,
     floors: () => ctx.floors(), lights: () => (ctx.lights ? ctx.lights() : []), pick: (x, y) => ctx.pick(x, y),
     device: (eid) => ctx.device(eid), camera: () => ctx.camera(), scene: () => ctx.scene(), rect: () => viewRect(), shellGen: () => ctx.shellGen(),
   }) : null;
@@ -252,6 +290,7 @@ export function createEditor(ctx){
   }
   // Every door on the floors showing, hinge and swing drawn on its floor as
   // a quarter circle: what a tap on it changes.
+  const SWINGING = new Set(["hinged", "double", "gate"]);
   function syncArcs(){
     arcsGen = ctx.shellGen();
     clearArcs();
@@ -260,6 +299,10 @@ export function createEditor(ctx){
       for (const P of F.pieces) {
         const pc = P.pc, len = Math.hypot(pc.x1 - pc.x0, pc.y1 - pc.y0);
         if (pc.kind !== "door" || len > 1.8 || len < 0.3) continue;
+        // Only a door that swings has a swing: a sliding, pocket, barn,
+        // bifold or overhead door (or a gate set to slide) drew one anyway.
+        const t = ctx.STOREY && typeof ctx.STOREY.doorTypeOf === "function" ? ctx.STOREY.doorTypeOf(pc, F.rooms) : null;
+        if (t && (!SWINGING.has(t.type) || (t.type === "gate" && t.slide))) continue;   // slide defaults to "right" on every type but a gate
         const sw = HOUSE.openingSwing(pc, F.rooms, pc.override || null);
         const hb = sw.hinge === "b", hx = hb ? pc.x1 : pc.x0, hy = hb ? pc.y1 : pc.y0;
         const ux = ((hb ? pc.x0 : pc.x1) - hx) / len, uy = ((hb ? pc.y0 : pc.y1) - hy) / len;
@@ -568,6 +611,7 @@ export function createEditor(ctx){
     }
     draft = DRAFT.createDraft(f);
     editing = true; tool = t === "furnish" && fur ? "furnish" : null; sel = null; gesture = null; pending = null;
+    keys(true);
     ctx.clearUse();
     hint(tool === "furnish" ? FUR_HINT : DRAW_HINT);
     syncArcs();
@@ -577,6 +621,7 @@ export function createEditor(ctx){
   }
   function stop(){
     editing = false; draft = null; tool = null; sel = null; gesture = null; pending = null; askGo = null; afterSave = null;
+    keys(false);
     clearArcs();
     line.visible = false;
     canvas.style.cursor = "";
@@ -880,10 +925,23 @@ export function createEditor(ctx){
     }
     head(info.label, `Height above its floor, 0 to ${DRAFT.metres(top)}. Default ${DRAFT.metres(info.zDefault)}.`);
     if (light) kindPicker(eid, info);
-    slider("Height", 0, top, setZ(cur) ? cur.z_m : info.z, (v, g) => {
-      // A light keeps what it is (its kind) as its height changes.
-      change((c) => { c[info.section][eid] = { ...(light ? c.lights[eid] : null), z_m: DRAFT.clampHeight(v, ceil, info.section) }; }, g);
+    const zNow = setZ(cur) ? cur.z_m : info.z;
+    // A light keeps what it is (its kind) as its height changes.
+    const setTo = (v, g) => change((c) => { c[info.section][eid] = { ...(light ? c.lights[eid] : null), z_m: DRAFT.clampHeight(v, ceil, info.section) }; }, g);
+    slider("Height", 0, top, zNow, (v, g) => {
+      setTo(v, g);
     }, { eid });
+    // Where its kind usually goes (Mapping's Height row offers the same), one tap each.
+    const spots = info.l && ctx.spotsOf ? ctx.spotsOf(info.l, info.kind || info.guess || null, top) : [];
+    if (spots.length) {
+      const row = d("div", "la3d-spots");
+      for (const [, label, z] of spots) {
+        const b = btn(`${label} ${DRAFT.metres(z)}`, `${label}: ${DRAFT.metres(z)} up`, () => { setTo(z); sheetFor(); });
+        b.setAttribute("aria-pressed", String(Math.abs(zNow - z) < 0.005));
+        row.appendChild(b);
+      }
+      sheet.appendChild(row);
+    }
     const acts = d("div", "la3d-acts");
     const reset = btn("Reset to default", "Back to the height its type gives it", () => {
       change((c) => {
@@ -1000,7 +1058,20 @@ export function createEditor(ctx){
       } else put(lenEl, null);
     } else put(lenEl, null);
     const dev = on && sel && sel.eid ? ctx.device(sel.eid) : null;
-    put(ring, dev && dev.at ? screenAt(dev.F, dev.at.x, dev.at.z, dev.at.y - dev.F.fl.elev) : null);
+    const devAt = dev && dev.at ? screenAt(dev.F, dev.at.x, dev.at.z, dev.at.y - dev.F.fl.elev) : null;
+    put(ring, devAt);
+    const up = dev && dev.at ? dev.at.y - dev.F.fl.elev : 0;
+    const foot = devAt && up > 0.05 ? screenAt(dev.F, dev.at.x, dev.at.z, 0) : null;
+    if (foot) {
+      const a = off(devAt), b = off(foot), dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
+      // Down from the ring's edge to the floor, turned to wherever the floor spot is on screen.
+      hLine.style.display = L > 20 ? "block" : "none";
+      hLine.style.left = `${a[0]}px`; hLine.style.top = `${a[1]}px`; hLine.style.height = `${L}px`;
+      hLine.style.transform = `rotate(${Math.atan2(-dx, dy)}rad)`;
+      put(hFoot, foot);
+      hLab.textContent = DRAFT.metres(up);
+      put(hLab, L > 50 ? [(devAt[0] + foot[0]) / 2 + 30, (devAt[1] + foot[1]) / 2] : null);
+    } else { hLine.style.display = "none"; put(hFoot, null); put(hLab, null); }
     placeSheet();
   }
 
@@ -1067,12 +1138,12 @@ export function createEditor(ctx){
     if (t === null) return;
     if (g.kind === "line") {
       g.to = t;
-      g.span = DRAFT.spanOf(g.w.run, g.w.stops, g.w.ops, g.from, t);
+      g.span = DRAFT.spanOf(g.w.run, g.w.stops, g.w.ops, g.from, t, null, DRAFT.SNAP_M);
     } else {
       // An end never passes its other end: back past it is no width at all.
       const dir = Math.sign(g.startT - g.fixedT) || 1;
       const to = (t - g.fixedT) * dir < 0 ? g.fixedT : t;
-      g.span = DRAFT.spanOf(g.w.run, g.w.stops, g.w.ops, g.fixedT, to, g.id);
+      g.span = DRAFT.spanOf(g.w.run, g.w.stops, g.w.ops, g.fixedT, to, g.id, DRAFT.SNAP_M);
     }
     paint3d();
   }
@@ -1104,7 +1175,7 @@ export function createEditor(ctx){
     const same = pending && pending.F.fl.id === w.F.fl.id && Math.abs(pending.run.ux * w.run.ux + pending.run.uy * w.run.uy) > 0.999
       && Math.abs(pending.run.c - w.run.c) < 0.02;
     if (same) {
-      const sp = DRAFT.spanOf(w.run, w.stops, w.ops, DRAFT.tOn(w.run, ...DRAFT.pointOf(pending.run, pending.t)), w.t);
+      const sp = DRAFT.spanOf(w.run, w.stops, w.ops, DRAFT.tOn(w.run, ...DRAFT.pointOf(pending.run, pending.t)), w.t, null, DRAFT.SNAP_M);
       pending = null;
       addOpening(w, sp);
       return;
@@ -1234,6 +1305,7 @@ export function createEditor(ctx){
     /** A plan point on floor fid at height z, in client px (the harness presses it). */
     whereOf(fid, x, y, z = 1){ const F = ctx.floors().find(q => q.fl.id === fid); return F ? screenAt(F, x, y, z) : null; },
     dispose(){
+      keys(false);
       if (fur) fur.dispose();
       if (strip) strip.dispose();
       clearArcs();
