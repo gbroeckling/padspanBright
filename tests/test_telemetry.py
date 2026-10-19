@@ -241,7 +241,9 @@ def test_nothing_from_the_house_is_in_the_report():
     # (~35 bytes): Garry, 2026-10-16, "All" (more opt-in elements): Tasmota
     # receivers counted apart, and where each receiver's one name comes from
     # (0.38.132's one-name fix needed its field signal).
-    assert len(text) < 4200
+    # Raised 4200 -> 4230 for features.overview_atlas (~25 bytes): Garry,
+    # 2026-10-17, a Pro option to show the Atlas as Overview.
+    assert len(text) < 4230
 
 
 def test_presets_are_capped_at_ten_per_report():
@@ -1201,6 +1203,9 @@ def _busy_day(h, hours: float = 24.0):
         for ph in ("snap_ble", "snap_ha", "snap_objects", "snap_enrich",
                    "snap_ha_cpu", "snap_ha_areas", "snap_ha_tags", "snap_ha_radios"):
             w.add(ph, rnd.uniform(20, 18000))
+        w.add("floor_drop", rnd.uniform(0, 400))
+        for m in ("ha_devices", "ha_entities", "dev_dup"):
+            w.add(m, rnd.uniform(0, 40000))
         w.add("pos_n", rnd.uniform(1, 60))
         w.add("pos_unk", rnd.uniform(0, 100))
         w.add("pos_heard", rnd.uniform(0, 12))
@@ -1274,7 +1279,10 @@ def test_a_full_load_section_is_small_and_every_word_is_on_the_list():
     # 2000 -> 2500 (Garry, 2026-10-16, "All"): p95 for the four phases, the
     # "ha" phase's CPU time and its three parts (90%+ of every slow build),
     # how steady identified objects sit, and the occupancy estimate.
-    assert section < 2500, section
+    # 2500 -> 2600 (0.38.136): HA's device and entity registry sizes and the
+    # most same-named devices, beside the "ha" phase they may explain.
+    # 2600 -> 2650 (0.38.139): readings the per-receiver minimum signal kept out.
+    assert section < 2650, section
     assert len(json.dumps(p)) <= T._MAX_BYTES
 
 
@@ -1563,3 +1571,20 @@ def test_a_day_with_too_many_kinds_of_event_still_reports():
     assert dropped > 0 and len(p["usage"]) == len(names) - dropped
     kept = min(p["usage"].values())
     assert all(v >= kept for v in p["usage"].values()) and p["usage"][names[-1]] == len(names)
+
+
+def test_the_move_out_of_www_is_reported_only_when_it_did_something():
+    """0.38.143 moves floor plans out of the public www/ folder at startup.
+    The report says how many moved and how many were left (a name already in
+    the new folder), and only when one of them is not zero."""
+    h = _hass()
+    assert "maps_www" not in T.build_payload(h)["env"]
+    ms = h.data[DOMAIN][DATA_MAPS]
+    ms.legacy_moved, ms.legacy_left = 3, 1
+    payload = T.build_payload(h)
+    T.assert_shareable(payload)
+    assert payload["env"]["maps_www"] == {"moved": 3, "left": 1}
+
+
+def test_a_stale_floor_plan_link_is_a_known_event():
+    assert T.event_allowed("map_image_stale")

@@ -424,6 +424,7 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("overview_iso_zoom"): vol.Coerce(float),
         vol.Optional("lights_hidden"): list,
         vol.Optional("atlas_emergency_button"): bool,
+        vol.Optional("overview_atlas"): bool,
         vol.Optional("emergency_entities"): list,             # emergency_test.py — [] = find them
         vol.Optional("atlas_weather_enabled"): bool,
         vol.Optional("atlas_weather_rain_entity"): vol.Any(str, None),
@@ -497,6 +498,7 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("object_history_days"): vol.Coerce(int),
         vol.Optional("scanner_offsets"): dict,
         vol.Optional("excluded_scanners"): list,
+        vol.Optional("scanner_min_rssi"): vol.Any(dict, None),
         vol.Optional("excluded_objects"): list,
         vol.Optional("ingest_rules"): list,
         vol.Optional("overview_2d_mode"): bool,
@@ -794,6 +796,11 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                 [r for r in raw if isinstance(r, dict) and isinstance(r.get("match"), dict)]
                 if isinstance(raw, list) else []
             )
+        if "scanner_min_rssi" in msg:
+            # Opt-in per-receiver minimum signal; anything not a source with a
+            # whole dBm in range is dropped (an empty dict turns every floor off).
+            from .presence_rules import clean_floors  # noqa: PLC0415
+            payload["scanner_min_rssi"] = clean_floors(msg["scanner_min_rssi"])
         if "excluded_scanners" in msg:
             raw = msg["excluded_scanners"]
             payload["excluded_scanners"] = (
@@ -930,7 +937,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     "ha_entity_distance_enabled", "ha_entity_scanner_distance_enabled",
                     "mqtt_publish_enabled", "espresense_mqtt_enabled", "tasmota_ble_enabled", "aggressive_ble_reseed",
                     "ha_entity_occupancy_enabled",
-                    "lights_panel_enabled", "atlas_emergency_button", "bermuda_ignore", "bright_reveal_presence",
+                    "overview_atlas", "lights_panel_enabled", "atlas_emergency_button", "bermuda_ignore", "bright_reveal_presence",
                     "atlas_weather_enabled",
                     "atlas_3d_enabled", "atlas_3d_people", "atlas_3d_tags", "atlas_3d_library",
                     "atlas_3d_weather", "atlas_3d_showcase",

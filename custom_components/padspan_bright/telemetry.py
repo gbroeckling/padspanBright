@@ -127,6 +127,10 @@ EVENTS: frozenset[str] = frozenset({
     "calibration_point_added", "capture_started", "forensics_query",
     "showcase_on", "backup_created", "backup_restored", "factory_reset",
     "bright_import",
+    # A floor-plan image asked for with a link that no longer works (expired,
+    # or signed before a restart): the panel renews its links every 10
+    # minutes and on reconnect, so this should stay near zero (map_image_view.py).
+    "map_image_stale",
     # A map's placement committed from the align editor, and one the writer
     # refused because it would have stranded the calibration pins. Both halves
     # matter: a refusal nobody ever hits is a guard nobody needs, and a
@@ -251,6 +255,13 @@ EVENTS: frozenset[str] = frozenset({
     # Walk-to-Identify (objects.js): "Who's here?" pressed, and Tag pressed on
     # one of its candidates — the switch is on at a third of installs.
     "wti_who", "wti_tag",
+    # Pure Live's switch while the Atlas is Overview (0.38.137): which side people pick.
+    "live_switch_classic", "live_switch_purelive",
+    # The Live Aboard setup wizard (views/aboard_wizard.js): opened, and
+    # finished (its last step's "open Live Aboard").
+    "wizard_la_opened", "wizard_la_finished",
+    # Settings → Suggest an idea: which way people take (0.38.140).
+    "suggest_idea_posted", "suggest_idea_browsed", "suggest_idea_mail",
 })
 # The panel's views (panel.js _VIEW_PATHS — tests/test_telemetry.py asserts
 # equality) and the sub-tabs of the two views that have them.
@@ -313,6 +324,7 @@ UI_ERROR_HELPERS: frozenset[str] = frozenset({
     "wall_geom", "whatif_placement", "wled_advanced", "wled_model", "wled_tab_backup",
     "wled_tab_leds", "wled_tab_look", "wled_tab_presets", "wled_tab_settings",
     "wled_tab_sync", "wled_ui", "trial_offer", "release_notes", "pro_invite",
+    "aboard_wizard",                                # the Live Aboard setup wizard (Settings, Mapping → Atlas)
 })
 UI_ERROR_SHELLS: frozenset[str] = frozenset({"panel", "atlas_panel", "lib", "other"})
 UI_ERRORS: frozenset[str] = frozenset(
@@ -349,7 +361,7 @@ OFFER_EVENTS: frozenset[str] = frozenset(
     | {"getting_started_shown", "getting_started_dismissed", "trial_nudge_dismissed"}
     | PRO_OFFER_EVENTS
 )
-# Atlas outdoor weather (views/atlas_weather.js — the same three lists there,
+# Atlas outdoor weather (views/atlas_weather.js — the same four lists there,
 # held equal by tests/test_atlas_weather.py). Each counted once per page load
 # per name, so a count is "pages that saw it", not "renders":
 #   weather_error:<kind>     the overlay caught its own failure and drew no
@@ -363,6 +375,10 @@ OFFER_EVENTS: frozenset[str] = frozenset(
 #                            (no sensor and no weather entity), and which
 #                            warning integration made it heavy — whether the
 #                            fallbacks work outside Canada.
+#   weather_note:<kind>      what the decision set aside on purpose (0.38.142):
+#                            sensor_overruled — a wet rain sensor under a
+#                            clear sky (dew or frost, not rain); warning_ignored
+#                            — the chosen warning entity is a leak detector.
 # Words only: never an entity id, never alert text.
 WEATHER_WARNING_PLATFORMS: tuple[str, ...] = ("env_canada", "meteoalarm", "dwd_weather_warnings", "nina",
                                               "meteo_france", "weatheralerts", "nws_alerts")
@@ -370,10 +386,12 @@ WEATHER_ERROR_KINDS: tuple[str, ...] = ("mask_build", "mask_unsupported", "tiles
 WEATHER_SHOWN_STATES: tuple[str, ...] = ("light_rain", "heavy_rain", "light_snow", "heavy_snow", "still")
 WEATHER_SOURCES: tuple[str, ...] = ("rain_sensor", "condition", "none",
                                     *(f"warning:{p}" for p in WEATHER_WARNING_PLATFORMS), "warning:other")
+WEATHER_NOTE_KINDS: tuple[str, ...] = ("sensor_overruled", "warning_ignored")
 WEATHER_EVENTS: frozenset[str] = frozenset(
     {f"weather_error:{k}" for k in WEATHER_ERROR_KINDS}
     | {f"weather_shown:{k}" for k in WEATHER_SHOWN_STATES}
     | {f"weather_source:{k}" for k in WEATHER_SOURCES}
+    | {f"weather_note:{k}" for k in WEATHER_NOTE_KINDS}
 )
 # Live Aboard, the 3D house (views/live_aboard_house.js — the same lists
 # there, held equal by tests/test_live_aboard_house.py). Each counted once per
@@ -441,6 +459,8 @@ _FEATURE_FLAGS: tuple[str, ...] = (
     "tags_room_events_enabled", "tags_nfc_identify_enabled", "tags_phone_autolink_enabled",
     "update_check_enabled", "onboarding_completed",
     "atlas_3d_enabled", "low_memory_mode",
+    # Pro: the Atlas as Overview (0.38.137) — whether anyone wants it as the front door.
+    "overview_atlas",
 )
 # Small enumerations reported by value (each from a fixed vocabulary in
 # ws_settings; anything unexpected is dropped by assert_shareable's length rule).
@@ -521,6 +541,15 @@ PERF_METRICS: dict[str, tuple[str, tuple[str, ...]]] = {
     "snap_ha_areas_ms": ("snap_ha_areas", ("p50", "p95")),
     "snap_ha_tags_ms": ("snap_ha_tags", ("p50", "p95")),
     "snap_ha_radios_ms": ("snap_ha_radios", ("p50", "p95")),
+    # HA's registries (devices, entity rows) and the most devices sharing one
+    # name: the receiver match was quadratic in that (4,000 → 1.5 s a build,
+    # fixed 0.38.136); whether that shape is what slows the "ha" phase.
+    "ha_devices_n": ("ha_devices", ("max",)),
+    "ha_entities_n": ("ha_entities", ("max",)),
+    "dev_same_name_max": ("dev_dup", ("max",)),
+    # Per-receiver minimum signal (opt-in, 0.38.139): readings each poll kept
+    # out of positioning, while any receiver has a floor set.
+    "floor_dropped_n": ("floor_drop", ("p50", "max")),
     # How steady the house's own (identified) objects sit, per poll: how many,
     # the share with no room, receivers hearing each in the last 30 s, and room
     # changes per hour (all of them; per object = that over pos_objects_n).
@@ -899,6 +928,9 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
     rooms = sum(_len(f.get("rooms") or {}) for f in floors.values() if isinstance(f, dict))
     mdl = getattr(dom.get(DATA_MODEL), "data", None) or {}
     maps = getattr(dom.get(DATA_MAPS), "data", None) or {}
+    _mw_moved, _mw_left = (
+        n if isinstance(n, int) else 0
+        for n in (getattr(dom.get(DATA_MAPS), "legacy_moved", 0), getattr(dom.get(DATA_MAPS), "legacy_left", 0)))
     snap_entry = dom.get("snapshot_cache")
     snap = snap_entry[1] if isinstance(snap_entry, tuple) and len(snap_entry) == 2 and isinstance(snap_entry[1], dict) else {}
     ble = snap.get("ble") if isinstance(snap.get("ble"), dict) else {}
@@ -1193,6 +1225,8 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         "scanners": len(radios),
         "scanner_kinds": scanner_kinds,
         "scanner_names": scanner_names,
+        # Receivers with a minimum signal set (opt-in; a count, never which).
+        "scanner_floors": len(settings.get("scanner_min_rssi") or {}) if isinstance(settings.get("scanner_min_rssi"), dict) else 0,
         "scanner_state": scanner_state,
         "scan_modes": scan_modes,
         "scan_modes_requested": scan_modes_requested,
@@ -1204,6 +1238,10 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         "light_type_overrides_by_kind": type_overrides_by_kind,
         "walls": _len(fab.get("rf_barriers_m") or []),
         "maps": _len(maps.get("maps") or []),
+        # This start's move of floor plans out of the public www/ folder
+        # (0.38.143): images moved, and any left because a file of the same
+        # name was already in the new folder. Only when one is not zero.
+        **({"maps_www": {"moved": _mw_moved, "left": _mw_left}} if (_mw_moved or _mw_left) else {}),
         "scanner_positions": _len(fab.get("scanner_positions_m") or {}),
         "beacon_positions": _len(fab.get("beacon_positions_m") or {}),
         "calibration_points": _len(cal_points),

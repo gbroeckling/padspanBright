@@ -8,11 +8,13 @@
 // decideAtlasWeather and holdVisual, never a copy of the rules); this file
 // only draws it in the 3D house: falling OUTSIDE the walls, around the house
 // and onto decks and patios, never inside an indoor room and never under a
-// roof. Light rain is a sparse, slow, near-vertical drizzle; heavy rain a
-// denser, faster sheet on a 17° wind with splashes on the ground; light snow
-// slow flakes swaying gently; heavy snow denser, and on a snowfall warning a
-// white layer builds over ~8 s on the roof line, the decks and the ground
-// hugging the house.
+// roof, and never drawn over the house on screen, not even a drop that falls
+// outside it in front of a sofa or a wall (as the flat Atlas keeps its rain
+// off the floors). Light rain is a sparse, slow, near-vertical drizzle;
+// heavy rain a denser, faster sheet on a 17° wind with splashes on the
+// ground; light snow slow flakes swaying gently; heavy snow denser, and on a
+// snowfall warning a white layer builds over ~8 s on the roof line, the
+// decks and the ground hugging the house.
 //
 // Everything that moves is moved by the GPU: each layer is one draw whose
 // material holds the time, and every drop, flake and splash works out where
@@ -40,6 +42,7 @@ const REF_PX = 1600 * 900, MIN_SHARE = 0.25;
 const WRAP_S = 3600;                 // the shader's clock wraps hourly (float precision on a wall PC up for days)
 const STILL_S = 7.3;                 // the moment a still picture shows
 const CAP_H = 0.06, SETTLE_OP = 0.85, APRON_OP = 0.6, APRON_PAD = 2.4, APRON_BLUR = 1.2;
+const DOWN_H = 2;                    // m: every wall down, what still stands in a room (people, a wardrobe) is under it
 const SNOW_SHADE = 0.86;             // settled snow: the weather's colour a little greyer, never a glare
 
 /** The layers. rain: speed m/s, len the streak (m), width (CSS px), op the
@@ -116,8 +119,9 @@ function nearPoly(x, y, R, g){
  *            plates): what falls there lands on them, the highest first
  *   patches  a round patch round the house, its edge fading out, and a
  *            patch of its own for any deck or yard beyond it
- *   tops     the indoor rooms' floors that show, at their height: what
- *            falls is never drawn over one (the view's stencil)
+ *   tops     the indoor rooms on the floors that show, each from its floor
+ *            (y) to its ceiling (y + h): what falls is never drawn over one
+ *            (the view's stencil)
  *   top      where it starts falling: above the highest floor that shows
  *  null when there is no house to rain round. */
 export function weatherArea(h){
@@ -133,7 +137,7 @@ export function weatherArea(h){
     if (!shown(r.floor)) continue;
     const elev = Number(r.floor.elev) || 0;
     if (r.outdoor) decks.push({ pts: r.pts, bb, y: elev });
-    else tops.push({ pts: r.pts, y: elev });
+    else tops.push({ pts: r.pts, y: elev, h: Number(r.floor.h) || 2.8 });
     top = Math.max(top, elev + (r.outdoor ? 1 : (Number(r.floor.h) || 2.8)));
   }
   if (!box) for (const d of decks) box = grow(box, d.bb);       // a garden alone still gets its weather
@@ -320,8 +324,9 @@ function reducedMotion(){
   catch (_) { return false; }
 }
 
-/** The weather in one 3D view. host = {scene, renderer, camera}: the view's
- *  own. update() at each poll, tick(t) on each frame the view draws,
+/** The weather in one 3D view. host = {scene, renderer, camera, shell?}:
+ *  the view's own; shell() → {roof, down}: the roof showing and closing the
+ *  house (not over floors pulled apart), every wall down. update() at each poll, tick(t) on each frame the view draws,
  *  frameMs() for its live clock, dispose() when it goes. Never throws: a
  *  failure is counted (the flat Atlas's closed words) and the view simply
  *  has no weather until it is built again. */
@@ -486,31 +491,68 @@ export function createWeather(THREE, host){
     mesh.renderOrder = 3;
     return mesh;
   }
-  // The rooms' floors, marked on the screen and nothing else (no colour, no
-  // depth): what falls is drawn only where none shows, as the flat Atlas's
-  // rain never crosses a floor plate. Drawn after the house, before the
-  // weather; a drop in front of a room, seen from above, is not drawn.
+  // The house as it stands, marked on the screen and nothing else (no
+  // colour, no depth): every indoor room on a floor that shows, its floor,
+  // its ceiling and its walls between them. What falls is drawn only where
+  // none of it is, as the flat Atlas's rain never crosses a floor plate.
+  // Marked whatever stands in front of a floor: marking only the floor that
+  // showed let a drop falling outside, in front of the house, be drawn over
+  // a sofa or a wall, rain on the rooms (Garry, 2026-10-14). Drawn after the
+  // house, before the weather. As the house is drawn (the view's shell(), on
+  // each frame): with the roof on nothing is marked, since rain falls in
+  // front of a roof; with every wall down, only as high as what still stands
+  // in a room (DOWN_H), so the ground beyond the low walls keeps its rain.
+  // Each face's front is its outside, so from inside a room none is marked.
   let mask = null;
-  function makeMask(){
+  const shellNow = () => {
+    try {
+      const s = typeof host.shell === "function" ? host.shell() : null;
+      return { roof: !!(s && s.roof), low: s && s.down ? DOWN_H : 0 };
+    } catch (_) { return { roof: false, low: 0 }; }
+  };
+  function makeMask(low){
     const tops = (area && area.tops) || [];
     if (!tops.length) return;
     const pos = [];
+    // (q - p) x (r - p), its y: below 0 the triangle's front looks down.
+    const upness = (p, q, r) => (q[2] - p[2]) * (r[0] - p[0]) - (q[0] - p[0]) * (r[2] - p[2]);
+    const tri = (p, q, r, up) => { if ((upness(p, q, r) > 0) !== up) [q, r] = [r, q]; pos.push(...p, ...q, ...r); };
     for (const T of tops) {
-      const g = new THREE.ShapeGeometry(new THREE.Shape(T.pts.map(p => new THREE.Vector2(p[0], p[1])))).toNonIndexed();
-      g.rotateX(Math.PI / 2).translate(0, T.y, 0);
-      pos.push(...g.attributes.position.array);
+      const h = T.h || 2.8, y0 = T.y, y1 = T.y + (low > 0 ? Math.min(low, h) : h);
+      // Clockwise on the plan (x, y: the world's x, z), so each wall below
+      // faces out.
+      const turn = T.pts.reduce((s, p, i) => { const q = T.pts[(i + 1) % T.pts.length]; return s + p[0] * q[1] - q[0] * p[1]; }, 0);
+      const P = turn > 0 ? [...T.pts].reverse() : T.pts;
+      const g = new THREE.ShapeGeometry(new THREE.Shape(P.map(p => new THREE.Vector2(p[0], p[1])))).toNonIndexed();
+      const a = g.attributes.position.array;                 // the shape's (x, y): the world's (x, z)
+      for (let i = 0; i + 8 < a.length; i += 9) {
+        const v = (k, y) => [a[i + k], y, a[i + k + 1]];
+        tri(v(0, y0), v(3, y0), v(6, y0), false);           // the floor, seen from below
+        tri(v(0, y1), v(3, y1), v(6, y1), true);            // the ceiling, from above
+      }
       g.dispose();
+      for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
+        const A0 = [P[j][0], y0, P[j][1]], B0 = [P[i][0], y0, P[i][1]], A1 = [P[j][0], y1, P[j][1]], B1 = [P[i][0], y1, P[i][1]];
+        pos.push(...A0, ...B0, ...B1, ...A0, ...B1, ...A1);
+      }
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-    const m = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, side: THREE.DoubleSide,
-      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4,
+    const m = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: false, side: THREE.FrontSide,
       stencilWrite: true, stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc,
       stencilFail: THREE.KeepStencilOp, stencilZFail: THREE.KeepStencilOp, stencilZPass: THREE.ReplaceStencilOp });
     const obj = new THREE.Mesh(geo, m);
     obj.name = "weather:mask"; obj.renderOrder = 10; obj.frustumCulled = false;
     host.scene.add(obj);
-    mask = { obj, res: [geo, m] };
+    mask = { obj, res: [geo, m], low };
+  }
+  /** The mask as the house stands this frame: built again when the walls
+   *  go down or come back up, hidden while the roof shows. */
+  function fitMask(){
+    const s = shellNow();
+    if (mask && mask.low !== s.low) dropMask();
+    if (!mask && FALLING.some(n => L[n].obj)) makeMask(s.low);
+    if (mask) mask.obj.visible = !s.roof;
   }
   function dropMask(){
     if (!mask) return;
@@ -524,12 +566,13 @@ export function createWeather(THREE, host){
     Object.assign(L[name], made);
     host.scene.add(made.obj);
     built++;
-    if (!mask && FALLING.includes(name)) makeMask();
+    if (!mask && FALLING.includes(name)) makeMask(shellNow().low);
     return true;
   }
 
   // ── each frame ────────────────────────────────────────────────────────────
   function paint(t){
+    fitMask();
     const time = still ? STILL_S : ((t - t0) / 1000) % WRAP_S;
     let dpr = 1;
     try { host.renderer.getDrawingBufferSize(_view); dpr = host.renderer.getPixelRatio() || 1; } catch (_) { _view.set(1, 1); }
@@ -578,6 +621,7 @@ export function createWeather(THREE, host){
         let d = null;
         try { d = AW.decideAtlasWeather(cfg, p.states || {}, p.entities); }
         catch (_) { AW.countWeatherOnce("weather_error:decision", send); }
+        if (d) for (const n of d.notes || []) AW.countWeatherOnce(`weather_note:${n}`, send);
         if (d && d.why !== "no_source") lastLive = now;
         const v = AW.holdVisual(shown, lastLive, d, now);
         let changed = false;

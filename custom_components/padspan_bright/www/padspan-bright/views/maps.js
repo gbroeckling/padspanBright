@@ -1231,7 +1231,7 @@ function _loadImage(url){
 }
 
 // Like _preparePng but loads from a URL (for trim/bake operations on
-// already-uploaded map images that are served by HA at /local/...).
+// already-uploaded map images, through their signed links).
 async function _preparePngFromUrl(imgUrl, maxDim, crop=null){
   const img = await _loadImage(imgUrl);
   let w = img.naturalWidth || img.width;
@@ -4357,7 +4357,7 @@ function _help(ctx){
     const card = el("div",{class:"card"});
     card.appendChild(el("div",{style:"font-weight:700"},"Presence & BLE mapping"));
     card.appendChild(el("div",{class:"muted", style:"margin-top:8px;line-height:1.5"},[
-      "• Upload any floorplan image; the UI converts it to optimized PNG and stores it under /config/www/padspan_bright/maps/ so HA can serve it at /local/padspan_bright/maps/.",
+      "• Upload any floorplan image; the UI converts it to optimized PNG and stores it under /config/padspan_bright/maps/, where only people logged in to Home Assistant can see it.",
       el("br"),
       "• Place receivers as normalized coordinates (0–1). This is the common industry approach (web GIS, indoor positioning) because it survives resizing.",
       el("br"),
@@ -8786,7 +8786,30 @@ function _lightsTab(ctx, maps, active) {
         });
         return b;
       })(),
-    ]),
+      // Pro: the Live Aboard setup wizard (views/aboard_wizard.js); while one
+      // of its steps sent you here, the way back to it.
+      _tierAtLeast(ctx.state.settings?.tier, "pro") ? (() => {
+        const away = ctx.state._laWizard && ctx.state._laWizard.away;
+        if (away) {
+          const back = el("button", { class: "btn inline", style: "font-size:11px;background:#1b4332;border-color:#52b788;color:#d8f3dc;font-weight:700",
+            title: "Back to the step you came from; it checks again what's done" }, "← Back to the setup wizard");
+          back.addEventListener("click", () => {
+            import(`./aboard_wizard.js${new URL(import.meta.url).search}`)
+              .then(m => m.openLiveAboardWizard(ctx, away))
+              .catch(e => ctx.toast("Could not open the wizard: " + String((e && e.message) || e), true));
+          });
+          return back;
+        }
+        const b = el("button", { class: "btn inline", style: "font-size:11px",
+          title: "Build the 3D house step by step: floors, heights, doors and windows, strips, furniture and the extras" }, "🏠 Set up Live Aboard");
+        b.addEventListener("click", () => {
+          import(`./aboard_wizard.js${new URL(import.meta.url).search}`)
+            .then(m => m.openLiveAboardWizard(ctx))
+            .catch(e => ctx.toast("Could not open the wizard: " + String((e && e.message) || e), true));
+        });
+        return b;
+      })() : null,
+    ].filter(Boolean)),
   ]);
   wrap.appendChild(head);
   // First visit to the builder, ever: open the tour once on its own. Same
@@ -9612,6 +9635,9 @@ function _lightsTab(ctx, maps, active) {
       // The 3D file (doors and windows drawn in 3D, heights): read when the
       // 3D view shows, never on the poll.
       load: () => ctx.actions.wsCall("padspan_bright/house3d_get"),
+      // A tool the setup wizard (aboard_wizard.js) asked for: Live Aboard
+      // takes it once on its way in and opens Edit there.
+      openTool: { take: () => { const t = ctx.state.maps && ctx.state.maps._laOpenTool; if (ctx.state.maps) ctx.state.maps._laOpenTool = null; return t || null; } },
       // The 3D editor's Save, on the same gate as placing a light here
       // (paid, not Preview): without it the 3D view offers no Edit.
       edit: paid && !preview ? (changes) => ctx.actions.wsCall("padspan_bright/house3d_edit", changes)

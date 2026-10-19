@@ -19,7 +19,7 @@ Organisation:
 
 DOMAIN = "padspan_bright"
 NAME = "PadSpan Bright"
-VERSION = "0.38.135"
+VERSION = "0.38.144"
 
 # ── Config-flow option keys ───────────────────────────────────────────────────
 CONF_ENABLE_CLOUD = "enable_cloud"
@@ -99,7 +99,8 @@ EMERGENCY_TEST_STORE_KEY = "padspan_bright.emergency_test"   # emergency_test.py
 DEFAULT_FLOOR_ID = "main"
 OUTSIDE_FLOOR_ID = "__outside__"               # synthetic floor for outdoor / unassigned scanners
 DEFAULT_ROOM_RADIUS = 0.12                     # normalised (0–1) fallback radius around a receiver
-MAPS_DIR = "padspan_bright/maps"                   # relative to HA www/ dir → /local/padspan_bright/maps/
+MAPS_DIR = "padspan_bright/maps"                   # relative to the HA config dir — NOT www/, which /local/ serves to anyone
+MAP_IMAGE_URL = "/api/padspan_bright/maps/image"   # + /{map_id}: map_image_view.py, signed per user
 
 # Upper bound for any single vertical measurement: scanner mounting height,
 # floor-to-floor, ceiling height.  It exists to catch a typo (a metre value

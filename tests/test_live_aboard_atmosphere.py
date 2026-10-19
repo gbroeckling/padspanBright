@@ -113,19 +113,37 @@ def wx() -> dict:
     return _harness("live_aboard_weather.mjs", _WWW)
 
 
-@pytest.mark.parametrize("prefix", ["spawn:", "budget:", "layers:", "decision:", "dry:", "frames:", "still:", "release:"])
+@pytest.mark.parametrize("prefix", ["spawn:", "budget:", "layers:", "decision:", "dry:", "mask:", "frames:", "still:", "release:"])
 def test_the_weather_harness_covers_each_part(wx, prefix) -> None:
     """spawn: nothing ever falls inside an indoor room on any floor, decks
     catch what falls on them; budget: Low a few thousand at most; decision:
     the flat Atlas's own through holdVisual; dry: nothing built, no frame;
-    frames: rain at most 30 a second on Low and 60 on High, snow 30, at 60,
-    120 and 144 Hz; still: reduced motion draws once; release: it goes with
-    the view."""
+    mask: the house kept dry on screen, floor to ceiling, whatever stands in
+    front, faces out, none under the roof, low with the walls down; frames:
+    rain at most 30 a second on Low and 60 on High, snow 30,
+    at 60, 120 and 144 Hz; still: reduced motion draws once; release: it
+    goes with the view."""
     _case(wx, prefix)
 
 
 def test_every_weather_case_passes(wx) -> None:
     assert not wx["failures"], json.dumps(wx["failures"][:6], indent=2, ensure_ascii=False)
+
+
+def test_the_view_tells_the_weather_how_the_house_stands() -> None:
+    """The rain keeps off the house as it is drawn: the roof (wanted, set on
+    each frame by roofTick, and at least half in, as storeyL.covers and
+    hides have it: the walls are cut the moment it is no longer wanted) and
+    the walls (Down: every one cut low). Exploded, the roof covers only the
+    top floor and the floors under it show through the gaps, so the roof
+    does not lift the mask then, by the gap the house was drawn with
+    (readGap), not the setting another view can change."""
+    src = (_VIEWS / "live_aboard.js").read_text(encoding="utf-8")
+    assert ('function rainShell(){ return { roof: !!roofWant && !!(storeyL && storeyL.covering) && !readGap, '
+            'down: wallMode === "down" }; }') in src
+    assert "shell: rainShell" in src
+    assert "reading = HOUSE.readHouse(p.model, p.floors, p.lightsByEid, p.hidden, p.shapeOverrides, xGap); readGap = xGap;" in src
+    assert "if (wx) wx.tick(t);" in src
 
 
 def _code(p: Path) -> str:

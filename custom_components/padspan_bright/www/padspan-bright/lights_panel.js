@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.135";
-const BUILD_ID = "20261016T180716Z";
+const APP_VERSION = "0.38.144";
+const BUILD_ID = "20261019T114328Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -1206,6 +1206,13 @@ class PadSpanLightsApp extends HTMLElement {
       <div id="content"></div>
     `;
     if(this._booted) this._render();
+    // Back on screen after a disconnect (the Atlas as the main panel's
+    // Overview is moved between redraws and tabs): disconnectedCallback
+    // stopped the poll, and only _boot starts it.
+    if(this._booted && !this._pollTimer){
+      this._pollTimer = setInterval(()=>this._poll(), 5000);
+      this._poll();
+    }
   }
 
   disconnectedCallback(){
