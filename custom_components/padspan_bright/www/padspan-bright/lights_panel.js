@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.144";
-const BUILD_ID = "20261019T114328Z";
+const APP_VERSION = "0.38.157";
+const BUILD_ID = "20261020T174200Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -29,6 +29,10 @@ const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable
   await import(`./views/lights_map.js${new URL(import.meta.url).search}`);
 const { keepSubscribed } =
   await import(`./views/push_subscription.js${new URL(import.meta.url).search}`);
+// Hide HA / Show HA beside Refresh, shared with the panel's toolbar. Optional:
+// without it the button is simply not there.
+const HA_SIDEBAR = await import(`./ha_sidebar.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: ha_sidebar failed to load", err); return null; });
 // The 90-day trial card, shared with every other paid wall. Optional: a card
 // that fails to load must not blank the house map.
 const { trialOfferCard } = await import(`./views/trial_offer.js${new URL(import.meta.url).search}`)
@@ -70,6 +74,60 @@ function el(tag, attrs={}, children=[]){
 // views/lights_map.js, shared with the Mapping → Lights tab.
 
 // ── Persistence keys ─────────────────────────────────────────────────────────
+// What to do when the backend isn't the build this page loaded (the same
+// function as panel.js, held equal by tests/test_stale_build.py). A wall
+// screen left on the Atlas through an update kept running the old Atlas
+// against the new backend until someone reloaded it (2026-10-19): the Atlas
+// had no build check at all. A wall screen reloads itself, once per build.
+function staleBuildAction(pageBuild, backendBuild, kiosk, reloadedFor){
+  if(!pageBuild || !backendBuild || pageBuild === backendBuild) return null;
+  const newer = backendBuild > pageBuild;
+  return { newer, reload: newer && !!kiosk && reloadedFor !== backendBuild };
+}
+// A wall screen: ?kiosk=1, or a window that fills the screen (Chrome
+// --kiosk, a full-screen tablet), which nobody is there to press Reload on.
+// The same test trial_offer.js newTabOk makes, the other way round.
+function wallScreen(kiosk, win = globalThis){
+  if(kiosk) return true;
+  try {
+    const s = win.screen;
+    return !!(s && win.innerWidth >= s.width - 1 && win.innerHeight >= s.height - 1);
+  } catch(e) { return false; }
+}
+// The last time anybody touched this screen. A full-screen window may be a
+// tablet somebody is using (or a desktop at F11), so it reloads itself only
+// after two minutes with nobody at it; ?kiosk=1 reloads straight away.
+let _lastInputAt = Date.now();
+for (const ev of ["pointerdown", "keydown", "wheel", "touchstart"]) {
+  try { globalThis.addEventListener(ev, () => { _lastInputAt = Date.now(); }, { capture: true, passive: true }); } catch(e) {}
+}
+function untouchedFor(ms){
+  return Date.now() - _lastInputAt >= ms;
+}
+// What kind of screen this is, for the opt-in report (wall_screen:*): does
+// the full-screen rule above find real wall screens, or desktops at F11?
+function screenKind(kiosk, win = globalThis){
+  if(kiosk) return "kiosk";
+  if(!wallScreen(false, win)) return "windowed";
+  return untouchedFor(120000) ? "fullscreen_idle" : "fullscreen_used";
+}
+// How a self-reload went, for the opt-in report (wall_reload:*). The page
+// that reloaded wrote "<panel>:<kiosk|fullscreen>" beside padspan_reloaded_for;
+// the page that comes back is the build it went for, or still the old one.
+function reloadOutcome(panel, pageBuild, reloadedFor, how){
+  if(!how || !reloadedFor || !how.startsWith(panel + ":")) return null;
+  if(reloadedFor === pageBuild) return how.slice(panel.length + 1);
+  return reloadedFor > pageBuild ? "stuck" : null;
+}
+// Read once per page load: this panel's self-reload, if it just made one.
+const _PAGE_START = Date.now();
+let _reloadNote = null, _screenReported = false;
+try {
+  const how = sessionStorage.getItem("padspan_reload_how") || "";
+  _reloadNote = reloadOutcome("atlas", BUILD_ID, sessionStorage.getItem("padspan_reloaded_for") || "", how);
+  if (_reloadNote) sessionStorage.removeItem("padspan_reload_how");
+} catch(e) {}
+
 const LS_HIDDEN = "padspan_bright_lights_hidden";
 // The one-time coach mark ("tap to switch · code or hold for controls") —
 // per browser, because that is where the hands are.
@@ -127,7 +185,12 @@ class PadSpanLightsApp extends HTMLElement {
   }
 
   set hass(hass){
+    const was = this._hass;
     this._hass = hass;
+    if(this._haBtn && HA_SIDEBAR && hass && (!was || was.dockedSidebar !== hass.dockedSidebar)){
+      this._haBtn.textContent = HA_SIDEBAR.haLabel(hass);
+      this._haBtn.setAttribute("aria-pressed", String(HA_SIDEBAR.haHidden(hass)));
+    }
     if(!this._booted){ this._booted=true; this._boot(); }
     // Motion sensors back from an offline blip (motion_reconnects.py), pushed
     // on every change — one subscription per connection, kept across HA
@@ -167,6 +230,20 @@ class PadSpanLightsApp extends HTMLElement {
     // either assigns, and the first timer would be orphaned beyond reach.
     if(this._pollTimer) clearInterval(this._pollTimer);
     this._pollTimer = setInterval(()=>this._poll(), 5000);
+    if(!this._screenTimer) this._screenTimer = setTimeout(()=>this._screenReport(), Math.max(0, 150000 - (Date.now() - _PAGE_START)));
+  }
+
+  // What kind of screen this is and how a self-reload went (screenKind,
+  // reloadOutcome), once per page load, after the two idle minutes a
+  // full-screen window needs to count as a wall. Only with the report on.
+  _screenReport(){
+    if(_screenReported || !this._hass || !this.state._telemetryOn) return;
+    _screenReported = true;
+    let kiosk = false;
+    try { kiosk = new URLSearchParams(location.search).get("kiosk") === "1"; } catch(_) {}
+    const send = (name)=>{ Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:name })).catch(()=>{}); };
+    send("wall_screen:atlas:" + screenKind(kiosk));
+    if(_reloadNote) send("wall_reload:atlas:" + _reloadNote);
   }
 
   async _poll(){
@@ -180,6 +257,27 @@ class PadSpanLightsApp extends HTMLElement {
     const active = this.shadowRoot && this.shadowRoot.activeElement;
     if(active && /^(INPUT|SELECT)$/.test(active.tagName)) return;
     if(this._pointerDown) return;
+    // The build check, every 10 minutes (staleBuildAction above).
+    if(Date.now() - (this._versionTs || 0) > 600000){
+      this._versionTs = Date.now();
+      this._hass.callWS({ type:"padspan_bright/version" }).then(vi => {
+        const be = (vi && typeof vi.build_id === "string") ? vi.build_id : "";
+        let reloadedFor = "";
+        try { reloadedFor = sessionStorage.getItem("padspan_reloaded_for") || ""; } catch(_) {}
+        let kiosk = false;
+        try { kiosk = new URLSearchParams(location.search).get("kiosk") === "1"; } catch(_) {}
+        const wall = kiosk || (wallScreen(false) && untouchedFor(120000));
+        const act = staleBuildAction(BUILD_ID, be, wall, reloadedFor);
+        if(act && act.reload){
+          let remembered = false;
+          try {
+            sessionStorage.setItem("padspan_reloaded_for", be); remembered = true;
+            sessionStorage.setItem("padspan_reload_how", "atlas:" + (kiosk ? "kiosk" : "fullscreen"));
+          } catch(_) {}
+          if(remembered) location.reload();   // can't remember it: don't risk a loop
+        }
+      }).catch(() => {});
+    }
     // Hidden lights / hidden maps live in settings and are edited from the
     // Mapping tab. Without re-reading them, the two "identical" views drift
     // apart until this panel is reloaded.
@@ -553,7 +651,7 @@ class PadSpanLightsApp extends HTMLElement {
       sheet.appendChild(el("div",{style:"display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px"},[
         el("div",{},[
           el("div",{style:"font-weight:800;font-size:16px;letter-spacing:-.01em"},"Emergency lights"),
-          el("div",{style:"font-size:11.5px;color:rgba(226,240,232,.5);margin-top:2px"}, from),
+          el("div",{style:"font-size:12px;color:rgba(226,240,232,.5);margin-top:2px"}, from),
         ]),
         el("button",{style:act, title:"Close", onclick:close},"✕"),
       ]));
@@ -566,7 +664,7 @@ class PadSpanLightsApp extends HTMLElement {
           title: armed ? "Tap again to turn off every emergency light"
             : "Turn off every emergency light, including the ones that were already on",
           onclick:()=>this._emergencyForceOff()}, armed ? "Tap again" : "Force off")] : []),
-        ...(busy ? [el("span",{style:"font-size:11.5px;color:rgba(254,226,226,.75)"},"Switching…")] : []),
+        ...(busy ? [el("span",{style:"font-size:12px;color:rgba(254,226,226,.75)"},"Switching…")] : []),
       ]));
       for(const m of s.members || []){
         const st = states[m.entity_id] ? states[m.entity_id].state : m.state;
@@ -719,9 +817,18 @@ class PadSpanLightsApp extends HTMLElement {
       el("span",{class:"lv-ver"},`v${APP_VERSION}`),
       el("span",{class:"lv-hint"},"Tap a light to switch it \u00b7 tap its code or hold for controls \u00b7 tap a room name for the whole room \u00b7 motion, temperature and air-quality tiles are read-only"),
       // Admin only: the pencil to the builder. Same map, the other tool.
-      ...(this._isAdmin() ? [el("button",{class:"lv-act",style:"margin-left:auto",title:"Open Mapping \u2192 Atlas",
+      el("span",{style:"margin-left:auto"}),
+      ...(this._isAdmin() ? [el("button",{class:"lv-act",title:"Open Mapping \u2192 Atlas",
         onclick:()=>this._gotoBuilder(null)},"\u270e Edit map")] : []),
-      el("button",{class:"lv-act",style:this._isAdmin()?"":"margin-left:auto",onclick:()=>{
+      // Home Assistant's sidebar, hidden or shown (ha_sidebar.js): with it
+      // hidden, this is the way back from the Atlas. Not on a phone, where
+      // the sidebar is a drawer anyway (styles.css #haSide).
+      ...(HA_SIDEBAR ? [this._haBtn = el("button",{class:"lv-act",id:"haSide","aria-pressed":String(HA_SIDEBAR.haHidden(this._hass)),
+        title:"Hide or show Home Assistant's sidebar, on this browser only",onclick:()=>{
+          const word = HA_SIDEBAR.toggleHaSidebar(this, this._hass);
+          if(this.state._telemetryOn && this._hass) Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:word })).catch(()=>{});
+        }}, HA_SIDEBAR.haLabel(this._hass))] : []),
+      el("button",{class:"lv-act",onclick:()=>{
         this._regStore.reg=null; this._boot().then(()=>this._render());
       }},"\u21bb Refresh"),
     ]));
@@ -1199,7 +1306,7 @@ class PadSpanLightsApp extends HTMLElement {
     this.shadowRoot.innerHTML=`
       <link rel="stylesheet" href="/padspan_bright_static/padspan-bright/styles.css?v=${APP_VERSION}&b=${BUILD_ID}">
       <style>
-        :host{display:block;min-height:100vh;background:#0a150e;color:#e2e8f0;
+        :host{display:block;min-height:100vh;background:#0a150e;color:#e2e8f0;accent-color:#52b788;
               font-family:Inter,system-ui,Arial,sans-serif;box-sizing:border-box}
         #content{padding:16px}
       </style>

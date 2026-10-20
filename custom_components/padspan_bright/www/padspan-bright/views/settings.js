@@ -105,12 +105,12 @@ export function render(ctx){
     }, label));
     // Help ? button
     const helpDot = el("button",{style:
-      "width:16px;height:16px;border-radius:50%;border:1px solid #334155;background:transparent;" +
+      "width:16px;height:16px;border-radius:50%;border:1px solid #2d4a38;background:transparent;" +
       "color:#64748b;font-size:10px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;" +
       "justify-content:center;margin-left:2px;transition:color .15s,border-color .15s;flex-shrink:0"}, "?");
     helpDot.title = helpText;
     helpDot.addEventListener("mouseenter",()=>{helpDot.style.color="#52b788";helpDot.style.borderColor="#52b788";});
-    helpDot.addEventListener("mouseleave",()=>{helpDot.style.color="#64748b";helpDot.style.borderColor="#334155";});
+    helpDot.addEventListener("mouseleave",()=>{helpDot.style.color="#64748b";helpDot.style.borderColor="#2d4a38";});
     helpDot.addEventListener("click",(e)=>{
       e.stopPropagation();
       // Show as a modal for full readability
@@ -233,7 +233,7 @@ function _settingsAppearance(ctx, el, helpBtn, draft, haFloors, haAreas, roomCol
       });
       return b;
     };
-    wrap.appendChild(el("div",{class:"card",style:"border-color:" + (skinNow === "2025" ? "#52b788" : "#334155")},[
+    wrap.appendChild(el("div",{class:"card",style:"border-color:" + (skinNow === "2025" ? "#52b788" : "#2d4a38")},[
       el("div",{class:"h2",style:"margin:0 0 4px;color:#52b788"}, "Panel Style"),
       el("div",{class:"muted",style:"font-size:12px;margin-bottom:10px"},
         "Classic is the original panel, unchanged. 2025 restyles the chrome only — grouped " +
@@ -241,6 +241,53 @@ function _settingsAppearance(ctx, el, helpBtn, draft, haFloors, haAreas, roomCol
         "cards. It takes effect immediately and alters nothing but appearance, so switching " +
         "back is this same control."),
       el("div",{class:"row"},[ mkSkin("classic","Classic"), mkSkin("2025","2025") ]),
+    ]));
+  }
+
+  // ── Theme: Night, Light (inverted) or Day ───────────────────────────────
+  // Light is the accessibility inversion (settings.light_theme), kept as it
+  // always was for anyone who needs it; Day is the designed light palette
+  // (settings.day_theme, day_theme.js). One is on at a time.
+  {
+    const settings = ctx.state.settings || {};
+    const PAL = ["graphite", "ocean", "dusk", "contrast"];   // day_theme.js PALETTES
+    const PRO_LOOKS = PAL.concat(["day"]);                    // PadSpan Pro; Night and Light are everyone's
+    const proOk = tierAtLeast(currentTier(settings), "pro");
+    // PadSpan Bright never had these and its ladder doesn't sell PadSpan Pro:
+    // there they are simply not shown, unless a Pro key unlocks them.
+    const hideLocked = String(settings.edition || "").toLowerCase() === "bright" && !proOk;
+    const now = proOk && settings.day_theme === true ? "day" : settings.light_theme === true ? "light"
+      : proOk && PAL.includes(settings.theme_palette) ? settings.theme_palette : "night";
+    const NAMES = { night: "Night", graphite: "Graphite", ocean: "Ocean", dusk: "Dusk", contrast: "High contrast", light: "Light", day: "Day" };
+    const mkTheme = (val, label) => {
+      const locked = PRO_LOOKS.includes(val) && !proOk;
+      if (locked && hideLocked) return null;
+      const b = el("button",{class:"btn inline"+(now===val?" on":""), ...(locked ? { disabled:"", style:"opacity:.45;cursor:default",
+        title:"PadSpan Pro: " + LICENCE_PATH } : {})}, label);
+      b.addEventListener("click", async()=>{
+        if (now === val || locked) return;
+        try {
+          const palette = PAL.includes(val) ? val : "";
+          await ctx.actions.settingsSet({ light_theme: val === "light", day_theme: val === "day", theme_palette: palette });
+          ctx.toast(NAMES[val] + " theme on");
+        } catch(e){ ctx.toast("Failed to save", true); }
+      });
+      return b;
+    };
+    wrap.appendChild(el("div",{class:"card",style:"margin-top:12px;border-color:" + (now !== "night" ? "#52b788" : "#2d4a38")},[
+      el("div",{class:"h2",style:"margin:0 0 4px;color:#52b788"}, "Theme"),
+      el("div",{class:"muted",style:"font-size:12px;margin-bottom:10px"},
+        "Night is PadSpan's dark forest green. Graphite, Ocean and Dusk are Night in charcoal, " +
+        "navy or plum. High contrast is black with white text and solid edges, for eyes that need " +
+        "it. Light inverts every colour in the panel (white becomes black, black becomes white) for " +
+        "anyone who can't use a dark screen; photos and map images are turned back so they still " +
+        "look normal. Day is the panel redrawn in light colours. Every one keeps the green accent " +
+        "and the colours that mean something (alarms, warnings, tracking), and maps, charts, the 3D " +
+        "house and Pure Live keep their night colours. It takes effect immediately, in every browser."),
+      el("div",{class:"row",style:"flex-wrap:wrap"},[ mkTheme("night","Night"), mkTheme("graphite","Graphite"), mkTheme("ocean","Ocean"),
+        mkTheme("dusk","Dusk"), mkTheme("contrast","High contrast"), mkTheme("light","Light (inverted)"), mkTheme("day","Day") ].filter(Boolean)),
+      ...(proOk || hideLocked ? [] : [el("div",{class:"muted",style:"font-size:12px;margin-top:8px"},
+        "Graphite, Ocean, Dusk, High contrast and Day come with PadSpan Pro (" + LICENCE_PATH + "). Night and Light are in every edition.")]),
     ]));
   }
 
@@ -257,7 +304,7 @@ function _settingsAppearance(ctx, el, helpBtn, draft, haFloors, haAreas, roomCol
         ctx.actions.renderRooms();
       } catch(e){ ctx.toast("Failed to save", true); }
     });
-    wrap.appendChild(el("div",{class:"card",style:"margin-top:12px;border-color:" + (mode2dOn ? "#f59e0b" : "#334155")},[
+    wrap.appendChild(el("div",{class:"card",style:"margin-top:12px;border-color:" + (mode2dOn ? "#f59e0b" : "#2d4a38")},[
       el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:4px"},[
         el("div",{class:"h2",style:"margin:0;color:#f59e0b"}, "2D Map Mode"),
         el("span",{style:"font-size:10px;padding:1px 6px;border-radius:4px;background:#422006;color:#fbbf24;border:1px solid #92400e;font-weight:700"}, "EXPERIMENTAL"),
@@ -353,8 +400,8 @@ function _scannerMap(ctx, el, haFloors){
     const floorName = _floorNameForMap(mapData, haFloors);
     mapCard.appendChild(el("div",{style:"display:flex;align-items:center;gap:6px;margin-bottom:8px"},[
       el("div",{style:"font-weight:700;font-size:13px"}, mapData?.name || mapId),
-      floorName ? el("span",{class:"badge",style:"font-size:9px"},floorName) : null,
-      el("span",{class:"badge",style:"margin-left:auto;font-size:9px"},
+      floorName ? el("span",{class:"badge",style:"font-size:10px"},floorName) : null,
+      el("span",{class:"badge",style:"margin-left:auto;font-size:10px"},
         `${mapRadios.length} scanner${mapRadios.length!==1?"s":""}`),
     ].filter(Boolean)));
 
@@ -412,9 +459,9 @@ function _scannerMap(ctx, el, haFloors){
         // Name
         el("div",{style:"font-size:10px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e2e8f0"}, r.name),
         // Source tail
-        el("div",{style:"font-size:9px;color:#4a6670;font-family:monospace;white-space:nowrap"}, r.source.slice(-8)),
+        el("div",{style:"font-size:10px;color:#4a6670;font-family:monospace;white-space:nowrap"}, r.source.slice(-8)),
         // Confidence + point count
-        el("div",{style:`font-size:9px;color:${confColor};white-space:nowrap;text-align:right`},
+        el("div",{style:`font-size:10px;color:${confColor};white-space:nowrap;text-align:right`},
           `${confPct}% · ${r.pointCount}pt`),
       ]));
     });
@@ -472,7 +519,7 @@ function _scannerMap(ctx, el, haFloors){
     const unplacedCard = el("div",{class:"card",style:"border-color:#f59e0b;padding:10px"});
     unplacedCard.appendChild(el("div",{style:"display:flex;align-items:center;gap:6px;margin-bottom:6px"},[
       el("div",{style:"font-weight:700;font-size:12px;color:#f59e0b"},"⚠ Not yet in calibration data"),
-      el("span",{class:"badge warn",style:"font-size:9px;margin-left:auto"},unplacedRadios.length),
+      el("span",{class:"badge warn",style:"font-size:10px;margin-left:auto"},unplacedRadios.length),
     ]));
     for(const r of unplacedRadios){
       const name = r.display_name || r.area_name || r.area || r.name || r.source || "?";
@@ -480,8 +527,8 @@ function _scannerMap(ctx, el, haFloors){
         style:"display:grid;grid-template-columns:1fr auto auto;gap:5px;align-items:center;padding:3px 6px;background:#0a150e;border-radius:5px;margin-bottom:2px"
       },[
         el("div",{style:"font-size:10px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"}, (ctx.helpers.radioShortId ? ctx.helpers.radioShortId(r.source||"")+" " : "") + name),
-        el("div",{style:"font-size:9px;color:#4a6670;font-family:monospace;white-space:nowrap"}, r.source.slice(-8)),
-        (()=>{ const _ss = ctx.helpers.scannerStatus; if(!_ss){ return r.scanning ? el("span",{class:"badge",style:"font-size:9px"},"scanning") : el("span",{class:"badge warn",style:"font-size:9px"},"idle"); } const ss = _ss(r, snap?.ble?.advertisements); const b = el("span",{class:ss.cls,style:"font-size:9px",title:ss.title},ss.label); if(ss.style) b.style.cssText+="font-size:9px;"+ss.style; return b; })(),
+        el("div",{style:"font-size:10px;color:#4a6670;font-family:monospace;white-space:nowrap"}, r.source.slice(-8)),
+        (()=>{ const _ss = ctx.helpers.scannerStatus; if(!_ss){ return r.scanning ? el("span",{class:"badge",style:"font-size:10px"},"scanning") : el("span",{class:"badge warn",style:"font-size:10px"},"idle"); } const ss = _ss(r, snap?.ble?.advertisements); const b = el("span",{class:ss.cls,style:"font-size:10px",title:ss.title},ss.label); if(ss.style) b.style.cssText+="font-size:10px;"+ss.style; return b; })(),
       ]));
     }
     wrap.appendChild(unplacedCard);
@@ -611,7 +658,7 @@ function _scannerMap(ctx, el, haFloors){
     rlRow.appendChild(rlGainWrap);
     relearnCard.appendChild(rlRow);
 
-    const rlHint = el("div",{style:"font-size:9px;color:#94a3b8;margin-bottom:8px"},
+    const rlHint = el("div",{style:"font-size:10px;color:#94a3b8;margin-bottom:8px"},
       "Positive = upgrade (e.g. +3 dB for better antenna). Negative = downgrade.");
 
     // Summary line
@@ -756,7 +803,7 @@ function _settingsPresence(ctx, el){
         ctx.actions.renderRooms();
       } catch(e){ ctx.toast("Failed to save", true); }
     });
-    wrap.appendChild(el("div",{class:"card",style:"border-color:" + (quietOn ? "#52b788" : "#334155")},[
+    wrap.appendChild(el("div",{class:"card",style:"border-color:" + (quietOn ? "#52b788" : "#2d4a38")},[
       el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:4px"},[
         el("div",{class:"h2",style:"margin:0;color:#52b788"}, "Quiet Mode"),
       ]),
@@ -770,33 +817,6 @@ function _settingsPresence(ctx, el){
         "Scanning continues in the background so tracked objects still work. " +
         "Ideal for busy environments (condos, offices) where you only care about your own devices. " +
         "Turn off when you need to discover and tag new objects."),
-    ]));
-  }
-
-  // ── Light Theme (inverted) ────────────────────────────────────────────────
-  {
-    const themeOn = settings.light_theme === true;
-    const themeToggle = el("input",{type:"checkbox",id:"lightThemeToggle",style:"width:16px;height:16px;accent-color:#52b788;cursor:pointer"});
-    themeToggle.checked = themeOn;
-    themeToggle.addEventListener("change", async()=>{
-      try {
-        await ctx.actions.settingsSet({ light_theme: themeToggle.checked });
-        ctx.toast(themeToggle.checked ? "Light theme on" : "Dark theme restored");
-      } catch(e){ ctx.toast("Failed to save", true); }
-    });
-    wrap.appendChild(el("div",{class:"card",style:"border-color:" + (themeOn ? "#52b788" : "#334155")},[
-      el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:4px"},[
-        el("div",{class:"h2",style:"margin:0;color:#52b788"}, "Light Theme"),
-      ]),
-      el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:10px"},[
-        themeToggle,
-        el("label",{for:"lightThemeToggle",style:"font-size:13px;color:#e2e8f0;cursor:pointer;font-weight:600"},
-          "Invert the panel colours (light background)"),
-      ]),
-      el("div",{class:"muted",style:"font-size:12px"},
-        "Inverts every colour in the panel — white becomes black, black becomes white — for an " +
-        "accessible light appearance. Photos and map images are automatically counter-inverted so " +
-        "they still look normal. Applies instantly to this PadSpan panel."),
     ]));
   }
 
@@ -934,7 +954,7 @@ function _settingsPresence(ctx, el){
   const cpuMode = (settings.cpu_mode || "shared").toLowerCase();
   const pinOk = !!ctx.state.cpuPinningSupported;
   const cpuSel = el("select", { style:
-    "font-size:13px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:5px 8px" });
+    "font-size:13px;background:#071008;color:#e2e8f0;border:1px solid #2d4a38;border-radius:4px;padding:5px 8px" });
   const cpuOpts = [
     ["shared", "Shared — fastest updates, competes with HA"],
     ["single", "Single core — capped at one core, HA stays responsive"],
@@ -1113,7 +1133,7 @@ function _settingsPresence(ctx, el){
     el("div", { class: "h2" }, "Help improve PadSpan"),
     el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px;line-height:1.55" },
       "Opt in to send the developer an anonymous usage report at most once a day: which version and " +
-      "Home Assistant; how many scanners, floors, rooms, placed lights, walls, maps, calibration points, " +
+      "Home Assistant; the country and language set in Home Assistant (never looked up from your address); how many scanners, floors, rooms, placed lights, walls, maps, calibration points, " +
       "IRKs and objects you have and which related integrations are installed; which feature switches " +
       "are on; which tabs and tools got used (and whether IRKs are resolving anything); a few health flags; how hard the machine " +
       "works (load, Home Assistant's CPU and memory, sampled once a minute) and what class of machine it is (CPU count, RAM size, board); and how many warnings each part of the " +
@@ -1692,7 +1712,7 @@ function _settingsPresence(ctx, el){
 
 <!-- ── Android ── -->
 <div style="margin-bottom:16px">
-  <div style="font-weight:700;color:#34d399;font-size:13px;margin-bottom:4px">Android Phones / Tablets</div>
+  <div style="font-weight:700;color:#4ade80;font-size:13px;margin-bottom:4px">Android Phones / Tablets</div>
 
   <div style="background:#0a1a2a;border:1px solid #2563eb;border-radius:6px;padding:8px 10px;margin-bottom:10px">
     <div style="font-weight:600;color:#60a5fa;font-size:11px;margin-bottom:2px">Do you need an IRK for Android?</div>
@@ -2298,7 +2318,7 @@ function _settingsPresence(ctx, el){
         el("span",{style:`color:${barColor};font-weight:600`}, `${matPct}%`),
         el("span",{class:"muted"}, ` — ${matPct < 25 ? "collecting baseline" : matPct < 75 ? "building model" : "model active"}`),
       ]),
-      el("div",{style:"background:#1e293b;border-radius:4px;height:6px;margin-bottom:8px;overflow:hidden"},[
+      el("div",{style:"background:#1b3526;border-radius:4px;height:6px;margin-bottom:8px;overflow:hidden"},[
         el("div",{style:`width:${Math.min(100,matPct)}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.3s`}),
       ]),
       el("div",{style:"display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:12px"},[
@@ -2437,7 +2457,7 @@ function _settingsPresence(ctx, el){
       const actionLbl = r.action === "turn_on" ? "ON" : r.action === "turn_off" ? "OFF" : r.action;
       const entShort = (r.entity_id || "").split(".").pop() || "?";
       const opacity = r.enabled ? "1" : "0.4";
-      const row = el("div",{style:`display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;opacity:${opacity}`},[
+      const row = el("div",{style:`display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #1b3526;opacity:${opacity}`},[
         el("span",{style:"font-size:11px;min-width:50px;color:#94a3b8"}, r.trigger === "arrive" ? "ARRIVE" : "DEPART"),
         el("span",{style:"font-size:12px;color:#e2e8f0;flex:1"}, `${lbl} ${arrow} ${actionLbl} ${entShort}`),
         el("button",{style:"background:none;border:none;color:#60a5fa;cursor:pointer;font-size:11px",title:"Toggle"}, r.enabled ? "ON" : "OFF"),
@@ -2449,19 +2469,19 @@ function _settingsPresence(ctx, el){
     });
 
     // Add new rule form
-    const triggerSel = el("select",{style:"font-size:12px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:4px"},[
+    const triggerSel = el("select",{style:"font-size:12px;background:#071008;color:#e2e8f0;border:1px solid #2d4a38;border-radius:4px;padding:4px"},[
       el("option",{value:"depart"},"When device DEPARTS"),
       el("option",{value:"arrive"},"When device ARRIVES"),
     ]);
-    const deviceSel = el("select",{style:"font-size:12px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:4px"},[
+    const deviceSel = el("select",{style:"font-size:12px;background:#071008;color:#e2e8f0;border:1px solid #2d4a38;border-radius:4px;padding:4px"},[
       el("option",{value:""},"— Select device —"),
       ...deviceOpts.map(d => el("option",{value:d.label}, d.label)),
     ]);
-    const actionSel = el("select",{style:"font-size:12px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:4px"},[
+    const actionSel = el("select",{style:"font-size:12px;background:#071008;color:#e2e8f0;border:1px solid #2d4a38;border-radius:4px;padding:4px"},[
       el("option",{value:"turn_off"},"Turn OFF"),
       el("option",{value:"turn_on"},"Turn ON"),
     ]);
-    const entitySel = el("select",{style:"font-size:12px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:4px;max-width:200px"},[
+    const entitySel = el("select",{style:"font-size:12px;background:#071008;color:#e2e8f0;border:1px solid #2d4a38;border-radius:4px;padding:4px;max-width:200px"},[
       el("option",{value:""},"— Select entity —"),
       ..._entities.map(e => el("option",{value:e}, e.split(".").pop())),
     ]);
@@ -2627,7 +2647,7 @@ function _settingsPresence(ctx, el){
             mappingsDiv.appendChild(el("div",{style:"font-size:11px;color:#64748b;padding:2px 0"},
               `${m.label} \u2192 tag_id: "${m.tag_id}"`));
           }
-          mappingsDiv.appendChild(el("div",{style:"font-size:11px;color:#475569;margin-top:4px"},
+          mappingsDiv.appendChild(el("div",{style:"font-size:11px;color:#64748b;margin-top:4px"},
             "Use these tag_ids in HA Automations to trigger actions on room changes."));
         }
       } catch(e) {}
@@ -2640,7 +2660,7 @@ function _settingsPresence(ctx, el){
       el("div",{class:"muted",style:"font-size:12px;margin-bottom:12px"},
         "Connect PadSpan to Home Assistant's Tags system for automations and easy object setup."),
       el("div",{style:"display:flex;flex-direction:column;gap:10px"},[
-        el("div",{style:"padding:10px;background:#0f172a;border-radius:6px"},[
+        el("div",{style:"padding:10px;background:#071008;border-radius:6px"},[
           el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:4px"},[
             roomEvtToggle,
             el("label",{for:"tagsRoomEvtToggle",style:"font-size:13px;color:#e2e8f0;cursor:pointer;font-weight:600"},
@@ -2650,7 +2670,7 @@ function _settingsPresence(ctx, el){
             "Fires a tag_scanned event when a followed object changes rooms. " +
             "Build HA automations that trigger on room transitions (e.g. turn on lights when you enter a room)."),
         ]),
-        el("div",{style:"padding:10px;background:#0f172a;border-radius:6px"},[
+        el("div",{style:"padding:10px;background:#071008;border-radius:6px"},[
           el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:4px"},[
             nfcToggle,
             el("label",{for:"tagsNfcToggle",style:"font-size:13px;color:#e2e8f0;cursor:pointer;font-weight:600"},
@@ -2660,7 +2680,7 @@ function _settingsPresence(ctx, el){
             "Scan an NFC tag near an unidentified BLE object to auto-label and follow it. " +
             "PadSpan matches the scanning phone's room to the nearest unidentified BLE signal."),
         ]),
-        el("div",{style:"padding:10px;background:#0f172a;border-radius:6px"},[
+        el("div",{style:"padding:10px;background:#071008;border-radius:6px"},[
           el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:4px"},[
             autolinkToggle,
             el("label",{for:"tagsAutolinkToggle",style:"font-size:13px;color:#e2e8f0;cursor:pointer;font-weight:600"},
@@ -2775,7 +2795,7 @@ function _tiersWizardFree(ctx, w, isBright){
     isBright
       ? "This install is PadSpan Bright — a lighter download for a household that only wants lighting from a map, not presence tracking. Every light shown room-by-room on a map and switched on or off from here is free, no key, forever. Placing each one exactly where it hangs needs a key — see below."
       : "This install is PadSpan Bright. Presence tracking, Overview, Follow, Pure Live, Occupancy, Calibration, mapping and everything else here is free, no key, forever."));
-  wrap.appendChild(el("div",{style:"padding:10px 12px;background:#0a1a12;border:1px solid #1a4228;border-radius:8px;font-size:12.5px;color:#94a3b8;line-height:1.6"},
+  wrap.appendChild(el("div",{style:"padding:10px 12px;background:#0a1a12;border:1px solid #1a4228;border-radius:8px;font-size:13px;color:#94a3b8;line-height:1.6"},
     "A key only ever unlocks two things beyond that: Forensics (which Bluetooth devices were near a scanner in any time window, with dwell time and CSV export), and light placement (fixture shapes and sizes, WLED, Showcase, Fit room). The free tier above is not a trial of anything — it stays free whether or not you ever add a key. If you want to see light placement on your own house first, a one-time 90-day free trial of PadSpan Bright Pro is available below — no card, and nothing is taken away when it ends, editing just returns to the free view."));
   wrap.appendChild(_tiersWizardFooter(ctx, w));
   return wrap;
@@ -2796,14 +2816,14 @@ function _tiersWizardLadder(ctx, w, isBright){
       "Place lights on a map, control them. No key, no time limit."));
     wrap.appendChild(row("PadSpan Bright Pro", BRIGHT_PRICE,
       "Fixture shapes and sizes, WLED, Showcase, Fit room — light placement exactly where it hangs. Forensics needs presence tracking to report on, so it isn't part of this edition."));
-    wrap.appendChild(el("div",{class:"muted",style:"font-size:11.5px;margin-top:6px;line-height:1.5"},
+    wrap.appendChild(el("div",{class:"muted",style:"font-size:12px;margin-top:6px;line-height:1.5"},
       "Want presence tracking too? That's a separate, full download — PadSpan Bright — not an upgrade of this one."));
   } else {
     wrap.appendChild(row("PadSpan Bright (free)", null,
       "Presence tracking and everything else in this app except the two paid features below. No key, no time limit."));
     wrap.appendChild(row("PadSpan Pro", PRO_PRICE,
       "Adds Forensics and light placement (fixture shapes and sizes, WLED, Showcase, Fit room) to this install."));
-    wrap.appendChild(el("div",{class:"muted",style:"font-size:11.5px;margin-top:6px;line-height:1.5"},
+    wrap.appendChild(el("div",{class:"muted",style:"font-size:12px;margin-top:6px;line-height:1.5"},
       "Only want lighting, not presence tracking? PadSpan Bright is a lighter, separate download built for exactly that."));
   }
   wrap.appendChild(_tiersWizardFooter(ctx, w));
@@ -2821,7 +2841,7 @@ function _tiersWizardUpgrade(ctx, w, isBright){
     isBright ? `Buy PadSpan Bright Pro — ${BRIGHT_PRICE}` : `Buy PadSpan Pro — ${PRO_PRICE}`));
   wrap.appendChild(row);
   if (isBright) {
-    wrap.appendChild(el("div",{class:"muted",style:"font-size:11.5px;line-height:1.5"},
+    wrap.appendChild(el("div",{class:"muted",style:"font-size:12px;line-height:1.5"},
       `Already have a Bright key and want the full app's Pro tier instead? The changeover is ${BRIGHT_UPGRADE_PRICE} — same key, same expiry, Forensics unlocks once you're on the full download.`));
   }
   wrap.appendChild(_tiersWizardFooter(ctx, w, { nextLabel: "Done", onNext: () => {
@@ -3109,7 +3129,7 @@ function _settingsFeatures(ctx, el){
     const left = el("div",{style:"flex:1"});
     left.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px"}, [
       el("span",{style:"font-weight:700;font-size:13px"}, f.label),
-      el("span",{style:"font-size:9px;padding:1px 6px;border-radius:3px;background:rgba(245,158,11,.15);color:#f59e0b;font-weight:600;text-transform:uppercase"}, "experimental"),
+      el("span",{style:"font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(245,158,11,.15);color:#f59e0b;font-weight:600;text-transform:uppercase"}, "experimental"),
     ]));
     left.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;margin-top:4px;line-height:1.4"}, f.desc));
     const toggle = el("input",{type:"checkbox",style:"width:18px;height:18px;accent-color:#52b788;cursor:pointer;flex-shrink:0"});
@@ -3129,11 +3149,11 @@ function _settingsFeatures(ctx, el){
   // ── Forensics (privacy-sensitive, off by default — issue #55) ─────────────
   {
     const forensicsOn = settings.forensics_enabled === true;
-    const card = el("div",{class:"card",style:"margin-top:14px;border-color:" + (forensicsOn ? "#b91c1c" : "#334155")});
+    const card = el("div",{class:"card",style:"margin-top:14px;border-color:" + (forensicsOn ? "#b91c1c" : "#2d4a38")});
 
     card.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:6px"},[
       el("div",{class:"h2",style:"margin:0;color:#f87171"},"Forensics"),
-      el("span",{style:"font-size:9px;padding:1px 6px;border-radius:3px;background:rgba(248,113,113,.15);color:#f87171;font-weight:600;text-transform:uppercase"}, "privacy-sensitive"),
+      el("span",{style:"font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(248,113,113,.15);color:#f87171;font-weight:600;text-transform:uppercase"}, "privacy-sensitive"),
     ]));
     card.appendChild(el("div",{class:"muted",style:"font-size:12px;margin-bottom:10px"},
       "Records presence sessions for every Bluetooth device your scanners hear, so you can later ask " +
@@ -3214,7 +3234,7 @@ function _settingsFeatures(ctx, el){
       toggle,
       el("label",{for:"forensicsToggle",style:"font-size:13px;color:#e2e8f0;cursor:pointer;font-weight:600"},
         "Enable presence-session recording"),
-      el("span",{style:"font-size:9px;padding:1px 6px;border-radius:3px;background:rgba(168,85,247,.15);color:#c4b5fd;font-weight:600;text-transform:uppercase"}, "pro"),
+      el("span",{style:"font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(168,85,247,.15);color:#c4b5fd;font-weight:600;text-transform:uppercase"}, "pro"),
     ]));
 
     // Licence status line (key set via the enable flow's activation prompt)
@@ -3364,19 +3384,19 @@ function _atlasWeatherSection(ctx, el, settings){
   const firstWx = WX ? WX.firstWeatherEntity(states) : "";
   const warnIds = WX ? WX.warningEntities({}, states, entities) : [];
   // The detected ones first, then anything else that calls itself a warning
-  // or an alert — never a water-leak detector (atlas_weather.js warningPickerIds).
+  // or an alert — never one of the house's alarms (atlas_weather.js warningPickerIds).
   const warnList = WX ? WX.warningPickerIds(states, entities) : [];
   picker("Rain sensor", "atlas_weather_rain_entity", "None — use the weather entity", rainIds);
   picker("Weather entity", "atlas_weather_condition_entity",
     firstWx ? `Automatic — ${nameOf(firstWx)}` : "Automatic — none found (no weather shows)", ids.filter(eid => eid.startsWith("weather.")));
   picker("Weather warnings", "atlas_weather_warning_entity",
     warnIds.length ? `Automatic — ${warnIds.length} found` : "Automatic — none found", warnList);
-  // A leak detector picked before the list left them out is still stored: the
-  // Atlas ignores it and finds warnings itself (atlas_weather.js chosenWarning).
+  // An alarm picked before the list left it out is still stored: the Atlas
+  // ignores it and finds warnings itself (atlas_weather.js chosenWarning).
   const curWarn = String(settings.atlas_weather_warning_entity || "");
-  if (WX && curWarn && WX.isLeakDetector(curWarn, states)) {
+  if (WX && curWarn && WX.isHouseAlarm(curWarn, states)) {
     box.appendChild(el("div",{style:"font-size:11px;color:#fbbf24;line-height:1.5;margin-top:4px"},
-      `${nameOf(curWarn)} is a water-leak detector, not a weather warning, so the Atlas ignores it and finds warnings on its own. ` +
+      `${nameOf(curWarn)} is an alarm (a leak, smoke, gas or CO detector), not a weather warning, so the Atlas ignores it and finds warnings on its own. ` +
       "Pick a warning above, or Automatic."));
   }
 
@@ -3411,7 +3431,7 @@ function _atlas3dSection(ctx, el, settings){
   const box = el("div",{style:"margin-top:14px;padding-top:12px;border-top:1px solid #1e3a2a"});
   box.appendChild(el("div",{style:"font-weight:600;font-size:14px;color:#e2e8f0;margin-bottom:4px"},"🏠 Live Aboard"));
   // Experimental for now (Garry, 2026-10-05: label it so in the stable release).
-  box.appendChild(el("div",{"data-la3d-experimental":"",style:"display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.06em;color:#fbbf24;border:1px solid rgba(251,191,36,.45);border-radius:999px;padding:1px 8px;margin:0 0 6px"},
+  box.appendChild(el("div",{"data-la3d-experimental":"",style:"display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;color:#fbbf24;border:1px solid rgba(251,191,36,.45);border-radius:999px;padding:1px 8px;margin:0 0 6px"},
     "EXPERIMENTAL — still changing; tell us what you find"));
   box.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-bottom:8px"},
     "Adds a Map / Live Aboard switch to the Atlas: walk around your floors, rooms, walls, lights and furniture, built from the map you already drew. Off by default."));

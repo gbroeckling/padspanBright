@@ -10,6 +10,8 @@ identifier-shaped value ever got in.
 
 from __future__ import annotations
 
+from tests.conftest import keep_task
+
 import asyncio
 import json
 import re
@@ -44,6 +46,7 @@ _SIG_RPA = "70:81:94:0D:FB:AA"
 
 def _hass():
     h = MagicMock()
+    h.async_create_task = MagicMock(side_effect=keep_task)   # issue #96
     settings = SimpleNamespace(data={
         "telemetry_enabled": True,
         "telemetry_install_id": "8f0d0f7e-2c8f-4c8a-9d1c-0f2c3d4e5f60",
@@ -298,6 +301,25 @@ def test_the_gate_refuses_every_identifier_shape():
         T.assert_shareable(p)
     p = json.loads(json.dumps(base)); p["env"]["free_text"] = "x" * 65
     with pytest.raises(ValueError, match="too long"):
+        T.assert_shareable(p)
+
+
+def test_country_and_language_come_from_ha_settings_and_nothing_else():
+    h = _hass()
+    h.config.country, h.config.language = "ca", "en-GB"
+    p = T.build_payload(h)
+    assert (p["country"], p["language"]) == ("CA", "en-GB")
+    T.assert_shareable(p)
+    for country, language in ((None, None), ("", ""), ("Canada", "English (UK)"), ("C1", "en_GB.UTF-8")):
+        h.config.country, h.config.language = country, language
+        p = T.build_payload(h)
+        assert "country" not in p and "language" not in p
+        T.assert_shareable(p)
+    p = json.loads(json.dumps(p)); p["country"] = "Vancouver"
+    with pytest.raises(ValueError, match="country"):
+        T.assert_shareable(p)
+    p = json.loads(json.dumps(p)); p["country"] = "CA"; p["language"] = "192.168.3.155"
+    with pytest.raises(ValueError):
         T.assert_shareable(p)
 
 

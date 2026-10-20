@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.144";
-const RELEASE_BUILD_ID = "20261019T114328Z";
+const APP_VERSION = "0.38.157";
+const RELEASE_BUILD_ID = "20261020T174200Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -58,6 +58,49 @@ function staleBuildAction(pageBuild, backendBuild, kiosk, reloadedFor){
   const newer = backendBuild > pageBuild;
   return { newer, reload: newer && !!kiosk && reloadedFor !== backendBuild };
 }
+// A wall screen: ?kiosk=1, or a window that fills the screen (Chrome
+// --kiosk, a full-screen tablet), which nobody is there to press Reload on.
+// The same test trial_offer.js newTabOk makes, the other way round.
+function wallScreen(kiosk, win = globalThis){
+  if(kiosk) return true;
+  try {
+    const s = win.screen;
+    return !!(s && win.innerWidth >= s.width - 1 && win.innerHeight >= s.height - 1);
+  } catch(e) { return false; }
+}
+// The last time anybody touched this screen. A full-screen window may be a
+// tablet somebody is using (or a desktop at F11), so it reloads itself only
+// after two minutes with nobody at it; ?kiosk=1 reloads straight away.
+let _lastInputAt = Date.now();
+for (const ev of ["pointerdown", "keydown", "wheel", "touchstart"]) {
+  try { globalThis.addEventListener(ev, () => { _lastInputAt = Date.now(); }, { capture: true, passive: true }); } catch(e) {}
+}
+function untouchedFor(ms){
+  return Date.now() - _lastInputAt >= ms;
+}
+// What kind of screen this is, for the opt-in report (wall_screen:*): does
+// the full-screen rule above find real wall screens, or desktops at F11?
+function screenKind(kiosk, win = globalThis){
+  if(kiosk) return "kiosk";
+  if(!wallScreen(false, win)) return "windowed";
+  return untouchedFor(120000) ? "fullscreen_idle" : "fullscreen_used";
+}
+// How a self-reload went, for the opt-in report (wall_reload:*). The page
+// that reloaded wrote "<panel>:<kiosk|fullscreen>" beside padspan_reloaded_for;
+// the page that comes back is the build it went for, or still the old one.
+function reloadOutcome(panel, pageBuild, reloadedFor, how){
+  if(!how || !reloadedFor || !how.startsWith(panel + ":")) return null;
+  if(reloadedFor === pageBuild) return how.slice(panel.length + 1);
+  return reloadedFor > pageBuild ? "stuck" : null;
+}
+// Read once per page load: this panel's self-reload, if it just made one.
+const _PAGE_START = Date.now();
+let _reloadNote = null, _screenReported = false;
+try {
+  const how = sessionStorage.getItem("padspan_reload_how") || "";
+  _reloadNote = reloadOutcome("panel", RELEASE_BUILD_ID, sessionStorage.getItem("padspan_reloaded_for") || "", how);
+  if (_reloadNote) sessionStorage.removeItem("padspan_reload_how");
+} catch(e) {}
 
 const _editionsPromise = import(`./views/editions.js?b=${BUILD_ID}`)
   .then(m => { EDITIONS = m; })
@@ -77,9 +120,18 @@ import(`./views/pro_invite.js?b=${BUILD_ID}`)
   .then(m => { PRO_INVITE = m; })
   .catch(err => console.warn("PadSpan: pro_invite module failed to load", err));
 
+// Hide HA / Show HA (ha_sidebar.js), shared with the sidebar Atlas. Until it
+// lands the button keeps its first word and a press does nothing.
+let HA_SIDEBAR = null;
+import(`./ha_sidebar.js?b=${BUILD_ID}`)
+  .then(m => { HA_SIDEBAR = m; })
+  .catch(err => console.warn("PadSpan: ha_sidebar module failed to load", err));
+
 // Which PadSpan module an uncaught error came from (views/ui_error.js). Until
 // it lands, or if it never does, uncaught errors simply go uncounted.
 let UI_ERROR = null;
+// The day theme (day_theme.js), imported the first time it is turned on.
+let DAY_THEME = null;
 import(`./views/ui_error.js?b=${BUILD_ID}`)
   .then(m => { UI_ERROR = m; })
   .catch(err => console.warn("PadSpan: ui_error module failed to load", err));
@@ -547,6 +599,7 @@ class PadSpanHaApp extends HTMLElement {
   set hass(hass){
     const prevHass = this._hass;
     this._hass = hass;
+    if (hass && (!prevHass || prevHass.dockedSidebar !== hass.dockedSidebar)) this._paintHaSide();
     // The Atlas as Overview (views/overview.js) is the sidebar Atlas page,
     // which reads states off its own hass: hand it each new one.
     if(this.state && this.state._overviewAtlas) this.state._overviewAtlas.hass = hass;
@@ -637,7 +690,7 @@ class PadSpanHaApp extends HTMLElement {
             <img src="/padspan_bright_static/padspan-bright/assets/padspan-mark.svg?b=${BUILD_ID}" alt="PadSpan" onerror="this.style.display='none'">
             <div>
               <div class="label">PadSpan™ HA</div>
-              <div class="muted" style="margin-top:2px">v${APP_VERSION}${CHANNEL==='stable'?` <span style="font-size:9px;padding:1px 5px;border-radius:3px;background:#2e7d32;color:#fff;vertical-align:middle">${CHANNEL}</span>`:''}</div>
+              <div class="muted" style="margin-top:2px">v${APP_VERSION}${CHANNEL==='stable'?` <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:#2e7d32;color:#fff;vertical-align:middle">${CHANNEL}</span>`:''}</div>
             </div>
           </div>
 
@@ -645,6 +698,7 @@ class PadSpanHaApp extends HTMLElement {
             <button class="btn inline" id="refresh">Refresh</button>
             <button class="btn inline" id="autodiag">Auto Diagnostics</button>
             <button class="btn inline" id="toggleSide">Toggle</button>
+            <button class="btn inline" id="haSide" title="Hide or show Home Assistant's sidebar, on this browser only">Hide HA</button>
           </div>
 
           <!-- Flood alarm latches (flood_latch.py) — always visible off to
@@ -735,6 +789,8 @@ class PadSpanHaApp extends HTMLElement {
     this.$("#refresh").addEventListener("click", ()=>this._refreshAll(true));
     this.$("#autodiag").addEventListener("click", ()=>this._runAutoDiag(true));
     this.$("#toggleSide").addEventListener("click", ()=>this.$("#app").classList.toggle("mini"));
+    this.$("#haSide").addEventListener("click", ()=>this._toggleHaSidebar());
+    this._paintHaSide();
 
     // Mobile navigation wiring
     const _openDrawer = () => {
@@ -846,6 +902,9 @@ class PadSpanHaApp extends HTMLElement {
     // Load persisted mode (sample/live) even before hass is set.
     // When hass arrives we refresh.
     this._loadSettings();
+    // Once per page load, after the two idle minutes a full-screen window
+    // needs to count as a wall (_screenReport).
+    if (!this._screenTimer) this._screenTimer = setTimeout(() => this._screenReport(), Math.max(0, 150000 - (Date.now() - _PAGE_START)));
 
     // Always start keep-alive (activity ping + watchdog) regardless of data mode.
     this._startKeepAlive();
@@ -921,7 +980,10 @@ class PadSpanHaApp extends HTMLElement {
     card.appendChild(el("div", { style: "font-weight:700;font-size:13px;color:#52b788;margin-bottom:4px" },
       `PadSpan Bright updated to v${APP_VERSION}`));
     card.appendChild(el("div", { style: "font-size:12px;color:#cbd5e1;line-height:1.55;margin-bottom:8px" },
-      `This install was on v${seen}. The release notes say what changed and why, in plain terms.`));
+      // `seen` is the last version somebody here opened or dismissed this card
+      // for, not necessarily the one installed before (issue #94): an update
+      // nobody looked at leaves it behind. The notes cover everything since.
+      `The last update anyone here looked at was v${seen}. The release notes cover everything since then, and why, in plain terms.`));
 
     // The paid half, once per version, and only to someone it could be news to.
     // The rule lives in editions.js next to the tier vocabulary and is pure, so
@@ -1747,6 +1809,15 @@ class PadSpanHaApp extends HTMLElement {
       const res = await this._callWS({ type: "padspan_bright/settings_get" });
       if(res?.settings){
         this.state.settings = res.settings;
+        // Skin and theme follow every settings read, not only _loadSettings
+        // (both return at once when nothing changed).
+        this._applySkin();
+        this._applyTheme();
+        const first = !this._settingsLoaded;
+        this._settingsLoaded = true;
+        // The first settings decide what the menu shows (Forensics, Bright):
+        // a ?view= link kept until now is checked against them (issue #93).
+        if (first && this.$nav) this._renderNav();
         this._telemetryFlush();
         if ("cpu_pinning_supported" in res) this.state.cpuPinningSupported = !!res.cpu_pinning_supported;
         this._applyDataMode(res.settings.data_mode);
@@ -1786,14 +1857,50 @@ class PadSpanHaApp extends HTMLElement {
   // They are called from _refreshAll (full bootstrap) and individually
   // from specific actions (e.g. after tagging an object, after map upload).
 
-  // Light theme = full colour inversion of the panel (accessibility: the
-  // dark theme is unusable for some eye conditions). Applied as a filter on
-  // the host element; styles.css counter-inverts photos/map images via the
-  // data-invert attribute so they don't render as negatives.
-  _applyTheme(){
-    const on = !!this.state.settings?.light_theme;
-    this.style.filter = on ? "invert(1) hue-rotate(180deg)" : "";
-    if (on) this.setAttribute("data-invert", ""); else this.removeAttribute("data-invert");
+  // Three themes (Settings → Appearance → Theme). Night is the panel as
+  // drawn. Light (settings.light_theme) is a full colour inversion of the
+  // host (accessibility: the dark theme is unusable for some eye
+  // conditions); styles.css counter-inverts photos/map images via the
+  // data-invert attribute so they don't render as negatives. Day
+  // (settings.day_theme, which wins over light_theme) is a designed light
+  // palette made from the night colours by day_theme.js, loaded only when
+  // someone picks it; Pure Live is never touched. Day re-applies when the
+  // skin changes, since the skin's stylesheet changes.
+  async _applyTheme(){
+    // Day wins, then Light (the inversion), then a palette (day_theme.js
+    // PALETTES); none of them is Night.
+    // Day and the four palettes are PadSpan Pro's: without Pro (a lapsed key
+    // too) it is Night. Light, the accessibility inversion, is everyone's.
+    const pro = String(this.state.settings?.tier || "").toLowerCase() === "pro";
+    const day = pro && !!this.state.settings?.day_theme;
+    const named = String(this.state.settings?.theme_palette || "");
+    const pal = !day && !this.state.settings?.light_theme && pro && ["graphite", "ocean", "dusk", "contrast"].includes(named) ? named : "";
+    const on = day || !!pal;
+    const invert = !on && !!this.state.settings?.light_theme;
+    this.style.filter = invert ? "invert(1) hue-rotate(180deg)" : "";
+    if (invert) this.setAttribute("data-invert", ""); else this.removeAttribute("data-invert");
+    const want = on ? (day ? "day" : pal) + ":" + (this._skin || "classic") : "";
+    if ((this._dayKey || "") === want) return;
+    this._dayKey = want;
+    if (this._dayOff) { this._dayOff(); this._dayOff = null; }
+    this.removeAttribute("data-theme");
+    if (!on) return;
+    try {
+      if (!DAY_THEME) DAY_THEME = await import(`./day_theme.js?b=${BUILD_ID}`);
+      const urls = Array.from(this.shadowRoot.querySelectorAll('link[rel="stylesheet"][href]')).map(l => l.href);
+      const css = await Promise.all(urls.map(u => fetch(u).then(r => r.ok ? r.text() : "").catch(() => "")));
+      if (this._dayKey !== want) return;   // switched again while loading
+      const content = this.shadowRoot.querySelector("#content");
+      this._dayOff = DAY_THEME.attachDayTheme(this.shadowRoot, {
+        extraCss: css.filter(Boolean),
+        color: day ? DAY_THEME.dayColor : DAY_THEME.paletteColor(pal),
+        frozen: (n) => this.state.view === "purelive" && !!content && content.contains(n),
+      });
+      this.setAttribute("data-theme", day ? "day" : pal);
+    } catch (e) {
+      this._dayKey = "";
+      console.warn("PadSpan: day theme failed to load", e);
+    }
   }
 
   // Chrome skin. "classic" is v0.35.0 untouched; "2025" links styles-2025.css
@@ -1801,10 +1908,9 @@ class PadSpanHaApp extends HTMLElement {
   // Anything other than the exact string "2025" means classic, so a bad or
   // missing setting can never strand someone on a skin that failed to load.
   //
-  // Note this is independent of light_theme: both skins still invert the host
-  // for light mode, because the view modules carry ~4,500 hardcoded hex
-  // literals that currently depend on that inversion. Converting those to
-  // tokens is a separate, view-by-view job.
+  // Independent of the theme (_applyTheme): both skins still invert the host
+  // for the Light theme, and the Day theme re-applies itself to the skin's
+  // stylesheet as well.
   _applySkin(){
     const skin = (this.state.settings?.ui_skin === "2025") ? "2025" : "classic";
     if (this._skin === skin) return false;
@@ -1830,6 +1936,19 @@ class PadSpanHaApp extends HTMLElement {
   // wait here until the switch is KNOWN, then go or are discarded; the
   // backend checks the switch again and is the authority. Nothing leaves the
   // browser while the report is off or unknown.
+  // Home Assistant's own sidebar, hidden or shown from PadSpan's toolbar
+  // (ha_sidebar.js). The button stays on the collapsed rail too: with HA's
+  // sidebar gone it is the way back.
+  _paintHaSide(){
+    const b = this.shadowRoot && this.shadowRoot.querySelector("#haSide");
+    if (!b || !HA_SIDEBAR) return;
+    b.textContent = HA_SIDEBAR.haLabel(this._hass);
+    b.setAttribute("aria-pressed", String(HA_SIDEBAR.haHidden(this._hass)));
+  }
+  _toggleHaSidebar(){
+    if (!HA_SIDEBAR) return;
+    this._telemetryEvent(HA_SIDEBAR.toggleHaSidebar(this, this._hass));
+  }
   _telemetryEvent(name){
     const s = this.state.settings;
     if (!s || !("telemetry_enabled" in s)) {
@@ -1843,6 +1962,22 @@ class PadSpanHaApp extends HTMLElement {
   // Called whenever settings land. Counts the view that was already open
   // once — it was set directly, never through setView — then releases
   // whatever waited. Idempotent: a later settings refresh finds nothing.
+  // What kind of screen this is and how a self-reload went (screenKind,
+  // reloadOutcome), once per page load.
+  _screenReport(){
+    if (_screenReported) return;
+    _screenReported = true;
+    this._telemetryEvent("wall_screen:panel:" + screenKind(this.state.kioskMode));
+    if (_reloadNote) this._telemetryEvent("wall_reload:panel:" + _reloadNote);
+  }
+  // A ?view= link (#93), once settings say whether it stays open.
+  _countViewLink(){
+    const v = this._urlPinnedView;
+    if (this._viewLinkCounted || !v || !this._settingsLoaded) return;
+    this._viewLinkCounted = true;
+    const off = v === "forensics" && (this.state.settings || {}).forensics_enabled !== true;
+    this._telemetryEvent("view_link:" + (this._keepsLinkedView(v) ? "kept" : off ? "forensics_off" : "edition"));
+  }
   _telemetryFlush(){
     const s = this.state.settings;
     if (!s || !("telemetry_enabled" in s)) return;
@@ -1860,14 +1995,16 @@ class PadSpanHaApp extends HTMLElement {
       if(!this._hass) return;
       const res = await this._callWS({ type: "padspan_bright/settings_get" });
       this.state.settings = res?.settings || {};
-      this._applyTheme();
+      if (res?.settings) this._settingsLoaded = true;
       this._applySkin();
+      this._applyTheme();
       if (res && "cpu_pinning_supported" in res) this.state.cpuPinningSupported = !!res.cpu_pinning_supported;
       this._applyDataMode(res?.settings?.data_mode);
       this._updateBadges();
       this._renderNav();
       this._scheduleRender();
       this._telemetryFlush();
+      this._countViewLink();
     } catch (e) {
       // Non-fatal
       this._toast("Settings load failed (will retry on refresh).", true);
@@ -2022,10 +2159,14 @@ class PadSpanHaApp extends HTMLElement {
     const be = (vi && typeof vi.build_id === "string") ? vi.build_id : "";
     let reloadedFor = "";
     try { reloadedFor = sessionStorage.getItem("padspan_reloaded_for") || ""; } catch(e) {}
-    const act = staleBuildAction(RELEASE_BUILD_ID, be, this.state.kioskMode, reloadedFor);
+    const wall = this.state.kioskMode || (wallScreen(false) && untouchedFor(120000));
+    const act = staleBuildAction(RELEASE_BUILD_ID, be, wall, reloadedFor);
     if(act && act.reload){
       let remembered = false;
-      try { sessionStorage.setItem("padspan_reloaded_for", be); remembered = true; } catch(e) {}
+      try {
+        sessionStorage.setItem("padspan_reloaded_for", be); remembered = true;
+        sessionStorage.setItem("padspan_reload_how", "panel:" + (this.state.kioskMode ? "kiosk" : "fullscreen"));
+      } catch(e) {}
       if(remembered){ location.reload(); return; }   // can't remember it: show the bar, don't risk a loop
     }
     const bar = this.$("#staleBuild");
@@ -2449,6 +2590,21 @@ class PadSpanHaApp extends HTMLElement {
     return out;
   }
 
+  /** Whether a view opened by a ?view= link stays open though the menu
+   *  doesn't list it (issue #93): it opens "regardless of the complexity
+   *  mode", so only what really isn't there sends it back to the menu's
+   *  first item: a view this edition doesn't have (Bright), or Forensics
+   *  while it is switched off. Until settings arrive neither can be known,
+   *  and the first nav render comes before them, so the link is kept. */
+  _keepsLinkedView(view){
+    if (!view || view !== this._urlPinnedView) return false;
+    if (!this._settingsLoaded) return true;
+    const settings = this.state.settings || {};
+    if (view === "forensics" && settings.forensics_enabled !== true) return false;
+    if (EDITIONS && EDITIONS.surfacesForEdition && !EDITIONS.surfacesForEdition([view], settings).length) return false;
+    return true;
+  }
+
   /** Rebuild the sidebar nav, mobile bottom nav, and mobile topbar to match current state. */
   _renderNav(){
     const isBasic = this.state.complexity === "basic";
@@ -2461,8 +2617,10 @@ class PadSpanHaApp extends HTMLElement {
     const items = MENU.filter(x => visible.has(x[0]));
     // A view this build does not show cannot stay current: a Bright install
     // starts on Overview by default and Overview is a presence surface, so it
-    // lands on the first surface it does show (Mapping).
-    if (items.length && !visible.has(this.state.view) && !_VIEW_PATHS_HIDDEN_OK.has(this.state.view)) {
+    // lands on the first surface it does show (Mapping). A ?view= link is
+    // kept, as the deep-link block promises (_keepsLinkedView, issue #93).
+    if (items.length && !visible.has(this.state.view) && !_VIEW_PATHS_HIDDEN_OK.has(this.state.view)
+        && !this._keepsLinkedView(this.state.view)) {
       this.state.view = items[0][0];
       this._scheduleRender();
     }
@@ -2823,8 +2981,8 @@ class PadSpanHaApp extends HTMLElement {
           // untouched when the message omits it).
           const res = await this._callWS(Object.assign({ type: "padspan_bright/settings_set" }, payload));
           this.state.settings = res?.settings || this.state.settings;
-          this._applyTheme();
           this._applySkin();
+          this._applyTheme();
           this._renderNav();
           this._scheduleRender();
           return res;
@@ -3058,7 +3216,7 @@ class PadSpanHaApp extends HTMLElement {
             obj.company_name ? el("span",{class:"badge",style:"background:#1a2a3a;color:#7dd3fc;border-color:#1e4976"}, obj.company_name) : null,
             (obj.auto_class || obj.device_type) ? el("span",{class:"badge",style:"background:#2a1a3a;color:#c4b5fd;border-color:#5b21b6"}, obj.auto_class || obj.device_type) : null,
             ...(obj.service_names || []).map(sn =>
-              el("span",{class:"badge",style:"background:#1a3a2a;color:#86efac;border-color:#166534"}, sn)
+              el("span",{class:"badge",style:"background:#1a3a2a;color:#a7f3d0;border-color:#166534"}, sn)
             ),
             obj.connectable === true  ? el("span",{class:"badge",style:"font-size:10px"}, "Connectable") : null,
             obj.connectable === false ? el("span",{class:"badge",style:"font-size:10px;background:#2a1a0a;color:#fbbf24;border-color:#92400e"}, "Non-connectable") : null,

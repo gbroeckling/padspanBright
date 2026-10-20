@@ -9,6 +9,9 @@ Presence → Help improve PadSpan, where a Preview button shows the exact JSON
 that will go. What goes out is COUNTS and VERSIONS, never things:
 
     which version, which edition and tier, which Home Assistant
+    the country and language set in Home Assistant (Settings → System →
+        General): a two-letter code and a language tag such as "en-GB",
+        left out when blank — never looked up from the address
     how many scanners / floors / rooms / placed lights / walls / maps / IRKs
     which feature switches are on
     how many times each tab was opened and each feature used since the
@@ -44,6 +47,10 @@ that will go. What goes out is COUNTS and VERSIONS, never things:
         run that ran out of memory still reports (health.runs); and the
         panels' frame rate and heap by view, and their device class, in
         buckets (CLIENT_EVENTS)
+    wall screens: whether a screen is opened with ?kiosk=1, fills the
+        screen untouched or in use, or is an ordinary window; whether a
+        wall screen's reload after an update landed on the new build; and
+        whether a ?view= link stayed on its view (SCREEN_EVENTS)
 
 The reason, in one sentence: the developer has one house to test on, and
 this is how features that only exist elsewhere (an iPhone with an IRK, a
@@ -405,8 +412,12 @@ WEATHER_EVENTS: frozenset[str] = frozenset(
 HOUSE3D_FALLBACK_KINDS: tuple[str, ...] = ("no_webgl", "slow_gpu", "context_lost", "error")
 # house3d_wet_window: a window showed open while it rains or snows (Live
 # Aboard's alert, 0.38.127), once per page load.
+# house3d_loft_rail: an open (Loft) edge over a drop was drawn as a railing;
+# house3d_mezzanine: a floor sits inside a taller one (a mezzanine in a hall,
+# roofed by the hall). Both once per page load (0.38.147).
 HOUSE3D_EVENTS: frozenset[str] = frozenset(
-    {"house3d_opened", "house3d_wet_window"} | {f"house3d_fallback:{k}" for k in HOUSE3D_FALLBACK_KINDS}
+    {"house3d_opened", "house3d_wet_window", "house3d_loft_rail", "house3d_mezzanine"}
+    | {f"house3d_fallback:{k}" for k in HOUSE3D_FALLBACK_KINDS}
 )
 # Its photo step (ws_house3d_photo.py), counted by the server once per photo
 # sent: photo_read:ok, :no_ai_task (none chosen, gone, can't read pictures, or
@@ -436,6 +447,28 @@ CLIENT_EVENTS: frozenset[str] = frozenset(
     {f"client_fps:{v}:{b}" for v in CLIENT_VIEWS for b in CLIENT_FPS}
     | {f"client_heap:{v}:{b}" for v in CLIENT_VIEWS for b in CLIENT_HEAP}
     | {f"client_dev:{d}" for d in CLIENT_DEV}
+)
+
+# Wall screens (panel.js, and lights_panel.js: the sidebar Atlas), once per
+# page load after two and a half minutes. wall_screen:<panel>:kiosk (?kiosk=1),
+# :fullscreen_idle (a window filling the screen, untouched for two minutes:
+# what a self-reload after an update treats as a wall), :fullscreen_used, or
+# :windowed. wall_reload:<panel>:kiosk|fullscreen: this page is the build a
+# self-reload went for (0.38.145); :stuck: it reloaded and came back on the
+# old build. view_link:kept|forensics_off|edition: a ?view= link (#93) stayed
+# open, or went back to the menu (Forensics off, or no such view in this
+# edition). Never the URL or the screen's size.
+SCREEN_PANELS: tuple[str, ...] = ("panel", "atlas")
+SCREEN_KINDS: tuple[str, ...] = ("kiosk", "fullscreen_idle", "fullscreen_used", "windowed")
+RELOAD_OUTCOMES: tuple[str, ...] = ("kiosk", "fullscreen", "stuck")
+VIEW_LINK_OUTCOMES: tuple[str, ...] = ("kept", "forensics_off", "edition")
+SCREEN_EVENTS: frozenset[str] = frozenset(
+    {f"wall_screen:{p}:{k}" for p in SCREEN_PANELS for k in SCREEN_KINDS}
+    | {f"wall_reload:{p}:{k}" for p in SCREEN_PANELS for k in RELOAD_OUTCOMES}
+    | {f"view_link:{k}" for k in VIEW_LINK_OUTCOMES}
+    # Home Assistant's sidebar hidden or shown again from PadSpan's toolbar
+    # (0.38.153): used at all, and whether people come back to it.
+    | {"ha_sidebar:hidden", "ha_sidebar:shown"}
 )
 
 # The switches whose ON/OFF is reported (booleans only, by name). Every name
@@ -616,7 +649,12 @@ RUNS_KEYS: tuple[str, ...] = ("starts", "unclean", "rss_mb", "mem_avail_pc", "sw
 _TOP_KEYS: frozenset[str] = frozenset({
     "schema", "install_id", "day", "version", "edition", "tier", "ha_version",
     "python", "env", "features", "usage", "health", "errors", "presets",
+    "country", "language",
 })
+# HA's configured country (ISO 3166 alpha-2) and language (a short BCP 47
+# tag: "en", "en-GB", "zh-Hant", "es-419"). Anything else is left out.
+_COUNTRY_RE = re.compile(r"[A-Z]{2}")
+_LANGUAGE_RE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z0-9]{2,4})?")
 
 # Identifier shapes that must never appear in any value.
 _MAC_RE = re.compile(r"\b[0-9A-Fa-f]{2}(?:[:\-.][0-9A-Fa-f]{2}){5}\b|\b[0-9A-Fa-f]{12}\b")   # 48:87:…, 48-87-…, 48.87.…, 48872D9DBC88
@@ -640,7 +678,7 @@ def enabled(hass: HomeAssistant) -> bool:
 def event_allowed(name: str) -> bool:
     return (name in EVENTS or name in TAB_EVENTS or name in UI_ERRORS or name in OFFER_EVENTS
             or name in WEATHER_EVENTS or name in HOUSE3D_EVENTS or name in PHOTO_EVENTS
-            or name in CLIENT_EVENTS)
+            or name in CLIENT_EVENTS or name in SCREEN_EVENTS)
 
 
 def bump(hass: HomeAssistant, event: str, n: int = 1) -> bool:
@@ -1445,6 +1483,14 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         "errors": errors,
         "presets": presets,
     }
+    # Where installs are and which translations matter: only what the person
+    # set in Home Assistant, never anything looked up from the address.
+    cfg = getattr(hass, "config", None)
+    country, language = getattr(cfg, "country", None), getattr(cfg, "language", None)
+    if isinstance(country, str) and _COUNTRY_RE.fullmatch(country.strip().upper()):
+        payload["country"] = country.strip().upper()
+    if isinstance(language, str) and _LANGUAGE_RE.fullmatch(language.strip()):
+        payload["language"] = language.strip()
     # The cap refuses the WHOLE report, and a refused one keeps its counters,
     # so the next is no smaller: one busy day silenced an install until HA
     # restarted. The presets are a courtesy sample (popular_presets.py) — on
@@ -1492,6 +1538,10 @@ def assert_shareable(payload: dict[str, Any]) -> None:
                 if node and not _UUID_RE.fullmatch(node):
                     raise ValueError("install_id is not a UUID")
                 return
+            if path == ".country" and not _COUNTRY_RE.fullmatch(node):
+                raise ValueError("country is not a two-letter code")
+            if path == ".language" and not _LANGUAGE_RE.fullmatch(node):
+                raise ValueError("language is not a language tag")
             # Most specific first, so the message names the real shape (a
             # UUID's tail is also twelve hex digits).
             for name, rx in (("UUID", _UUID_RE), ("32-hex", _HEX32_RE), ("licence key", _KEY_RE),

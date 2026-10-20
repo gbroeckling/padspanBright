@@ -39,6 +39,10 @@
 // Imports nothing: three.js, the house's rules and the runs' rules
 // (live_aboard_runs.js) are handed in by the editor.
 
+// A railing: a deck's ("rail" pieces) or an open edge's over a drop (loftRail,
+// live_aboard_house.js applyBarriers): a strip can run along its top, and a
+// round-the-room run never hangs on one.
+const isRail = (pc) => !!pc && (pc.kind === "rail" || !!pc.loftRail);
 const SLOP = 6;                                     // px a press may move and still be a tap
 const GRAB = { mouse: 14, touch: 24 };              // px round a handle or a point
 const ON_RUN = { mouse: 10, touch: 18 };            // px from the run for a tap that adds a point
@@ -56,18 +60,18 @@ const CSS = `
 .la3d-sheet.strip{max-height:calc(100% - 120px);overflow-y:auto}
 @media (max-width:600px){.la3d-sheet.strip{left:10px;right:10px;width:auto;top:auto!important;bottom:58px;max-height:40%}}
 .la3d-sheet .la3d-sl{display:flex;flex-direction:column;gap:2px;max-height:260px;overflow:auto;margin-top:4px}
-.la3d-sheet .la3d-sl button{all:unset;box-sizing:border-box;display:block;width:100%;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12.5px;color:#e8f0ea}
+.la3d-sheet .la3d-sl button{all:unset;box-sizing:border-box;display:block;width:100%;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:13px;color:#e2e8f0}
 .la3d-sheet .la3d-sl button:hover,.la3d-sheet .la3d-sl button:focus-visible{background:rgba(82,183,136,.2)}
-.la3d-sheet .la3d-sl small{display:block;color:rgba(226,240,232,.55);font-size:10.5px}
-.la3d-sheet .la3d-sl h5{margin:6px 8px 2px;font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:rgba(226,240,232,.5)}
+.la3d-sheet .la3d-sl small{display:block;color:#94a3b8;font-size:11px}
+.la3d-sheet .la3d-sl h5{margin:6px 8px 2px;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#94a3b8}
 .la3d-sheet .la3d-chips{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0 6px}
-.la3d-sheet .la3d-chips button{all:unset;cursor:pointer;padding:4px 9px;border-radius:999px;font-size:11.5px;color:#e8f0ea;
-  background:rgba(255,255,255,.07);border:1px solid rgba(120,190,155,.28)}
+.la3d-sheet .la3d-chips button{all:unset;cursor:pointer;padding:4px 9px;border-radius:999px;font-size:12px;color:#e2e8f0;
+  background:rgba(255,255,255,.07);border:1px solid rgba(120,190,155,.26)}
 .la3d-sheet .la3d-chips button[aria-pressed="true"]{background:rgba(82,183,136,.32);border-color:#52b788}
 .la3d-sheet .la3d-chips button:disabled{opacity:.4;cursor:default}
 .la3d-sheet .la3d-cm{display:flex;gap:6px;align-items:center;margin:4px 0}
-.la3d-sheet .la3d-cm input{width:72px;box-sizing:border-box;padding:4px 6px;border-radius:8px;border:1px solid rgba(120,190,155,.3);
-  background:#0a150e;color:#e8f0ea;font:inherit}
+.la3d-sheet .la3d-cm input{width:72px;box-sizing:border-box;padding:4px 6px;border-radius:8px;border:1px solid rgba(120,190,155,.26);
+  background:#0a150e;color:#e2e8f0;font:inherit}
 .la3d-sheet .la3d-tick{display:flex;gap:6px;align-items:center;font-size:12px;margin:2px 0}
 .la3d-hnd{position:absolute;z-index:3;display:none;box-sizing:border-box;min-width:24px;height:24px;margin:-12px 0 0 -12px;padding:0 4px;
   border-radius:12px;border:2px solid #fff;background:#f59e0b;color:#1f1300;font:700 14px/20px system-ui,sans-serif;text-align:center;
@@ -78,7 +82,7 @@ const CSS = `
 .la3d-sring{position:absolute;z-index:3;display:none;box-sizing:border-box;width:40px;height:40px;margin:-20px 0 0 -20px;border-radius:50%;
   border:3px solid #fbbf24;pointer-events:none}
 .la3d-spill{position:absolute;z-index:3;display:none;transform:translate(-50%,-50%);padding:3px 9px;border-radius:999px;
-  background:rgba(6,14,9,.92);border:1px solid rgba(255,255,255,.3);color:#fff;font:700 12px system-ui,sans-serif;
+  background:rgba(6,14,9,.95);border:1px solid rgba(255,255,255,.3);color:#fff;font:700 12px system-ui,sans-serif;
   white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums}
 .la3d-spill.corner{border-color:#38bdf8;color:#e0f2fe}`;
 
@@ -201,7 +205,7 @@ export function createStrip(ctx){
           let best = null;
           for (const P of F.pieces) {
             const pc = P.pc;
-            if (pc.kind === "rail") continue;
+            if (isRail(pc)) continue;
             const dd = segDist(m, [pc.x0, pc.y0], [pc.x1, pc.y1]);
             if (dd < 0.4 && (!best || dd < best.d)) best = { d: dd, P };
           }
@@ -423,7 +427,7 @@ export function createStrip(ctx){
     ctx.hint({ under: "Under it.", behind: "Round its back: a halo on the wall.", top: "Along its top edge." }[mode] + " It moves with the piece.");
   }
   function alongRail(F, room){
-    const rails = F.pieces.map(P => P.pc).filter(pc => pc.kind === "rail").map(pc => ({ a: [pc.x0, pc.y0], b: [pc.x1, pc.y1] }));
+    const rails = F.pieces.map(P => P.pc).filter(isRail).map(pc => ({ a: [pc.x0, pc.y0], b: [pc.x1, pc.y1] }));
     const r = RUNS.alongRail(RUNS.insetLoop(room.pts, 0.03), rails, { face: faceFor() });
     if (r.error) { ctx.hint(r.error, true); return; }
     setRun(withString(r.run));
@@ -487,7 +491,7 @@ export function createStrip(ctx){
     const fold = btn(folded ? "▴" : "▾", folded ? "Show the panel" : "Fold the panel away", () => { folded = !folded; sheet(); }, "la3d-x");
     fold.setAttribute("aria-expanded", String(!folded));
     h4.appendChild(fold);
-    if (sel) h4.appendChild(btn("×", "Back to the list", () => select(null), "la3d-x"));
+    if (sel) h4.appendChild(btn("✕", "Back to the list", () => select(null), "la3d-x"));
     S.appendChild(h4);
     if (folded) { S.classList.add("on"); return true; }
     if (!sel || !info()) { listOf(S); S.classList.add("on"); return true; }
@@ -535,7 +539,7 @@ export function createStrip(ctx){
     acts.appendChild(seg(areaBtn("room", "Round this room", "Tap a room: the run goes along every wall")));
     acts.appendChild(seg(areaBtn("under", "Under", "Under a piece: wall cabinets, a bed"), areaBtn("behind", "Behind", "Behind a piece: a TV, a headboard"),
       areaBtn("top", "Top edge", "Along the top of a piece: a shelf, a cabinet")));
-    if (F.fl.outdoor || F.rooms.some(r => r.outdoor)) acts.appendChild(seg(areaBtn("rail", "Along a rail", "Tap a deck: along its rail or edge")));
+    if (F.fl.outdoor || F.rooms.some(r => r.outdoor) || F.pieces.some(P => P.pc.loftRail)) acts.appendChild(seg(areaBtn("rail", "Along a rail", "Tap a deck or a mezzanine: along its rail or edge")));
     if (!acts.parentNode) S.appendChild(acts);
     const tick = (label, key, title) => {
       const l = d("label", "la3d-tick"), c = d("input");
@@ -935,7 +939,7 @@ export function createStrip(ctx){
         roundPiece(ph.id, area);
       } else {
         const p = r ? onLevel(F, r, 0) : null, room = p ? F.rooms.find(q => HOUSE.inPoly(p[0], p[1], q.pts)) : null;
-        if (!room) { ctx.hint(area === "rail" ? "Tap the deck." : "Tap inside a room on this floor.", true); return; }
+        if (!room) { ctx.hint(area === "rail" ? "Tap the deck or the mezzanine." : "Tap inside a room on this floor.", true); return; }
         if (area === "rail") alongRail(F, room); else roundRoom(F, room);
       }
       area = null;
@@ -955,7 +959,7 @@ export function createStrip(ctx){
       // Near a deck's rail: on its top.
       for (const P of drawing.F.pieces) {
         const pc = P.pc;
-        if (pc.kind !== "rail") continue;
+        if (!isRail(pc)) continue;
         const L = Math.hypot(pc.x1 - pc.x0, pc.y1 - pc.y0) || 1, t = Math.max(0, Math.min(L, ((p[0] - pc.x0) * (pc.x1 - pc.x0) + (p[1] - pc.y0) * (pc.y1 - pc.y0)) / L));
         const q = [pc.x0 + (pc.x1 - pc.x0) * t / L, pc.y0 + (pc.y1 - pc.y0) * t / L];
         if (Math.hypot(q[0] - p[0], q[1] - p[1]) < 0.3) { addAnchor({ kind: "free", x: q[0], y: q[1], h: RUNS.RAIL_TOP_M }); paint(); return; }

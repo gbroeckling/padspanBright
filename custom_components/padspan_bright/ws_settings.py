@@ -485,6 +485,8 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("tags_phone_autolink_enabled"): bool,
         vol.Optional("quiet_mode"): bool,
         vol.Optional("light_theme"): bool,
+        vol.Optional("day_theme"): bool,
+        vol.Optional("theme_palette"): vol.Any(str, None),
         vol.Optional("ui_skin"): str,
         vol.Optional("light_shapes"): dict,
         vol.Optional("light_type_overrides"): dict,
@@ -933,6 +935,10 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             # never leave someone stranded on a skin that failed to load.
             _skin = str(msg["ui_skin"] or "").strip().lower()
             payload["ui_skin"] = _skin if _skin in ("classic", "2025") else "classic"
+        if "theme_palette" in msg:
+            # day_theme.js PALETTES; anything else is Night.
+            _pal = str(msg["theme_palette"] or "").strip().lower()
+            payload["theme_palette"] = _pal if _pal in ("graphite", "ocean", "dusk", "contrast") else ""
         for key in ("ha_entity_tracker_enabled", "ha_entity_area_enabled",
                     "ha_entity_distance_enabled", "ha_entity_scanner_distance_enabled",
                     "mqtt_publish_enabled", "espresense_mqtt_enabled", "tasmota_ble_enabled", "aggressive_ble_reseed",
@@ -942,7 +948,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     "atlas_3d_enabled", "atlas_3d_people", "atlas_3d_tags", "atlas_3d_library",
                     "atlas_3d_weather", "atlas_3d_showcase",
                     "tags_room_events_enabled", "tags_nfc_identify_enabled",
-                    "tags_phone_autolink_enabled", "quiet_mode", "light_theme",
+                    "tags_phone_autolink_enabled", "quiet_mode", "light_theme", "day_theme",
                     "beacon_auto_calibrate", "overview_persistent_pins", "overview_show_walls",
                     "overview_show_outdoor", "overview_show_trails",
                     "overview_2d_mode", "beacon_profiling_enabled",
