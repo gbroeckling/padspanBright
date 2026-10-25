@@ -224,6 +224,10 @@ async def _live_snapshot(hass: HomeAssistant) -> dict:
         # (perf_sampler.py; a no-op while the report is off, never raises).
         record_duration(hass, "snap", (time.perf_counter() - _t0) * 1000.0)
         dom[_DATA_SNAPSHOT_CACHE] = (time.monotonic(), snap)
+        # A new install's first room and first calibration point
+        # (onboarding.py): one lookup anywhere else, never raises.
+        from .onboarding import note_snapshot  # noqa: PLC0415
+        note_snapshot(hass, snap)
         return snap
 
 
@@ -3085,7 +3089,7 @@ async def ws_live_snapshot(hass: HomeAssistant, connection, msg) -> None:
             # its anchor rows.
             _MERGE_KEYS = ("x_m", "y_m", "floor_id", "knn_confidence",
                            "room", "room_confidence", "rssi_margin_confidence",
-                           "outside", "_smoothed", "_stale",
+                           "outside", "_smoothed", "_stale", "room_unsure",
                            "_pinned", "anchor_true_x_m", "anchor_true_y_m",
                            "anchor_true_floor_id", "anchor_drift_m", "anchor_drift_severity")
             obj_list = (snap.get("objects") or {}).get("list") or []
@@ -3153,6 +3157,34 @@ async def ws_live_snapshot(hass: HomeAssistant, connection, msg) -> None:
             _obj["away"] = True
     except Exception as _away_err:
         _LOGGER.warning("Away marking failed: %s", _away_err, exc_info=True)
+
+    # ── Hold the room through a short signal gap (hold_last_room_s) ─────────
+    # Display only, OFF by default (0). A device back from a short gap has
+    # its room cleared until the vote confirms one again; with the setting on,
+    # the room it had before the gap is shown meanwhile, marked room_held.
+    # The vote, smoothing, gate and re-entry reset are untouched.
+    try:
+        _hold_st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
+        _hold_s = float(((_hold_st.data if _hold_st else {}).get("hold_last_room_s") or 0.0))
+        _hold_pc = hass.data.get(DOMAIN, {}).get("presence_coordinator")
+        if _hold_s > 0 and _hold_pc is not None and hasattr(_hold_pc, "held_room"):
+            # Counted once per hold (opt-in report: room_hold_used), not per snapshot.
+            _was = hass.data.setdefault(DOMAIN, {}).setdefault("_room_held_keys", set())
+            _now: set = set()
+            for _obj in (snap.get("objects") or {}).get("list") or []:
+                if _obj.get("room") or _obj.get("away"):
+                    continue
+                _held = _hold_pc.held_room(_obj.get("key") or "", _hold_s)
+                if _held:
+                    _obj["room"] = _held
+                    _obj["room_held"] = True
+                    _now.add(_obj.get("key") or "")
+            if _now - _was:
+                from .telemetry import bump as _bump  # noqa: PLC0415
+                _bump(hass, "room_hold_used", len(_now - _was))
+            hass.data[DOMAIN]["_room_held_keys"] = _now
+    except Exception as _hold_err:
+        _LOGGER.warning("Room hold failed: %s", _hold_err, exc_info=True)
 
     # Rebuild room_tag_map from overlaid objects so the map matches the
     # presence coordinator's smoothed room assignments (spatial centroid).
@@ -3270,6 +3302,16 @@ async def ws_live_snapshot(hass: HomeAssistant, connection, msg) -> None:
                 else:
                     _remaining = max(0, _pc_sus._suspend_until - _time_mod.monotonic())
                     snap["suspend_remaining_s"] = round(_remaining)
+    except Exception:
+        pass
+
+    # A linked robot vacuum's spot (vacuum_import.py) — only while the user
+    # has its link on; otherwise the snapshot has no such key at all.
+    try:
+        from .vacuum_import import live_position
+        _vac = live_position(hass)
+        if _vac:
+            snap["vacuum"] = _vac
     except Exception:
         pass
 

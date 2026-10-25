@@ -289,6 +289,15 @@ export function render(ctx){
     const accVal = (ph.accuracy && ph.accuracy.mean_error_m) || 0;
     const accColor = accVal>0 && accVal<0.75?"#52b788":accVal<1.8?"#ffd54f":accVal>0?"#ef5350":"#64748b";
     propStatusDiv.appendChild(_propBar("Distance Accuracy", accVal>0 ? Math.max(0,1-accVal/3) : 0, 1, accColor));
+    // Held-out accuracy beside the bar, never instead of it (heldout.py):
+    // each method on calibration spots it had not seen.
+    const ho = ph.heldout;
+    if (ho && ho.knn && ho.knn.rooms_right_pc != null) {
+      const med = (m) => m.median_error_m != null ? `, median ${m.median_error_m} m` : "";
+      let txt = `Tested on spots it hasn't seen: fingerprints ${ho.knn.rooms_right_pc}% rooms right${med(ho.knn)}`;
+      if (ho.spatial && ho.spatial.rooms_right_pc != null) txt += `; spatial ${ho.spatial.rooms_right_pc}%${med(ho.spatial)}`;
+      propStatusDiv.appendChild(el("div",{class:"muted",style:"font-size:11px;margin:-2px 0 8px"}, txt + "."));
+    }
     // avg_variance is per-room RSSI variance in dBm² (Welford variance over
     // scanner readings, see adaptive_store.py / ws_diagnostics.py). The 15/25
     // cutoffs and the /40 bar scale are empirically-chosen UI thresholds, not
@@ -386,11 +395,11 @@ export function render(ctx){
         mathDiv.innerHTML = [
           `<b style="color:#e2e8f0">Path-Loss Formula:</b>`,
           `  distance(m) = 10 ^ ((ref_power - rssi) / (10 \u00d7 n))`,
-          `  ref_power = <span style="color:#5eead4">${s.ref_power||"-59.0"}</span> dBm &nbsp; n = <span style="color:#5eead4">${s.path_loss_exp||"2.5"}</span>`,
+          `  ref_power = <span style="color:#5eead4">${ctx.helpers.esc(s.ref_power||"-59.0")}</span> dBm &nbsp; n = <span style="color:#5eead4">${ctx.helpers.esc(s.path_loss_exp||"2.5")}</span>`,
           ``,
           `<b style="color:#e2e8f0">Kalman Filter:</b>`,
-          `  Q = <span style="color:#5eead4">${s.kalman_q||"0.125"}</span> (process noise \u2014 higher = faster response)`,
-          `  R = <span style="color:#5eead4">${s.kalman_r||"8.0"}</span> (measurement noise \u2014 higher = more smoothing)`,
+          `  Q = <span style="color:#5eead4">${ctx.helpers.esc(s.kalman_q||"0.125")}</span> (process noise \u2014 higher = faster response)`,
+          `  R = <span style="color:#5eead4">${ctx.helpers.esc(s.kalman_r||"8.0")}</span> (measurement noise \u2014 higher = more smoothing)`,
           ``,
           `<b style="color:#e2e8f0">Adaptive Blending:</b>`,
           `  ${s.adaptive_enabled ? `Enabled \u2014 maturity <span style="color:#5eead4">${Math.round((s.adaptive_maturity||0)*100)}%</span> \u2014 max influence ${Math.round(Math.min(40,((s.adaptive_maturity||0)*50)))}%` : "Disabled \u2014 enable in Settings \u2192 Presence"}`,

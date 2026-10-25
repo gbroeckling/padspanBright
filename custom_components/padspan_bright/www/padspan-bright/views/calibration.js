@@ -1034,7 +1034,7 @@ function _pinAndListen(ctx, el, cs, calData) {
     const py = p.y_frac * vbH;
     const sc = (p.scanner_readings || []).length;
     return `<circle cx="${px}" cy="${py}" r="3.5" fill="#52b788" stroke="white" stroke-width="1" opacity="0.85"/>
-            <title>${p.room || p.label || ""} (${sc} scanners)</title>`;
+            <title>${ctx.helpers.esc(p.room || p.label || "")} (${sc} scanners)</title>`;
   }).join("");
 
   // Current pin
@@ -1561,6 +1561,23 @@ function _roam(ctx, el, cs, calData) {
 }
 
 // ── Model tab ─────────────────────────────────────────────────────────────────
+// Held-out accuracy (heldout.py), BESIDE the estimate above, never instead:
+// each method tested on calibration spots it had not seen (every point within
+// 1.5 m held out with the spot). qa.js says the same in one line.
+function _heldoutLine(el, ho) {
+  if (!ho || !ho.knn) return null;
+  const part = (name, m) => {
+    if (!m || m.rooms_right_pc == null) return null;
+    const med = m.median_error_m != null ? `, median ${m.median_error_m} m` : "";
+    return `${name}: ${m.rooms_right_pc}% rooms right${med}`;
+  };
+  const parts = [part("fingerprints", ho.knn), part("spatial", ho.spatial)].filter(Boolean);
+  if (!parts.length) return null;
+  const better = ho.better === "knn" ? " Fingerprints did better here." : ho.better === "spatial" ? " Spatial did better here." : "";
+  return el("div", { class: "muted", style: "font-size:12px;margin-top:10px;line-height:1.5" },
+    `Tested on spots it hasn't seen: ${parts.join("; ")}.${better}`);
+}
+
 function _modelTab(ctx, el, cs, calData) {
   const wrap = el("div", { style: "display:flex;flex-direction:column;gap:14px" });
   const pts  = calData.points || [];
@@ -1752,6 +1769,8 @@ function _modelTab(ctx, el, cs, calData) {
     statGrid.appendChild(stat("Accuracy", pts.length >= 4 ? "Compute →" : "Need ≥4 pts", "#78909c"));
   }
   summCard.appendChild(statGrid);
+  const heldLine = _heldoutLine(el, calData.heldout);
+  if (heldLine) summCard.appendChild(heldLine);
   wrap.appendChild(summCard);
 
   // Per-room accuracy scoreboard + confusion pairs (gap #12, best-in-class
@@ -5455,7 +5474,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
       `Floor: ${_esc(_bkFloor)}`,
       `Room: ${_esc(_bkRoom || "\u2014")}`,
       `Position: ${_bkPos}`,
-      `RSSI: ${lastRssi}`,
+      `RSSI: ${_esc(lastRssi)}`,
       `Kind: ${_esc(bk.kind || "ble")}`,
     ];
     infoLine.innerHTML = `<span>${lines.join(" &nbsp;\u00b7&nbsp; ")}</span>`;
@@ -6048,7 +6067,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           const rssiColor = (info.rssi || -200) > -70 ? "#52b788" : (info.rssi || -200) > -85 ? "#f59e0b" : "#f87171";
           const shortName = (info.name || src || "?").substring(0, 10);
           chip.style.cssText = `padding:1px 6px;border-radius:3px;background:#0a1a12;border:1px solid #1b3526;color:#d1d5db;white-space:nowrap`;
-          chip.innerHTML = `${_esc(shortName)} <span style="color:${rssiColor};font-weight:600">${info.rssi ?? "?"}</span>`;
+          chip.innerHTML = `${_esc(shortName)} <span style="color:${rssiColor};font-weight:600">${_esc(String(info.rssi ?? "?"))}</span>`;
           if (info.age_s != null) chip.innerHTML += ` <span style="color:#64748b">${Math.round(info.age_s)}s</span>`;
           radioRow.appendChild(chip);
         }

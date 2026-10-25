@@ -167,6 +167,8 @@ async def ws_pro_invite_claim(hass: HomeAssistant, connection, msg) -> None:
         "license_tier": normalize_tier(data.get("tier"), default="pro"),
         "license_is_trial": False,
         "forensics_enabled": True,
+        "license_home_token": "", "license_homes_used": 0, "license_home_status": "",   # a new key: a fresh home on it
+        "license_homes_warning": {},
         SETTINGS_KEY: {"answered": token},
     })
     _invalidate_snapshot_cache(hass)

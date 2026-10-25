@@ -36,6 +36,18 @@
 .lv-vacation-label{font-weight:700}
 .lv-vacation-slider-wrap{display:flex;align-items:center;gap:6px}
 .lv-vacation-slider{width:100px;accent-color:#e0b23a}
+/* Alert pulse on a wall screen (lights_map.js safetyAlerts): the worst alert
+   and where, across the top until it clears; red for an alarm, amber for an
+   opening. A slow breath of its border, in CSS (the map redraws every 5 s). */
+.lv-alertbar{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:41;zoom:var(--wall-ui,1);
+  max-width:90vw;padding:8px 18px;border-radius:12px;background:rgba(60,10,10,.94);border:2px solid #ef4444;
+  color:#fee2e2;font-size:16px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  pointer-events:none;animation:lv-alert-breathe 2.4s ease-in-out infinite}
+.lv-alertbar.lv-alertbar-open{background:rgba(48,30,4,.94);border-color:#f59e0b;color:#fef3c7}
+@keyframes lv-alert-breathe{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}50%{box-shadow:0 0 18px 4px rgba(239,68,68,.55)}}
+.lv-alertbar.lv-alertbar-open{animation-name:lv-alert-breathe-open}
+@keyframes lv-alert-breathe-open{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0)}50%{box-shadow:0 0 18px 4px rgba(245,158,11,.5)}}
+@media (prefers-reduced-motion:reduce){.lv-alertbar{animation:none}}
 .emergency-banner{margin-top:12px;padding:8px 10px;border-radius:10px;background:rgba(127,29,29,.35);border:1px solid #dc2626}
 .emergency-banner-head{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:#fecaca;cursor:pointer}
 .emergency-banner-list{margin-top:6px;display:flex;flex-direction:column;gap:4px}
@@ -1262,7 +1274,9 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
    tool sits beside the map; every bar becomes a drawer that opens OVER it,
    put away by a slim icon rail down one edge. */
 .lv-mapcard.lv-display{padding:0;overflow:hidden;position:relative;background:#040a05}
-.lv-mapcard.lv-display .lv-stage{border-radius:0;border:none;width:calc(100% - 44px);margin-left:44px}
+/* border-box: the stage's own 10px padding inside its width, or it ran 20px past the card and cut
+   the right edge off a drawing as wide as the screen (a phone, a portrait wall). */
+.lv-mapcard.lv-display .lv-stage{border-radius:0;border:none;width:calc(100% - 44px);margin-left:44px;box-sizing:border-box}
 .lv-rail{position:absolute;left:0;top:0;bottom:0;width:44px;display:flex;flex-direction:column;
   align-items:center;gap:4px;padding:8px 0;background:linear-gradient(180deg,#101d14 0%,#0d1811 100%);
   border-right:1px solid rgba(120,190,155,.18);z-index:5;transition:transform .18s ease}
@@ -1574,3 +1588,19 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 /* Hide HA: under Home Assistant's 870 px its sidebar is always a drawer, so
    hiding it there would only be remembered for a wider screen later. */
 @media (max-width:870px){#haSide:not([aria-pressed="true"]){display:none}}
+
+/* Wall mode (?kiosk=1 on the sidebar Atlas, lights_panel.js _wallOn): the
+   card is the whole screen and the drawing fits it both ways (lights_map.js
+   applyZoom). The rail, drawers and the corner buttons scale with the wall
+   up to finger size (--wall-ctl; the text's own scale is --wall-ui), and the
+   stage makes room for the scaled rail. The shapes legend stays off.
+   The 3D view's side travels in its own stylesheet. */
+.lv-mapcard.lv-display.lv-wall{height:100vh;height:100dvh;display:flex;flex-direction:column;border-radius:0;border:none;margin:0}
+.lv-mapcard.lv-display.lv-wall > .lv-stage{flex:1 1 auto;min-height:0;container-type:size;
+  width:calc(100% - 44px * var(--wall-ctl,var(--wall-ui,1)));margin-left:calc(44px * var(--wall-ctl,var(--wall-ui,1)))}
+.lv-mapcard.lv-display.lv-wall > .lv-rail.hidden ~ .lv-stage{width:100%;margin-left:0}
+.lv-mapcard.lv-display.lv-wall > .lv-rail,
+.lv-mapcard.lv-display.lv-wall > .lv-drawer,.lv-mapcard.lv-display.lv-wall .lv-alone-anchor > button{zoom:var(--wall-ctl,var(--wall-ui,1))}
+/* A wall shows the overview only (control-room practice: the big screen is
+   the house at a glance; the fixture key is for whoever edits the map). */
+.lv-mapcard.lv-display.lv-wall > .lv-legend.lv-shapes{display:none}

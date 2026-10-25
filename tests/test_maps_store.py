@@ -141,6 +141,109 @@ async def test_replace_image_rejects_path_traversal(tmp_path: Path) -> None:
         )
 
 
+def test_a_sibling_folder_sharing_the_prefix_is_outside(tmp_path: Path) -> None:
+    """`maps_x` starts with the same characters as `maps` but is not in it."""
+    store = _make_store(tmp_path)
+    (store.maps_dir.parent / "maps_x").mkdir()
+    (store.maps_dir.parent / "maps_x" / "f.png").write_bytes(b"x")
+    assert store.image_file("../maps_x/f.png", must_exist=False) is None
+    assert store.image_file("../maps_x/f.png", must_exist=True) is None
+    assert store.image_file("a.png", must_exist=False) == (store.maps_dir / "a.png").resolve()
+
+
+# ---------------------------------------------------------------------------
+# Tests: empty / undecodable uploads
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload, why", [
+    ("", "empty"),                                         # a backup whose image export failed
+    ("A", "base64"),                                       # not base64 at all
+    (base64.b64encode(b"<html>nope</html>").decode(), "not a PNG"),
+])
+async def test_add_map_refuses_a_picture_that_is_not_one(tmp_path: Path, payload: str, why: str) -> None:
+    store = _make_store(tmp_path)
+    with pytest.raises(ValueError, match=why):
+        await store.async_add_map("Ground", "g.png", "image/png", 800, 600, payload)
+    assert list(store.maps_dir.iterdir()) == [], "a file was written for a picture that isn't one"
+    assert store.list_maps() == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: a backup restore of a map whose backup has no picture
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_restore_without_a_picture_keeps_the_map_and_its_data(tmp_path: Path) -> None:
+    """allow_no_image creates the map with no file; everything else comes through."""
+    store = _make_store(tmp_path)
+    info = await store.async_add_map("Ground", "g.png", "image/png", 1600, 1200, "",
+                                     allow_no_image=True)
+    assert info["image"]["missing"] is True
+    assert (info["image"]["width"], info["image"]["height"]) == (1600, 1200)
+    assert list(store.maps_dir.iterdir()) == [], "no picture, so no file"
+
+    cal = {"mode": "two_point", "px_per_meter": 42.5,
+           "reference_points": [{"x": 0.1, "y": 0.2}, {"x": 0.8, "y": 0.2}]}
+    bounds = {"Kitchen": {"type": "poly", "points": [[0.1, 0.1], [0.5, 0.1], [0.5, 0.5]]}}
+    rx = [{"id": "esp-kitchen", "label": "Kitchen", "x": 0.3, "y": 0.3, "room": "Kitchen"}]
+    await store.async_update_map(info["id"], calibration=cal, room_bounds=bounds, receivers=rx,
+                                 stack={"z_level": 1, "ceiling_height_m": 2.7})
+    m = store.get_map(info["id"])
+    assert m["calibration"]["px_per_meter"] == 42.5
+    assert m["calibration"]["reference_points"] == cal["reference_points"]
+    assert m["room_bounds"]["Kitchen"]["points"] == bounds["Kitchen"]["points"]
+    assert [(r["id"], r["x"], r["y"]) for r in m["receivers"]] == [("esp-kitchen", 0.3, 0.3)]
+    assert m["stack"]["z_level"] == 1
+
+    # Re-uploading the picture at the stored size fills it in and moves nothing.
+    await store.async_replace_image(info["id"], _small_png_b64(), 1600, 1200)
+    m = store.get_map(info["id"])
+    assert "missing" not in m["image"]
+    assert (store.maps_dir / m["image"]["filename"]).exists()
+    assert m["room_bounds"]["Kitchen"]["points"] == bounds["Kitchen"]["points"]
+    assert m["calibration"]["px_per_meter"] == 42.5
+
+
+@pytest.mark.asyncio
+async def test_allow_no_image_still_refuses_a_picture_that_is_not_a_png(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    with pytest.raises(ValueError, match="not a PNG"):
+        await store.async_add_map("Ground", "g.jpg", "image/jpeg", 800, 600,
+                                  base64.b64encode(b"\xff\xd8\xff\xe0JFIF").decode(),
+                                  allow_no_image=True)
+    assert store.list_maps() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload, extra, code", [
+    ("", {}, "invalid_image"),                                   # the Upload tab: still refused
+    ("A", {}, "invalid_image"),
+    (base64.b64encode(b"<html>nope</html>").decode(), {}, "invalid_image"),
+    ("A" * ((MAX_MAP_BYTES * 4) // 3 + 8), {}, "upload_too_large"),
+    ("", {"allow_no_image": True}, None),                        # the backup restore
+], ids=["empty", "bad-base64", "not-png", "too-large", "restore-no-image"])
+async def test_the_upload_command_names_what_was_wrong(tmp_path: Path, payload, extra, code) -> None:
+    from custom_components.padspan_bright.const import DATA_MAPS, DOMAIN
+    from custom_components.padspan_bright.ws_maps import ws_maps_upload
+
+    store = _make_store(tmp_path)
+    hass = MagicMock()
+    hass.data = {DOMAIN: {DATA_MAPS: store}}
+    conn = MagicMock()
+    await ws_maps_upload(hass, conn, {"id": 1, "type": "padspan_bright/maps_upload", "name": "Ground",
+                                      "filename": "g.png", "mime": "image/png", "width": 800,
+                                      "height": 600, "png_base64": payload, **extra})
+    if code is None:
+        conn.send_error.assert_not_called()
+        assert conn.send_result.call_args[0][1]["map"]["image"]["missing"] is True
+    else:
+        assert conn.send_error.call_args[0][1] == code
+        assert store.list_maps() == []
+
+
 # ---------------------------------------------------------------------------
 # Tests: add / get / delete lifecycle
 # ---------------------------------------------------------------------------

@@ -16,9 +16,12 @@
  *
  * Uses a "draft" copy of the model so edits don't take effect until Save.
  */
-const { BUY_URL, PRO_PRICE, PRO_LIFETIME_PRICE, proLifetimeOpen, LICENCE_PATH, BRIGHT_PRICE, BRIGHT_UPGRADE_PRICE, EDITIONS_URL,
+const { BUY_URL, PRO_PRICE, proLifetimeWords, proLifetimeOpen, LICENCE_PATH, BRIGHT_PRICE, BRIGHT_UPGRADE_PRICE, EDITIONS_URL,
         tierAtLeast, currentTier, IDEAS_URL, IDEAS_NEW_URL, IDEAS_MAIL, surfacesForEdition } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
+// 📺 Wall screens (views/wall_card.js). Optional: a card that fails to load
+// leaves the rest of Settings as it is.
+const WALLCARD = await import(`./wall_card.js${new URL(import.meta.url).search}`).catch(() => null);
 // Optional too: the tester sign-up must not take the Settings tab with it.
 const { testerSection } = await import(`./tester_signup.js${new URL(import.meta.url).search}`)
   .catch(err => { console.warn("PadSpan: tester_signup failed to load", err); return { testerSection: () => null }; });
@@ -251,13 +254,13 @@ function _settingsAppearance(ctx, el, helpBtn, draft, haFloors, haAreas, roomCol
   {
     const settings = ctx.state.settings || {};
     const PAL = ["graphite", "ocean", "dusk", "contrast"];   // day_theme.js PALETTES
-    const PRO_LOOKS = PAL.concat(["day"]);                    // PadSpan Pro; Night and Light are everyone's
+    const PRO_LOOKS = ["graphite", "ocean", "dusk", "day"];   // PadSpan Pro; Night, Light and High contrast are everyone's
     const proOk = tierAtLeast(currentTier(settings), "pro");
     // PadSpan Bright never had these and its ladder doesn't sell PadSpan Pro:
     // there they are simply not shown, unless a Pro key unlocks them.
     const hideLocked = String(settings.edition || "").toLowerCase() === "bright" && !proOk;
     const now = proOk && settings.day_theme === true ? "day" : settings.light_theme === true ? "light"
-      : proOk && PAL.includes(settings.theme_palette) ? settings.theme_palette : "night";
+      : PAL.includes(settings.theme_palette) && (proOk || !PRO_LOOKS.includes(settings.theme_palette)) ? settings.theme_palette : "night";
     const NAMES = { night: "Night", graphite: "Graphite", ocean: "Ocean", dusk: "Dusk", contrast: "High contrast", light: "Light", day: "Day" };
     const mkTheme = (val, label) => {
       const locked = PRO_LOOKS.includes(val) && !proOk;
@@ -274,6 +277,17 @@ function _settingsAppearance(ctx, el, helpBtn, draft, haFloors, haAreas, roomCol
       });
       return b;
     };
+    // Follow the sun (panel.js _sunLook): Day while the sun is up (Light
+    // without Pro), the Theme picked here once it sets. Off by default.
+    const sunToggle = el("input",{type:"checkbox",id:"themeFollowSunToggle",style:"width:16px;height:16px;accent-color:#52b788;cursor:pointer"});
+    sunToggle.checked = settings.theme_follow_sun === true;
+    sunToggle.addEventListener("change", async()=>{
+      try {
+        await ctx.actions.settingsSet({ theme_follow_sun: sunToggle.checked });
+        ctx.toast(sunToggle.checked ? "Theme follows the sun" : "Theme stays as picked");
+      } catch(e){ ctx.toast("Failed to save", true); }
+    });
+    const hasSun = !!(ctx.hass && ctx.hass.states && ctx.hass.states["sun.sun"]);
     wrap.appendChild(el("div",{class:"card",style:"margin-top:12px;border-color:" + (now !== "night" ? "#52b788" : "#2d4a38")},[
       el("div",{class:"h2",style:"margin:0 0 4px;color:#52b788"}, "Theme"),
       el("div",{class:"muted",style:"font-size:12px;margin-bottom:10px"},
@@ -287,7 +301,15 @@ function _settingsAppearance(ctx, el, helpBtn, draft, haFloors, haAreas, roomCol
       el("div",{class:"row",style:"flex-wrap:wrap"},[ mkTheme("night","Night"), mkTheme("graphite","Graphite"), mkTheme("ocean","Ocean"),
         mkTheme("dusk","Dusk"), mkTheme("contrast","High contrast"), mkTheme("light","Light (inverted)"), mkTheme("day","Day") ].filter(Boolean)),
       ...(proOk || hideLocked ? [] : [el("div",{class:"muted",style:"font-size:12px;margin-top:8px"},
-        "Graphite, Ocean, Dusk, High contrast and Day come with PadSpan Pro (" + LICENCE_PATH + "). Night and Light are in every edition.")]),
+        "Graphite, Ocean, Dusk and Day come with PadSpan Pro (" + LICENCE_PATH + "). Night, Light and High contrast are in every edition.")]),
+      el("div",{style:"display:flex;align-items:center;gap:8px;margin-top:12px"},[
+        sunToggle,
+        el("label",{for:"themeFollowSunToggle",style:"font-size:13px;color:#e2e8f0;cursor:pointer;font-weight:600"}, "Follow the sun"),
+      ]),
+      el("div",{class:"muted",style:"font-size:12px;margin-top:4px"},
+        (proOk ? "Day from sunrise to sunset" : "Light (inverted) from sunrise to sunset") +
+        ", then the theme picked above (Night if that is Day or Light). Goes by Home Assistant's Sun (sun.sun)." +
+        (hasSun ? "" : " This Home Assistant doesn't have it (Settings → Devices & services → Sun), so the theme stays as picked.")),
     ]));
   }
 
@@ -815,6 +837,7 @@ function _settingsPresence(ctx, el){
       el("div",{class:"muted",style:"font-size:12px"},
         "Hides all unidentified BLE devices from the Objects list, overview counts, and dropdowns. " +
         "Scanning continues in the background so tracked objects still work. " +
+        "It only changes what this panel shows, not how much work Home Assistant or PadSpan does. " +
         "Ideal for busy environments (condos, offices) where you only care about your own devices. " +
         "Turn off when you need to discover and tag new objects."),
     ]));
@@ -918,6 +941,100 @@ function _settingsPresence(ctx, el){
       `Set to 0 for instant room switching.`
     ),
   ]));
+
+  // ── Hold room through a short gap (hold_last_room_s, display only) ──────────
+  const currentHold = (settings.hold_last_room_s != null ? Number(settings.hold_last_room_s) : 0);
+  const holdInp = el("input", {
+    type: "number", min: "0", max: "600", step: "10", value: String(currentHold), style: inpStyle,
+  });
+  const holdSaveBtn = el("button", { class: "btn" }, "Save");
+  holdSaveBtn.addEventListener("click", async () => {
+    const v = Math.max(0, Math.min(600, parseFloat(holdInp.value) || 0));
+    try {
+      await ctx.actions.settingsSet({ hold_last_room_s: v });
+      ctx.toast(v > 0 ? `Room held through gaps up to ${v}s` : "Room hold off");
+    } catch(e) { ctx.toast("Failed to save setting", true); }
+  });
+  wrap.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "h2" }, "Hold Room Through Short Gaps"),
+    el("div", { class: "muted", style: "font-size:12px;margin-bottom:14px" },
+      "When a device goes quiet for a minute and comes back, PadSpan forgets its room until the room vote agrees again, " +
+      "so it can show no room for a few polls. With this on, the panel keeps showing the room it was in before the gap, " +
+      "for up to this many seconds. Display only: how rooms are decided does not change."
+    ),
+    el("div", { style: rowStyle }, [
+      el("div", { style: "font-size:13px;color:#a7f3d0;min-width:130px" }, "Hold last room"),
+      holdInp,
+      el("div", { class: "muted", style: "font-size:12px" }, "seconds"),
+      holdSaveBtn,
+    ]),
+    el("div", { class: "muted", style: "font-size:11px;margin-top:8px" },
+      `Current: ${currentHold > 0 ? currentHold + "s" : "off"}. 0 = off (default). Range: 0–600s.`
+    ),
+  ]));
+
+  // ── "Why this room" sensor attribute (room_reason_attribute) ────────────────
+  {
+    const reasonOn = settings.room_reason_attribute === true;
+    const reasonToggle = el("input",{type:"checkbox",id:"roomReasonToggle",style:"width:16px;height:16px;accent-color:#52b788;cursor:pointer"});
+    reasonToggle.checked = reasonOn;
+    reasonToggle.addEventListener("change", async()=>{
+      try {
+        await ctx.actions.settingsSet({ room_reason_attribute: reasonToggle.checked });
+        ctx.toast(reasonToggle.checked ? "Room reason attribute on" : "Room reason attribute off");
+      } catch(e){ ctx.toast("Failed to save", true); }
+    });
+    wrap.appendChild(el("div",{class:"card"},[
+      el("div",{class:"h2"}, "Why This Room (Sensor Attribute)"),
+      el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:10px"},[
+        reasonToggle,
+        el("label",{for:"roomReasonToggle",style:"font-size:13px;color:#e2e8f0;cursor:pointer;font-weight:600"},
+          "Add a room_reason attribute to each area sensor"),
+      ]),
+      el("div",{class:"muted",style:"font-size:12px"},
+        "Shows in Home Assistant why a device is in its room: how many recent polls voted for it and how many it needs, " +
+        "whether a jump to a far room is being held back, whether the current room was kept although another read slightly stronger, " +
+        "the positioning step's note, the top room scores, and whether the room is being held through a gap. " +
+        "Useful for fixing flapping rooms. Off by default; it adds to what the recorder stores."),
+    ]));
+  }
+
+  // ── Honest accuracy: three positioning choices, all off by default ─────────
+  {
+    const rows = [
+      ["positioning_pick_better", "Pick the better method for this house",
+       "PadSpan places devices two ways: from the radios' positions (spatial) and from your calibration points (fingerprints). " +
+       "With this on, it uses whichever one did better on calibration spots it had not seen (Calibration → Model shows both). " +
+       "It only switches on a clear win, so it does not flip back and forth. Needs calibration points."],
+      ["positioning_unsure", "Mark a room as unsure when the signal is thin",
+       "When fewer than 3 scanners hear a device, or no calibration point matches it well, the device keeps the room it had " +
+       "and is marked unsure (a room_unsure attribute) instead of being moved on weak evidence."],
+      ["positioning_sensor_fusion", "Use motion sensors and usual moves to break ties",
+       "When two rooms read almost the same, a motion, occupancy or presence sensor in one of them, and the room-to-room moves " +
+       "PadSpan has learned, decide between them. It never picks a room no scanner hears. In a busy house a motion sensor may " +
+       "be someone else, so this is off by default."],
+    ];
+    const card = el("div", { class: "card" }, [el("div", { class: "h2" }, "Positioning Choices")]);
+    for (const [key, label, help] of rows) {
+      const id = "hacc_" + key;
+      const tg = el("input", { type: "checkbox", id, style: "width:16px;height:16px;accent-color:#52b788;cursor:pointer" });
+      tg.checked = settings[key] === true;
+      tg.addEventListener("change", async () => {
+        try {
+          await ctx.actions.settingsSet({ [key]: tg.checked });
+          ctx.toast(`${label}: ${tg.checked ? "on" : "off"}`);
+        } catch (e) { ctx.toast("Failed to save", true); }
+      });
+      card.appendChild(el("div", { style: "display:flex;align-items:center;gap:8px;margin:10px 0 4px" }, [
+        tg,
+        el("label", { for: id, style: "font-size:13px;color:#e2e8f0;cursor:pointer;font-weight:600" }, label),
+      ]));
+      card.appendChild(el("div", { class: "muted", style: "font-size:12px" }, help));
+    }
+    card.appendChild(el("div", { class: "muted", style: "font-size:11px;margin-top:10px" },
+      "All off by default. Off, rooms and positions are worked out exactly as before."));
+    wrap.appendChild(card);
+  }
 
   // ── Presence Poll Interval ──────────────────────────────────────────────────
   const currentPoll = (settings.presence_poll_interval_s != null ? Number(settings.presence_poll_interval_s) : 10);
@@ -1056,6 +1173,58 @@ function _settingsPresence(ctx, el){
     ]),
   ]));
 
+  // ── Enhanced security ──────────────────────────────────────────────────────
+  // OFF by default; only an administrator turns it on or off (ws_settings).
+  // While it is on, the backend's require_admin_if_enhanced (ws_common)
+  // refuses changes to the home's shared setup from anyone else. New
+  // protections go behind the same switch: add them to the list below too.
+  const secOn = settings.enhanced_security === true;
+  const secAdmin = !!(ctx.hass && ctx.hass.user && ctx.hass.user.is_admin);
+  const secBtn = el("button", { class: "btn inline", style: secOn
+    ? "background:#0a2a1a;border-color:#52b788;color:#52b788;font-weight:700"
+    : "color:#94a3b8" }, secOn ? "On" : "Off");
+  if (!secAdmin) { secBtn.disabled = true; secBtn.title = "Only an administrator can change this"; }
+  secBtn.addEventListener("click", async () => {
+    try {
+      await ctx.actions.settingsSet({ enhanced_security: !secOn });
+      ctx.toast(`Enhanced security ${!secOn ? "on" : "off"}`);
+      ctx.actions.renderRooms();
+    } catch(e) { ctx.toast("Failed to save setting: " + String((e && e.message) || e), true); }
+  });
+  const secCovers = [
+    "Devices: merging, deleting, renaming and labelling them",
+    "Calibration points and the calibration model",
+    "The house layout: rooms, scanners, lights, beacons, walls, floor heights and map details",
+    "Scanner offsets and turning radios off or marking them lost",
+    "Follow alerts, phones added for tracking, and Find My links",
+    "Clearing history, forgetting lost items and suspending learning",
+    "Live Aboard edits, sharing to its library and its photo reader",
+    "PadSpan's log",
+    "Settings that apply to the whole home (the update check, device maker lookup, positioning and the rest)",
+  ];
+  wrap.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "h2" }, "Enhanced security"),
+    el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px;line-height:1.55" },
+      "When this is on, only a Home Assistant administrator can change how PadSpan is set up for this home. " +
+      "Everyone else in the household can still view and use PadSpan: the maps, Follow, lights, the emergency " +
+      "lighting test, the theme, the choices kept in their own browser (Map or 3D, what the Atlas shows, how much " +
+      "of the menu they see), and assigning a Bluetooth radio to a room. Display settings that change every screen " +
+      "in the home (Quiet mode, the Atlas as Overview, the Atlas layout and its showcase theme) need an admin while it is on. " +
+      "If they try to change something else, PadSpan tells them it needs an admin. " +
+      "More protections will be added here over time."
+    ),
+    el("div", { style: "font-size:12px;color:#cbd5e1;margin-bottom:4px" }, "What it covers now:"),
+    el("ul", { style: "font-size:12px;color:#94a3b8;margin:0 0 12px 18px;padding:0;line-height:1.55" },
+      secCovers.map(t => el("li", {}, t))),
+    el("div", { style: rowStyle }, [
+      el("div", { style: "font-size:13px;color:#a7f3d0;min-width:130px" }, "Enhanced security"),
+      secBtn,
+    ]),
+    el("div", { class: "muted", style: "font-size:11px;margin-top:8px" },
+      secAdmin ? "Off by default. Takes effect at once, no restart needed." : "Only an administrator can change this."
+    ),
+  ]));
+
   // ── Help improve PadSpan (opt-in usage report) ─────────────────────────────
   // OFF by default. The Preview shows the exact JSON that would go, before or
   // after opting in; the backend refuses to send anything identifier-shaped
@@ -1065,6 +1234,9 @@ function _settingsPresence(ctx, el){
     ? "background:#0a2a1a;border-color:#52b788;color:#52b788;font-weight:700"
     : "color:#94a3b8" }, telOn ? "Opted in" : "Not sharing");
   telBtn.addEventListener("click", async () => {
+    // Off, on a key used on more than two homes: what that means, first.
+    const offWarn = telOn ? reportOffConfirmText(settings) : "";
+    if (offWarn && !confirm(offWarn)) return;
     try {
       await ctx.actions.settingsSet({ telemetry_enabled: !telOn });
       ctx.toast(!telOn ? "Thank you — usage report on. Preview shows exactly what goes." : "Usage report off");
@@ -1133,9 +1305,11 @@ function _settingsPresence(ctx, el){
     el("div", { class: "h2" }, "Help improve PadSpan"),
     el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px;line-height:1.55" },
       "Opt in to send the developer an anonymous usage report at most once a day: which version and " +
-      "Home Assistant; the country and language set in Home Assistant (never looked up from your address); how many scanners, floors, rooms, placed lights, walls, maps, calibration points, " +
+      "Home Assistant; the country and language set in Home Assistant (never looked up from your address); with a licence used on more than two homes, a short code made from the key (never the key) that is the same in each of that licence's homes, so they're seen together; how many scanners, floors, rooms, placed lights, walls, maps, calibration points, " +
       "IRKs and objects you have and which related integrations are installed; which feature switches " +
-      "are on; which tabs and tools got used (and whether IRKs are resolving anything); a few health flags; how hard the machine " +
+      "are on; which screen the Overview shows and any Overview settings changed from their defaults (as words, never numbers or names), " +
+      "and with two screens or more, a few words per screen (first five); " +
+      "with quiet mode on, roughly what share of objects it hides; which tabs and tools got used (and whether IRKs are resolving anything); a few health flags; how hard the machine " +
       "works (load, Home Assistant's CPU and memory, sampled once a minute) and what class of machine it is (CPU count, RAM size, board); and how many warnings each part of the " +
       "code logged. Counts, versions and flags only \u2014 never addresses, keys, device or room names, " +
       "coordinates or timestamps. Preview is the complete list. PadSpan is developed against one house; " +
@@ -2912,6 +3086,107 @@ function _tiersWizard(ctx){
 // live inside the Forensics toggle: buying Pro to place lights meant enabling a
 // recording feature you did not want in order to activate it. Every gate
 // message in the product now names this card (editions.js LICENCE_PATH).
+// One key, up to five homes (licence_homes.py; the licence server counts
+// them). Loaded on request: opening Settings never calls the server.
+const HOME_REFUSED = {
+  activation_limit: "This home isn't counted: the key is already on all its homes. Remove one below (from any home) and this one joins at its next daily check.",
+  activation_rate: "This home isn't counted: the key joined many new homes this month. It joins once the month is over.",
+  homes_frozen: "This home isn't counted: the key is paused for new homes. Reply to your licence email to sort it out.",
+  removed: "This home isn't counted: it was removed from the key. Remove another home below (from any home) or reply to your licence email to use it here.",
+  needs_report: "This home isn't counted: a licence's first two homes always count, and to use it on more than two, every home needs its usage report on (Settings \u2192 Presence \u2192 Help improve PadSpan).",
+};
+// A key on more than two homes needs every home's usage report on (0.38.163).
+// The licence server decides and names the homes; these only say it.
+function _homesDate(iso){
+  const t = Date.parse(String(iso || ""));
+  return isNaN(t) ? String(iso || "").slice(0, 10) : new Date(t).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+}
+export function homesWarningText(s){
+  const w = (s && s.license_homes_warning) || {};
+  const labels = Array.isArray(w.off_labels) ? w.off_labels.filter(x => typeof x === "string" && x).join(", ") : "";
+  if (s.license_home_status === "needs_all_reports") {
+    if (s.telemetry_enabled === false) {
+      return "This home stopped using Pro because its own usage report is off, and every home on a key with more than 2 must keep it on. " +
+        "Turn it back on here (Settings \u2192 Presence \u2192 Help improve PadSpan) and this home picks up again at its next check.";
+    }
+    return "This home stopped using Pro because the usage report is off on another home on this key" + (labels ? " (" + labels + ")" : "") +
+      ". Turn it back on there and this home picks up again at its next check.";
+  }
+  if (w.warning !== "reports_off") return "";
+  const n = Number(s.license_homes_used) || 0;
+  return `This key is on ${n > 2 ? n : "more than 2"} homes. Every home on a key with more than 2 must keep the usage report on. ` +
+    // A home on PadSpan before 0.38.160 can't say its report is on: the server names it "(update PadSpan)".
+    (/\(update PadSpan\)/.test(labels) ? "The report is off on, or PadSpan needs updating on: " : "The report is off on: ") +
+    `${labels || "one of them"}. Unless it's turned back on by ${_homesDate(w.grace_until)}, the homes beyond your first two stop using Pro.`;
+}
+// Asked before the usage report goes off on a home whose key is on more than two homes; "" = no question.
+export function reportOffConfirmText(s){
+  const n = Number((s && s.license_homes_used) || 0);
+  if (!s || !s.pro_has_key || !(n > 2)) return "";
+  // A grace already running (a report off on another home) has its own date.
+  const w = s.license_homes_warning || {};
+  const when = w.warning === "reports_off" && w.grace_until ? "on " + _homesDate(w.grace_until) : "within 14 days";
+  return `This key is used on ${n} homes. With more than 2, every home must keep the report on. ` +
+    `If you turn it off here, the homes beyond your first two stop using Pro ${when} unless it's back on.`;
+}
+function _licenceHomes(ctx, el, s){
+  const box = el("div", { style: "margin-top:12px;padding-top:10px;border-top:1px solid #1f3a2a" });
+  box.appendChild(el("div", { style: "font-weight:700;font-size:13px;color:#cbd5e1;margin-bottom:4px" }, "Homes"));
+  box.appendChild(el("div", { style: "font-size:12px;color:#94a3b8;line-height:1.5;margin-bottom:8px" },
+    "One licence covers up to five homes (five Home Assistants). The first two always count. With more than two, every home must keep its usage report on " +
+    "(Settings \u2192 Presence \u2192 Help improve PadSpan), which is how one licence's homes are seen together; if one turns it off, the key drops back to its first two homes after 14 days. " +
+    "A reinstalled or replaced Home Assistant takes the place of a home that hasn't checked in for 14 days, and one silent for 45 days frees its place by itself."));
+  if (HOME_REFUSED[s.license_home_status]) {
+    box.appendChild(el("div", { style: "font-size:12px;color:#fbbf24;line-height:1.5;margin-bottom:8px" }, "\u26A0 " + HOME_REFUSED[s.license_home_status]));
+  }
+  const homesWarn = homesWarningText(s);
+  const warnBox = homesWarn
+    ? box.appendChild(el("div", { class: "homes-reports-warning", style: "font-size:12px;color:#fbbf24;line-height:1.5;margin-bottom:8px" }, "\u26A0 " + homesWarn))
+    : null;
+  const list = el("div", {});
+  const load = async (op, extra) => {
+    list.textContent = "Asking the licence server\u2026";
+    let r;
+    try { r = await ctx.actions.wsCall("padspan_bright/licence_homes", { op, ...(extra || {}) }); }
+    catch (e) { list.textContent = "Couldn't reach the licence server: " + String((e && e.message) || e); return; }
+    list.textContent = "";
+    // The licence they share, said the same way in each of its homes.
+    const L = r.licence || {};
+    // Down to the first two homes (one just removed): the reports warning no longer applies.
+    if (warnBox && r.homes.length <= (L.homes_free || 2)) warnBox.remove();
+    list.appendChild(el("div", { style: "font-size:12px;color:#cbd5e1;margin-bottom:6px;line-height:1.5" },
+      `One licence${L.key_end ? " (key ending " + L.key_end + ")" : ""}${L.owner ? " for " + L.owner : ""}: ` +
+      `${r.homes.length} of ${r.homes_max} homes` + (r.frozen ? " \u00B7 paused for new homes" : "")));
+    r.homes.forEach((h, i) => { h._place = i + 1; });
+    for (const h of r.homes) {
+      const name = h.label || (h.this ? "This home" : "A home");
+      const line = el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 0;border-top:1px solid #16271d;font-size:12px" });
+      line.appendChild(el("span", { style: "color:#e2e8f0;font-weight:600;min-width:120px" }, name + (h.this ? " (this one)" : "")));
+      line.appendChild(el("span", { style: "color:#94a3b8" },
+        `Home ${h._place} \u00B7 ` + (h.last_seen ? "last check " + h.last_seen : "not checked in yet") + (h.version ? " \u00B7 " + h.version : "") +
+        (r.homes.length > (L.homes_free || 2) ? (h.reporting ? " \u00B7 usage report on" : " \u00B7 usage report off") : "")));
+      if (h.this) {
+        line.appendChild(el("button", { class: "btn inline", type: "button", style: "font-size:11px", onclick: () => {
+          const v = prompt("A name for this home (your other homes show it):", h.label || "");
+          if (v !== null) load("label", { label: v.trim().slice(0, 60) });
+        } }, "Rename"));
+      }
+      line.appendChild(el("button", { class: "btn inline", type: "button", style: "font-size:11px;margin-left:auto", onclick: () => {
+        const what = h.this
+          ? "this home? It stops being counted, and comes back at its next daily check if a place is free."
+          : `"${name}"? It stops being counted at its next check unless a place is free.`;
+        if (confirm("Remove " + what)) load("remove", { home_id: h.id });
+      } }, "Remove"));
+      list.appendChild(line);
+    }
+  };
+  const show = el("button", { class: "btn inline", type: "button", style: "font-size:12px",
+    onclick: () => { show.remove(); load("list"); } }, "Show this key's homes");
+  box.appendChild(show);
+  box.appendChild(list);
+  return box;
+}
+
 function _settingsLicence(ctx, el){
   const s = ctx.state.settings || {};
   const tier = String(s.tier || "free").toLowerCase();
@@ -3007,13 +3282,13 @@ function _settingsLicence(ctx, el){
     "What does each tier unlock?");
   row.appendChild(tourBtn);
   card.appendChild(row);
-  // The launch offer, under the buy button while it lasts (editions.js; the
-  // site takes its form away at the same moment). A lifetime key never has
-  // the buy button, so never this either.
+  if (hasKey) card.appendChild(_licenceHomes(ctx, el, s));
+  // Pro for life, under the buy button (editions.js: $89 until November 30,
+  // then $168). A lifetime key never has the buy button, so never this either.
   if (canBuy && proLifetimeOpen()) {
     card.appendChild(el("div", { style: "font-size:12px;margin-top:8px" },
       el("a", { href: BUY_URL, target: "_blank", rel: "noopener", style: "color:#a7f3d0;text-decoration:underline" },
-        "Or PadSpan Pro for life — " + PRO_LIFETIME_PRICE + ", once, until December 31.")));
+        "Or PadSpan Pro for life — " + proLifetimeWords() + ".")));
   }
   // The 90-day trial (views/trial_offer.js): the same card every paid wall
   // offers, shown here while there is no key at all. Its own Buy link is off —
@@ -3095,9 +3370,28 @@ function _settingsFeatures(ctx, el){
             "areas where walls, furniture, or interference cause positioning errors.",
     },
     {
+      key: "roomplan_import_enabled",
+      label: "RoomPlan Import",
+      desc: "Lets Maps → Rooms import an Apple RoomPlan scan exported as JSON (CapturedRoom or CapturedStructure), " +
+            "beside Sweet Home 3D files. Rooms come in as a candidate to review before anything is saved.",
+    },
+    {
+      key: "vacuum_import_enabled",
+      label: "Robot Vacuum Import",
+      desc: "Lets Maps → Rooms import a robot vacuum's map (Valetudo, Dreame or Xiaomi) as a new floor plan, with its rooms " +
+            "on a floor that has no plans yet. Admins only. A robot already linked keeps working while this is off.",
+    },
+    {
       key: "phone_wizard_enabled",
       label: "Phone Setup Wizard",
       desc: "Shows a guided setup flow in the IRK Manager for adding phones and watches. Detects IRK Capture devices and walks through the pairing process.",
+    },
+    {
+      key: "iphone_irk_guide",
+      label: "iPhone Setup Path",
+      desc: "iPhones have no BLE Transmitter (that sensor is in the Android Companion App only). With this on, an iPhone in " +
+            "Overview's phone list and the IRK Manager's phone wizard (shown while this is on) walk through getting its IRK, adding it with " +
+            "Private BLE Device and checking it resolves. Android phones see the same steps as before.",
     },
     {
       key: "mac_rotation_bridging",
@@ -3423,10 +3717,109 @@ function _atlasWeatherSection(ctx, el, settings){
 const _ATLAS_3D_QUALITY = [["auto", "Auto — picked for this screen"], ["low", "Low — for wall tablets and phones"],
                            ["high", "High — sun shadows and more lamps"]];
 // Live Aboard's look (atlas_3d_look): the Atlas's colours, rooms and floor
-// numbers (its Showcase theme, or the plain Atlas), or its own dark look.
-const _ATLAS_3D_LOOK = [["atlas", "Same as the Atlas"], ["own", "Live Aboard's own"]];
+// numbers (its Showcase theme, or the plain Atlas), its own dark look, or
+// Studio: its own colours under soft light, a sky from the sun and a stage.
+const _ATLAS_3D_LOOK = [["atlas", "Same as the Atlas"], ["own", "Live Aboard's own"], ["studio", "Studio — soft light and sky"]];
 // How long the sidebar's Live Aboard waits untouched before it goes back to its home view.
 const _ATLAS_3D_IDLE = [[0, "Off"], [30, "After 30 s"], [60, "After 1 min"], [300, "After 5 min"]];
+// What may fly the sidebar's Live Aboard (ws_settings.DIRECTOR_DOMAINS, DIRECTOR_MAX).
+const _DIRECTOR_DOMAINS = ["event", "binary_sensor", "alarm_control_panel"];
+const _DIRECTOR_MAX = 12;
+function _atlas3dDirector(ctx, el, settings, save, row){
+  const states = (ctx.hass && ctx.hass.states) || {};
+  const admin = !!(ctx.hass && ctx.hass.user && ctx.hass.user.is_admin);
+  const nameOf = (eid) => { const a = states[eid] && states[eid].attributes; return a && a.friendly_name ? `${a.friendly_name} (${eid})` : eid; };
+  let list = (Array.isArray(settings.atlas_3d_director) ? settings.atlas_3d_director : [])
+    .filter(t => t && typeof t.entity === "string").map(t => ({ entity: t.entity, camera: typeof t.camera === "string" ? t.camera : "" }));
+  const wrap = el("div",{"data-la3d-director":""});
+  const rows = el("div",{});
+  const pickT = document.createElement("select");
+  const pickC = document.createElement("select");
+  for (const sel of [pickT, pickC]) { sel.className = "select"; sel.style.width = "auto"; sel.style.maxWidth = "100%"; sel.disabled = !admin; }
+  pickT.appendChild(el("option",{value:""}, "Pick a doorbell, door, sensor or alarm…"));
+  for (const eid of Object.keys(states).filter(e => _DIRECTOR_DOMAINS.includes(e.split(".")[0])).sort()) pickT.appendChild(el("option",{value:eid}, nameOf(eid)));
+  pickC.appendChild(el("option",{value:""}, "No camera"));
+  for (const eid of Object.keys(states).filter(e => e.startsWith("camera.")).sort()) pickC.appendChild(el("option",{value:eid}, nameOf(eid)));
+  const add = el("button",{class:"btn inline"}, "Add");
+  add.disabled = !admin;
+  if (!admin) add.title = "Only an administrator can change this";
+  const keep = (next) => { const was = list; list = next; paint(); save("atlas_3d_director", next, ()=>{ list = was; paint(); }); };
+  function paint(){
+    while (rows.firstChild) rows.removeChild(rows.firstChild);
+    if (!list.length) rows.appendChild(el("div",{style:"font-size:12px;color:#94a3b8;margin-top:6px"}, "Off: nothing picked."));
+    for (const t of list) {
+      const x = el("button",{class:"btn inline",title:"Remove"}, "✕");
+      x.disabled = !admin;
+      x.addEventListener("click", ()=> keep(list.filter(o => o.entity !== t.entity)));
+      rows.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px;color:#e2e8f0"},
+        [el("span",{}, nameOf(t.entity) + (t.camera ? ` → 📷 ${nameOf(t.camera)}` : "")), x]));
+    }
+    add.disabled = !admin || list.length >= _DIRECTOR_MAX;
+  }
+  add.addEventListener("click", ()=>{
+    const e = pickT.value;
+    if (!e || list.some(o => o.entity === e)) return;
+    keep([...list, { entity: e, camera: pickC.value || "" }]);
+    pickT.value = ""; pickC.value = "";
+  });
+  paint();
+  wrap.appendChild(row("Fly to when it goes off", [pickT, pickC, add]));
+  wrap.appendChild(rows);
+  wrap.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;margin:4px 0 0 140px;line-height:1.5"},
+    "On the sidebar, Live Aboard flies to a doorbell that rings, a door that opens, a sensor that goes off or an alarm that is triggered, shows a card (with the camera's snapshot if you picked one), then goes back to its home view after 20 s. If someone touched the screen in the last 20 s, or a card, Edit or Furnish is open, only the card shows."));
+  // People and tags (settings.atlas_3d_director_people): who, and the rooms
+  // that count ([] = any room, or a person arriving home).
+  const snapObjs = (((ctx.state && ctx.state.live && ctx.state.live.snapshot) || {}).objects || {}).list;
+  const tagName = new Map();
+  for (const o of Array.isArray(snapObjs) ? snapObjs : []) {
+    const k = o && String(o.key || o.address || "");
+    if (k && ["ble", "private_ble", "ibeacon"].includes(o.kind) && (o.user_label || o.identified)) tagName.set("beacon:" + k, String(o.user_label || o.private_ble_name || o.name || k));
+  }
+  const whoOf = (k) => (k.startsWith("person.") ? nameOf(k) : `${tagName.get(k) || k.slice("beacon:".length)} (tag)`);
+  let people = (Array.isArray(settings.atlas_3d_director_people) ? settings.atlas_3d_director_people : [])
+    .filter(w => w && typeof w.key === "string").map(w => ({ key: w.key, rooms: Array.isArray(w.rooms) ? w.rooms.filter(r => typeof r === "string") : [] }));
+  const prows = el("div",{"data-la3d-director-people":""});
+  const pickP = document.createElement("select");
+  const pickR = document.createElement("select");
+  for (const sel of [pickP, pickR]) { sel.className = "select"; sel.style.width = "auto"; sel.style.maxWidth = "100%"; sel.disabled = !admin; }
+  pickP.appendChild(el("option",{value:""}, "Pick a person or tag…"));
+  for (const eid of Object.keys(states).filter(e => e.startsWith("person.")).sort()) pickP.appendChild(el("option",{value:eid}, nameOf(eid)));
+  for (const [k, n] of [...tagName].sort((a, b) => a[1].localeCompare(b[1]))) pickP.appendChild(el("option",{value:k}, `${n} (tag)`));
+  pickR.appendChild(el("option",{value:""}, "Any room, or arriving home"));
+  for (const r of Object.keys((ctx.state && ctx.state.model && ctx.state.model.room_geometry_m) || {}).sort()) pickR.appendChild(el("option",{value:r}, r));
+  const addP = el("button",{class:"btn inline"}, "Add");
+  addP.disabled = !admin;
+  if (!admin) addP.title = "Only an administrator can change this";
+  const keepP = (next) => { const was = people; people = next; paintP(); save("atlas_3d_director_people", next, ()=>{ people = was; paintP(); }); };
+  function paintP(){
+    while (prows.firstChild) prows.removeChild(prows.firstChild);
+    if (!people.length) prows.appendChild(el("div",{style:"font-size:12px;color:#94a3b8;margin-top:6px"}, "Off: nobody picked."));
+    for (const w of people) {
+      const x = el("button",{class:"btn inline",title:"Remove"}, "✕");
+      x.disabled = !admin;
+      x.addEventListener("click", ()=> keepP(people.filter(o => o.key !== w.key)));
+      prows.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px;color:#e2e8f0"},
+        [el("span",{}, `${whoOf(w.key)} → ${w.rooms.length ? w.rooms.join(", ") : "any room, or arriving home"}`), x]));
+    }
+    addP.disabled = !admin || (people.length >= _DIRECTOR_MAX && !people.some(o => o.key === pickP.value));
+  }
+  pickP.addEventListener("change", paintP);
+  addP.addEventListener("click", ()=>{
+    const k = pickP.value, r = pickR.value;
+    if (!k) return;
+    const had = people.find(o => o.key === k);
+    // A room joins the rooms already picked; "any" stands for every room.
+    const rooms = !r ? [] : had && had.rooms.length ? (had.rooms.includes(r) ? had.rooms : [...had.rooms, r].slice(0, _DIRECTOR_MAX)) : [r];
+    keepP(had ? people.map(o => (o.key === k ? { key: k, rooms } : o)) : [...people, { key: k, rooms }]);
+    pickP.value = ""; pickR.value = "";
+  });
+  paintP();
+  wrap.appendChild(row("Fly to when they arrive", [pickP, pickR, addP]));
+  wrap.appendChild(prows);
+  wrap.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;margin:4px 0 0 140px;line-height:1.5"},
+    "It can also fly to a person or tag you pick when they go into a room you pick (or, with no room picked, any room, or a person arriving home), with the same card and the same rules, at most once every 2 minutes each. Only people and tags Live Aboard shows (Views → Show people, Show tags & scanners) are flown to. Nobody picked: off."));
+  return wrap;
+}
 function _atlas3dSection(ctx, el, settings){
   const box = el("div",{style:"margin-top:14px;padding-top:12px;border-top:1px solid #1e3a2a"});
   box.appendChild(el("div",{style:"font-weight:600;font-size:14px;color:#e2e8f0;margin-bottom:4px"},"🏠 Live Aboard"));
@@ -3483,8 +3876,8 @@ function _atlas3dSection(ctx, el, settings){
   sel.addEventListener("change", ()=>{ const want = sel.value; save("atlas_3d_quality", want, ()=>{ sel.value = last; }).then(ok=>{ if (ok) last = want; }); });
   more.appendChild(row("Quality", [sel]));
 
-  // Look: the same as the Atlas unless Live Aboard's own is chosen.
-  const lookCur = settings.atlas_3d_look === "own" ? "own" : "atlas";
+  // Look: the same as the Atlas unless Live Aboard's own or Studio is chosen.
+  const lookCur = settings.atlas_3d_look === "own" || settings.atlas_3d_look === "studio" ? settings.atlas_3d_look : "atlas";
   const lookSel = document.createElement("select");
   lookSel.className = "select";
   lookSel.style.width = "auto";
@@ -3511,6 +3904,27 @@ function _atlas3dSection(ctx, el, settings){
   more.appendChild(row("Back to home view", [idleSel]));
   more.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;margin:4px 0 0 140px;line-height:1.5"},
     "On the sidebar, Live Aboard flies back to its home view when nobody has touched it for this long. Set the home view in Views ▾ → Set as home. It waits while Edit or Furnish is open, a card is open, or you made it full screen."));
+
+  // The frame-rate readout (live_aboard_fps.js): this browser only, kept
+  // where Live Aboard keeps its own per-screen choices (lights_map.js
+  // _laPrefs, localStorage padspan_la3d_*). Off by default.
+  const fpsRow = el("label",{style:"display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px"});
+  const fpsCb = el("input",{type:"checkbox","data-la3d-fps-pref":""});
+  try { fpsCb.checked = localStorage.getItem("padspan_la3d_fps") === "1"; } catch (_) { fpsCb.checked = false; }
+  fpsCb.addEventListener("change", ()=>{
+    try { localStorage.setItem("padspan_la3d_fps", fpsCb.checked ? "1" : "0"); } catch (_) {}
+    note.textContent = "Saved for this browser — Live Aboard shows it at its next refresh.";
+  });
+  fpsRow.appendChild(fpsCb);
+  fpsRow.appendChild(el("span",{style:"color:#e2e8f0;font-size:13px"}, "Show the frame rate (this browser only)"));
+  more.appendChild(fpsRow);
+  more.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;margin:4px 0 0 26px;line-height:1.5"},
+    "A small readout in the corner of Live Aboard: how many times a second the house is drawn, and \"0 fps at rest\" when nothing is moving. A wall screen shows it only if it is turned on there."));
+
+  // The director (live_aboard_director.js): what the sidebar's Live Aboard
+  // flies to when it goes off, each with a camera's snapshot or none. An
+  // administrator's (ws_settings holds the same rule).
+  more.appendChild(_atlas3dDirector(ctx, el, settings, save, row));
 
   // The AI Task that reads photos in Furnish (ws_house3d_photo.py): an
   // administrator's choice, since a cloud one sends each photo out of the house.
@@ -3834,11 +4248,88 @@ function _settingsUI(ctx, el){
       ctx.toast("Could not save: " + String((e && e.message) || e), true);
     }
   });
+  // Lights in their own colours on the working Atlas (Showcase always does).
+  // Off by default: the map everyone knows stays amber until asked.
+  const colRow = el("label",{style:"display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px"});
+  const colCb = el("input",{type:"checkbox"});
+  colCb.checked = settings.atlas_live_colours === true;
+  colRow.appendChild(colCb);
+  colRow.appendChild(el("span",{style:"color:#e2e8f0;font-size:14px"}, "Draw lit lights in their own colour on the Atlas (a colour bulb's colour, a white bulb's warm or cool)"));
+  lightsCard.appendChild(colRow);
+  const colNote = el("div",{style:"font-size:11px;color:#94a3b8;margin:2px 0 0 24px"}, "Off: lit lights are amber, as always. Showcase always uses their colours.");
+  lightsCard.appendChild(colNote);
+  colCb.addEventListener("change", async ()=>{
+    const want = colCb.checked;
+    try {
+      const r = await ctx.actions.wsCall("padspan_bright/settings_set", { atlas_live_colours: want });
+      if (r && r.settings && ctx.state) ctx.state.settings = r.settings;
+      colNote.textContent = "Saved \u2014 the Atlas changes at its next refresh.";
+    } catch (e) {
+      colCb.checked = !want;
+      ctx.toast("Could not save: " + String((e && e.message) || e), true);
+    }
+  });
+  // Alert pulse, normally off: a door left open, or a window or cover open in
+  // the rain, rings its room in amber (a leak, smoke, gas or CO alarm already
+  // rings red), and a wall screen names the worst one across its top.
+  const pulseRow = el("label",{style:"display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:14px;padding-top:12px;border-top:1px solid #1e3a2a"});
+  const pulseCb = el("input",{type:"checkbox"});
+  pulseCb.checked = settings.atlas_alert_pulse === true;
+  pulseRow.appendChild(pulseCb);
+  pulseRow.appendChild(el("span",{style:"color:#e2e8f0;font-size:14px"}, "Alert pulse"));
+  lightsCard.appendChild(pulseRow);
+  const pulseNote = el("div",{style:"font-size:11px;color:#94a3b8;margin:2px 0 0 24px"},
+    "A door left open, or a window or cover open while it rains, rings its room in amber. On a wall screen (?kiosk=1) a banner across the top names the worst alert and where it is (“Leak · Laundry”) until it clears. Saves as soon as you tick or untick it.");
+  lightsCard.appendChild(pulseNote);
+  pulseCb.addEventListener("change", async ()=>{
+    const want = pulseCb.checked;
+    try {
+      // Straight to the wire, as the emergency button's box above.
+      const r = await ctx.actions.wsCall("padspan_bright/settings_set", { atlas_alert_pulse: want });
+      if (r && r.settings && ctx.state) ctx.state.settings = r.settings;
+      pulseNote.textContent = want ? "Saved — the Atlas shows alerts from its next refresh."
+        : "Saved — the Atlas stops showing alerts at its next refresh.";
+    } catch (e) {
+      pulseCb.checked = !want;
+      ctx.toast("Could not save: " + String((e && e.message) || e), true);
+    }
+  });
+  // The ♨ Heatmap chip, normally off: with it on, the Atlas's layer bar offers
+  // temperature, humidity and CO2 drawn across each room from its own sensors.
+  // PadSpan Pro's (Garry, 2026-10-22): below Pro, no row at all, and whatever
+  // is stored is kept for when a key comes back (as the 3D house's below).
+  if (tierAtLeast(currentTier(settings), "pro")) {
+  const heatRow = el("label",{style:"display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px"});
+  const heatCb = el("input",{type:"checkbox"});
+  heatCb.checked = settings.atlas_heatmap_enabled === true;
+  heatRow.appendChild(heatCb);
+  heatRow.appendChild(el("span",{style:"color:#e2e8f0;font-size:14px"}, "Heatmap chip on the Atlas (temperature, humidity, CO\u2082)"));
+  lightsCard.appendChild(heatRow);
+  const heatNote = el("div",{style:"font-size:11px;color:#94a3b8;margin:2px 0 0 24px"},
+    "Adds a \u2668 chip to the Atlas's layer bar; each room takes its colour from its own sensors only. Off: no chip.");
+  lightsCard.appendChild(heatNote);
+  heatCb.addEventListener("change", async ()=>{
+    const want = heatCb.checked;
+    try {
+      const r = await ctx.actions.wsCall("padspan_bright/settings_set", { atlas_heatmap_enabled: want });
+      if (r && r.settings && ctx.state) ctx.state.settings = r.settings;
+      heatNote.textContent = "Saved \u2014 the Atlas changes at its next refresh.";
+    } catch (e) {
+      heatCb.checked = !want;
+      ctx.toast("Could not save: " + String((e && e.message) || e), true);
+    }
+  });
+  }
   lightsCard.appendChild(_atlasWeatherSection(ctx, el, settings));
   // The 3D house is Pro's (PadSpan Pro and Bright Pro): below Pro, no box at
   // all, and whatever is stored is kept for when a key comes back.
   if (tierAtLeast(currentTier(settings), "pro")) lightsCard.appendChild(_atlas3dSection(ctx, el, settings));
   wrap.appendChild(lightsCard);
+  // 📺 Wall screens: how big a ?kiosk=1 wall draws, for its room. Not on a
+  // Bright install that can't unlock it (wall mode is PadSpan Pro's).
+  if (WALLCARD && !(String(settings.edition || "").toLowerCase() === "bright" && !tierAtLeast(currentTier(settings), "pro"))) {
+    try { wrap.appendChild(WALLCARD.wallCard(ctx, el, settings)); } catch (e) { console.warn("PadSpan: wall screens card", e); }
+  }
 
   // ── The Atlas as Overview (Pro) ──
   // Overview (first in the menu) shows the Atlas instead of the classic map;

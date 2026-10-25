@@ -20,6 +20,7 @@ preserved on load (merged onto DEFAULT_SETTINGS).
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -33,6 +34,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "data_mode": "sample",  # "sample" | "live"
     "cpu_mode": "shared",  # "shared" | "single" | "dedicated" — see PresenceCoordinator
     "low_memory_mode": False,  # caps for a 2 GB machine — see low_memory.py
+    # Enhanced security (ws_common.require_admin_if_enhanced): off = every
+    # command as before; on = only an admin changes the home's shared setup.
+    # Only an admin turns it on or off.
+    "enhanced_security": False,
     "update_check_enabled": True,  # daily version ping to padspan.traks.ca (see README)
     # Opt-in usage report (telemetry.py). OFF until a person turns it on;
     # the id is minted on first enable and can be replaced from Settings.
@@ -64,7 +69,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # The free-Pro offers' on/off switches from the update check's answer
     # (update_check._keep_offers): {"tester": bool, "invite": bool}; {} = all on.
     "server_offers": {},
-    "vendor_lookup_enabled": True,  # Sends MAC prefixes to vendor lookup APIs when requested from UI
+    "vendor_lookup_enabled": True,  # Opening the Objects list sends full MACs (up to 40) to two vendor lookup APIs (vendor_lookup.py)
     "ref_power":      -59.0,   # dBm RSSI at 1 m (distance formula)
     "path_loss_exp":   2.5,    # path-loss exponent n (distance formula)
     "hidden_map_ids":  [],     # map IDs hidden from 3D stack view
@@ -92,6 +97,21 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "positioning_algorithm": "knn",    # "knn" | "rf" (Random Forest)
     "kalman_q": 0.125,             # Kalman process noise (RSSI responsiveness)
     "kalman_r": 8.0,               # Kalman measurement noise (smoothing strength)
+    # Both OFF by default. hold_last_room_s: the snapshot keeps showing the
+    # room a device had through a signal gap this short (display only; the
+    # room vote is unchanged). room_reason_attribute: a "why this room"
+    # attribute on each area sensor.
+    "hold_last_room_s": 0.0,       # 0 = off, else 1-600
+    "room_reason_attribute": False,
+    # Honest accuracy (0.38.165), all OFF by default; off, rooms and positions
+    # are exactly what they were. pick_better: prefer whichever of k-NN and
+    # the spatial solve wins the held-out test (heldout.py). unsure: hold and
+    # flag a room heard by under 3 scanners or matching no fingerprint well.
+    # sensor_fusion: motion/occupancy sensors and usual room-to-room moves
+    # break near-ties between rooms the radios already hear.
+    "positioning_pick_better": False,
+    "positioning_unsure": False,
+    "positioning_sensor_fusion": False,
     "assumed_device_height_m": 1.0,  # carry height above the floor for 3D distance (pocketed phone)
     # GPS bridge (gap #5, best-in-class roadmap): the fabric's own metre
     # plane has no inherent relationship to true north or a real-world
@@ -105,6 +125,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "light_theme": False,   # invert the panel colours (accessibility — dark theme unusable for some)
     "day_theme": False,     # the designed light palette (www/padspan-bright/day_theme.js); wins over light_theme
     "theme_palette": "",    # "" (Night) | "graphite" | "ocean" | "dusk" | "contrast" — day_theme and light_theme win over it
+    "theme_follow_sun": False,   # Day (Light without Pro) while sun.sun is up, the Theme picked after sunset
     # Panel chrome skin. "2025" loads the styles-2025.css overlay and the
     # grouped icon nav; "classic" is v0.35.0 chrome byte-for-byte, kept as a
     # first-class option rather than dead code. Anyone who has already chosen a
@@ -141,7 +162,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "traceback_house_focus": 0,          # Traceback's Full house activity: the Atlas floor index it opens on (its own key — overview_iso_focus indexes photo floors)
     "wled_teams": [],                     # backend-only (padspan_bright/wled_teams_set): WLED devices that act as one light — see ws_wled.py
     "overview_atlas": False,              # Pro: Overview shows the Atlas; Pure Live gets a switch to the classic Overview (Settings → UI Structure)
+    "atlas_live_colours": False,          # the working Atlas draws a lit light in the colour it reports (Settings → UI Structure → Atlas); off: amber, as ever
     "atlas_emergency_button": True,       # show the Atlas "Test emergency lighting" button (Settings → UI Structure → Atlas)
+    "atlas_heatmap_enabled": False,       # Atlas: offer the ♨ Heatmap chip (temperature / humidity / CO2); off: no chip, the Atlas as ever (Settings → UI Structure → Atlas)
+    "atlas_alert_pulse": False,           # Atlas: ring a room's flagged opening (left open, open in the rain); a wall names the worst alert (Settings → UI Structure → Atlas)
     # Atlas outdoor weather (docs/IDEA_ATLAS_WEATHER.md, views/atlas_weather.js) — rain or snow outside the floor
     # plates while it is actually raining or snowing. On by default in both editions (Pro animates, free is still).
     "atlas_weather_enabled": True,        # master on/off; off = nothing drawn at all
@@ -149,6 +173,19 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "atlas_weather_condition_entity": "", # weather.* for the fallback trigger and rain vs snow; "" = the first weather.*
     "atlas_weather_warning_entity": "",   # a weather-warning sensor; "" = detect (env_canada, meteoalarm, dwd, nina, meteo_france, weatheralerts, nws_alerts)
     "atlas_weather_strength": 1.0,        # 0.5-1.5 x opacity
+    # Wall screens (the sidebar Atlas on ?kiosk=1, lights_panel.js _wallOn): how
+    # big to draw for the room. wall_screen_in 0 = size from the screen's
+    # resolution; otherwise its diagonal (inches) and how far people stand
+    # (m) set the size, text at wall_text_arcmin of visual angle (control-room
+    # practice: 16 minimum, 20-22 preferred). A screen's own link can override
+    # all three (?wall_in=&wall_m=&wall_text=).
+    "wall_screen_in": 0.0,                # 0 or 15-120
+    "wall_distance_m": 2.5,               # 0.3-10
+    "wall_text_arcmin": 20.0,             # 14-36
+    "wall_night_dim": 0.0,                # 0-0.7: how much darker after sunset
+    "wall_pixel_shift": False,            # move the picture a few px every few minutes (OLED burn-in)
+    "wall_floor_cycle_s": 0,              # 0 or 10-600: show the next floor every N s while nobody touches the wall
+    "wall_fully": False,                  # inside Fully Kiosk: night dim by its screen brightness, motion turns the screen on
     # Live Aboard, the 3D house (docs/IDEA_ATLAS_3D_HOUSE.md on the live-aboard branch). NORMALLY OFF:
     # off = no 3D switch, no Furnish tab, no store writes, no AI or library calls, no telemetry.
     "atlas_3d_enabled": False,            # the master switch
@@ -159,8 +196,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "atlas_3d_library": False,            # the shared furniture library
     "atlas_3d_weather": True,             # rain and snow in Live Aboard: follows Outdoor weather (atlas_weather_*), which must be on too
     "atlas_3d_showcase": False,           # older switch (old backups, Bright): kept valid, decides nothing once atlas_3d_look is there
-    "atlas_3d_look": "atlas",             # Live Aboard's look: "atlas" = the same as the Atlas (its Showcase theme, or the plain Atlas) | "own"
+    "atlas_3d_look": "atlas",             # Live Aboard's look: "atlas" = the same as the Atlas (its Showcase theme, or the plain Atlas) | "own" | "studio" (its own colours, soft light and sky)
     "atlas_3d_home_idle_s": 60,           # the sidebar's Live Aboard goes back to its home view after this long untouched: 0 (never) | 30 | 60 | 300
+    "atlas_3d_director": [],              # the sidebar's Live Aboard flies to these when they go off: [{"entity": event.*|binary_sensor.*|alarm_control_panel.*, "camera": camera.* or ""}]; [] = off
+    "atlas_3d_director_people": [],       # ...and to these people and tags when they go into a room: [{"key": person.x | "beacon:<tracked key>", "rooms": [room names; [] = any room, or a person arriving home]}]; [] = off; personal, kept here only, never sent
     "atlas_3d_carries": {},               # who carries what: {"person.x": [tracked keys]}; personal, kept here only, never sent
     "emergency_entities": [],             # the Atlas emergency lighting test's lights, when set; [] = HA's "emergency" groups, else the default rule — see emergency_test.py
     "vacation_mode_tracked_since": 0,     # backend-only: epoch-s from which every vacation span is in vacation_mode_periods (stamped once on upgrade if Vacation Mode ran before spans were recorded; 0 = always) — vacation_mode.py learned_pattern
@@ -233,6 +272,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # records that here, and never touches it again (off stays off after).
     "atlas_default_v1_applied": False,
     "ha_entity_occupancy_enabled": False,  # expose occupancy estimate sensors to HA
+    "subzones_enabled": False,             # sub-zones (subzones.py): bed/couch/desk areas with their own sensors
     "bermuda_ignore": False,  # experimental: ignore all Bermuda integration data
     # HA Tags integration
     "tags_room_events_enabled": False,     # emit tag_scanned on room changes
@@ -268,10 +308,26 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Bright Pro trial). Display-only — licence.py's tier ladder does not read
     # it, a trial key gates identically to a purchased one.
     "license_is_trial": False,
+    # This home among the key's homes (licence_homes.py): the token the
+    # licence server rotates at each check, and the name the owner gave it.
+    "license_home_token": "",
+    "license_home_label": "",
+    "license_home_status": "",   # the server's last word on this home, when it refused it
+    "license_homes_used": 0,     # how many homes the key is on, as the server last said
+    "license_homes_warning": {},  # past two homes with a report off somewhere: licence_homes.homes_warning
     # ── Enterprise preview features (off by default) ─────────────────────────
     "walk_to_identify_enabled": False,      # spatial correlation device discovery ("who just walked in?")
     "radio_map_enabled": False,             # RSSI heatmap overlay on floor plan maps
     "distortion_map_enabled": False,        # calibration disagreement visualization
+    "roomplan_import_enabled": False,       # Rooms tab: also import Apple RoomPlan .json scans
+    "vacuum_import_enabled": False,         # Rooms tab: "Import from a robot vacuum" (vacuum_import.py)
+    "iphone_irk_guide": False,              # phone setup: iPhones get the IRK steps, not BLE Transmitter (#69)
+    # A NEW install's first steps (onboarding.py): when its settings were
+    # first made, then how long it took to the first room and the first
+    # calibration point, as buckets. {} on every install from before 0.38.165,
+    # which is never measured. A brand-new install also starts with
+    # iphone_irk_guide on (SettingsStore.async_load).
+    "onboarding": {},
     # ── RSSI vector capture (off by default) ─────────────────────────────────
     # Records the full per-scanner RSSI vector for tracked objects, plus the
     # room the pipeline chose, so a trace can be replayed offline against
@@ -339,11 +395,23 @@ class SettingsStore:
         Merging ensures new keys added in future versions get their defaults
         while preserving the user's existing overrides.
         """
+        # Looked at BEFORE the load: the other stores load beside this one
+        # and a brand-new install's would be written by the time it returned.
+        first_run = await self._first_run()
         loaded = await self.store.async_load()
         if isinstance(loaded, dict):
             self.data = {**DEFAULT_SETTINGS, **loaded}
         else:
             self.data = dict(DEFAULT_SETTINGS)
+        # A brand-new install — no settings file and no other PadSpan file in
+        # .storage — starts with the iPhone setup steps on and its first steps
+        # measured. Every install from before keeps what it has (the guide
+        # off unless someone turned it on). Decided once: the file saved
+        # below makes every later load an existing install, and a factory
+        # reset or a restore writes one too.
+        if loaded is None and first_run:
+            self.data["iphone_irk_guide"] = True
+            self.data["onboarding"] = {"setup_ts": time.time()}
         # Normalize followed_addrs: uppercase + dedup (order preserved).
         # Every comparison in the system (frontend followedHas, backend
         # settings_set, tag_integration) is uppercase; historic entries were
@@ -391,6 +459,24 @@ class SettingsStore:
         if _normalized or not isinstance(loaded, dict) or set(self.data.keys()) != set(loaded.keys()):
             await self.store.async_save(self.data)
         return self.data
+
+    async def _first_run(self) -> bool:
+        """No PadSpan file at all in .storage (not even a corrupt settings
+        file Home Assistant moved aside). Anything unsure is not a first run."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return False
+        prefix = SETTINGS_STORE_KEY.split(".")[0] + "."
+
+        def _scan() -> bool:
+            d = Path(hass.config.path(".storage"))
+            if not d.exists():
+                return True
+            return not any(p.name.startswith(prefix) for p in d.iterdir())
+        try:
+            return (await hass.async_add_executor_job(_scan)) is True
+        except Exception:  # noqa: BLE001 - unsure: an existing install
+            return False
 
     async def async_set(self, **kwargs: Any) -> dict[str, Any]:
         self.data = {**self.data, **kwargs}

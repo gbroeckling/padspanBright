@@ -18,7 +18,7 @@ const { buildIsoSVG, shapeSvg, fabricFrame, floorIdAtLevel, floorNameAtLevel, sa
 const { assignLightCodes, resolveLightShape, LIGHT_SHAPES, LIGHT_TYPE_OVERRIDES,
         TEMP_BORDER, healthOf,
         AIR_QUALITY_CLASSES, AIR_BORDER, airQualityBadness, airQualityWord, isAirQualityEntity,
-        classBorder, isControllable, hasFixedGlyph, isAtlasEntity, inWholeHousePresets, castsLight, deviceClassOf, emergencyWord } =
+        classBorder, isControllable, hasFixedGlyph, isAtlasEntity, inWholeHousePresets, castsLight, deviceClassOf, emergencyWord, emergencyKind, openingOpen, coverPercent } =
   await import(`./light_codes.js${new URL(import.meta.url).search}`);
 const { tierAtLeast } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
@@ -560,6 +560,48 @@ export function floodIsAlarming(l, floodLatches){
   return floodLatchActive(latch && latch.triggered_at, Date.now());
 }
 
+// ── Alert pulse (Settings → UI Structure → Atlas, off by default) ───────────
+// What needs someone now, worst first: a smoke, gas or CO alarm, a leak (both
+// live or still latched, floodIsAlarming — the Atlas already rings their
+// rooms), a window or cover open while it rains or snows (the Atlas's own
+// weather decision, atlas_weather.js), then a door left open for hours (the
+// health check's "left open", healthOf). Each {eid, kind, what, where}: the
+// banner's words ("Leak · Laundry") and, for an opening, its amber ring.
+export const ALERT_KINDS = ["smoke", "gas", "co", "water", "rain_open", "left_open"];
+const ALERT_WHAT = { smoke: "Smoke", gas: "Gas", co: "CO", water: "Leak" };
+const OPENING_NOUN = { door: "Door", window: "Window", garage_door: "Garage door", garage: "Garage door", opening: "Opening",
+                       gate: "Gate", blind: "Blind", shade: "Shade", shutter: "Shutter", curtain: "Curtain", awning: "Awning" };
+export function safetyAlerts(lights, { wet = null, floodLatches = {}, doorInvert = {}, nowMs = Date.now() } = {}){
+  const out = [];
+  for (const l of lights || []) {
+    if (!l || !l.entity_id) continue;
+    const where = l.area_name || l.friendly_name || l.entity_id;
+    if (l.isFlood) {
+      if (!floodIsAlarming(l, floodLatches)) continue;
+      const k = emergencyKind(l);
+      out.push({ eid: l.entity_id, kind: k, what: ALERT_WHAT[k] + (l.state === "on" ? "" : " earlier"), where });
+    } else if (l.isDoor && !l.isLock) {
+      if (l.state === "unavailable" || l.state === "unknown") continue;
+      const inv = !!(doorInvert && doorInvert[l.entity_id]);
+      if (!openingOpen(l, inv)) continue;
+      const cover = String(l.entity_id).startsWith("cover.");
+      const noun = OPENING_NOUN[l.device_class] || (cover ? "Cover" : "Door");
+      if (wet && (cover || l.device_class === "window")) {
+        out.push({ eid: l.entity_id, kind: "rain_open", what: `${noun} open in the ${wet}`, where });
+      } else if (!healthOf(l, nowMs, inv).healthy) {
+        out.push({ eid: l.entity_id, kind: "left_open", what: `${noun} left open`, where });
+      }
+    }
+  }
+  return out.sort((a, b) => ALERT_KINDS.indexOf(a.kind) - ALERT_KINDS.indexOf(b.kind));
+}
+/** The banner's line: the worst alert, "and N more" after it. */
+export function alertBannerText(alerts){
+  if (!alerts || !alerts.length) return "";
+  const t = `${alerts[0].what} · ${alerts[0].where}`;
+  return alerts.length > 1 ? `${t} (and ${alerts.length - 1} more)` : t;
+}
+
 // One class-driven answer to "what does this entity's state read as, and is
 // it lit/active" — openAggregateSheet's render chain, buildLightsTable's
 // render chain, and buildLightsTable's own separate sort-key chain each
@@ -610,8 +652,10 @@ export function stateWordOf(l, floodLatches, doorInvert){
     return { text: airQualityLabel(l), lit: false, sortValue: Number.isFinite(b) ? b : -Infinity };
   }
   if (l.isDoor) {
-    const on = (l.state === "on") !== !!(doorInvert && doorInvert[l.entity_id]);
-    return { text: on ? "OPEN" : "CLOSED", lit: on, sortValue: on ? 1 : 0 };
+    const on = openingOpen(l, doorInvert && doorInvert[l.entity_id]);
+    // A cover part-way open says how far ("OPEN 40%").
+    const pct = coverPercent(l);
+    return { text: on ? (pct !== null && pct > 0 && pct < 100 ? `OPEN ${pct}%` : "OPEN") : "CLOSED", lit: on, sortValue: on ? 1 : 0 };
   }
   if (l.isFlood) {
     // Latched (flood_latch.py) beats live state — a sensor that's dried
@@ -2517,7 +2561,7 @@ function _realLastChanged(lc, r){
 // reconnects = the host's motion_reconnects subscription (motion_reconnects.py):
 // {entity_id: {at, last_changed}} for each motion sensor back from an offline
 // blip in the state it had before — see _realLastChanged.
-export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap, typeOverrides, pairMap, manufacturerMap, nowMs, historical = false, reconnects = null){
+export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap, typeOverrides, pairMap, manufacturerMap, nowMs, historical = false, reconnects = null, linkedCovers = null){
   const paid = lightingUnlocked(tier);
   const pro = tierAtLeast(tier, "pro");
   // A verified motion+occupancy pair (see computeMotionOccupancyPairs) rides
@@ -2545,7 +2589,11 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
   // drifted once (lock admitted here since gap #8, never added to the
   // other copy — found in the Phase 2a registry audit, 2026-09-19).
   const lights = Object.keys(states || {})
-    .filter(eid => isAtlasEntity(eid, states[eid].attributes) && !primaryFor[eid])
+    .filter(eid => isAtlasEntity(eid, states[eid].attributes) && !primaryFor[eid]
+      // A cover (blind, garage door, gate) is on the Atlas only once it is
+      // linked to a wall (Mapping → the door's wall section): until then a
+      // house's blinds are not new rows, codes or "left open" warnings.
+      && (!eid.startsWith("cover.") || !!(linkedCovers && linkedCovers.has(eid))))
     .map(eid => ({
       entity_id:     eid,
       friendly_name: states[eid].attributes?.friendly_name || eid,
@@ -2560,13 +2608,16 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
       // The user's word beats detection, at pro: forced class from
       // settings.light_type_overrides. Never applies to a fan or a lock
       // (the domain is the class) and never below pro.
-      type_override: pro && !eid.startsWith("fan.") && !eid.startsWith("lock.") && typeOverrides ? (typeOverrides[eid] || null) : null,
+      type_override: pro && !eid.startsWith("fan.") && !eid.startsWith("lock.") && !eid.startsWith("cover.") && typeOverrides ? (typeOverrides[eid] || null) : null,
       // The fan card's inputs, present only on fan.* entities.
       pct:           eid.startsWith("fan.") ? (Number.isFinite(Number(states[eid].attributes?.percentage)) ? Number(states[eid].attributes.percentage) : null) : null,
       preset_modes:  eid.startsWith("fan.") && Array.isArray(states[eid].attributes?.preset_modes) ? states[eid].attributes.preset_modes : null,
       preset_mode:   eid.startsWith("fan.") ? (states[eid].attributes?.preset_mode || null) : null,
       oscillating:   eid.startsWith("fan.") ? (typeof states[eid].attributes?.oscillating === "boolean" ? states[eid].attributes.oscillating : null) : null,
       direction:     eid.startsWith("fan.") ? (states[eid].attributes?.direction || null) : null,
+      // How far open a cover is (blinds, a garage door), 0-100, when it says.
+      position:      eid.startsWith("cover.") && Number.isFinite(Number(states[eid].attributes?.current_position))
+                       ? Number(states[eid].attributes.current_position) : null,
       // When a motion/occupancy sensor last flipped state — while it is OFF
       // that IS when it last stopped tripping. The renderer fades a purple
       // "recently active" pulse over the 6h after this, past which it draws
@@ -2583,7 +2634,7 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
       // reading with the same attributes moves only that one, so a room
       // holding 21.5° for an hour went to "–°" on last_updated alone.
       last_changed:  eid.startsWith("sensor.") ? (states[eid].last_reported || states[eid].last_updated || null)
-                     : eid.startsWith("binary_sensor.") ? _realLastChanged(states[eid].last_changed, reconnects && reconnects[eid])
+                     : eid.startsWith("binary_sensor.") || eid.startsWith("cover.") ? _realLastChanged(states[eid].last_changed, reconnects && reconnects[eid])
                      : null,
       // The reading itself, rounded — "inside is simply the temperature, 3
       // digit, and larger". Only sensor.* entities carry one; everything
@@ -2618,7 +2669,7 @@ export function gatherLights(states, areaMap, shapeOverrides, tier, platformMap,
       brand:         (manufacturerMap && manufacturerMap[eid]) || null,
       // What the fixture is actually throwing right now. Showcase draws and
       // glows each light in its OWN colour at its OWN brightness; the working
-      // map ignores both.
+      // map paints a default-amber marker in the colour, never the brightness.
       rgb:           Array.isArray(states[eid].attributes?.rgb_color) ? states[eid].attributes.rgb_color : null,
       bri:           Number(states[eid].attributes?.brightness) || null,
       // Kelvin, ungated like rgb/bri: a white-only bulb's pool should read
@@ -2870,6 +2921,34 @@ export function buildLightsMapCard(hostIn){
   const DISPLAY = V2 && !!host.displayMode;
   if (V2) mapCard.classList.add("lv-v2");
   if (DISPLAY) mapCard.classList.add("lv-display");
+  // Wall mode (the sidebar Atlas on ?kiosk=1): the card is the whole screen
+  // and the drawing fits it both ways, in CSS only (styles.css .lv-wall).
+  const WALL = DISPLAY && !!host.wall;
+  if (WALL) mapCard.classList.add("lv-wall");
+
+  // Alert pulse (host.alertPulse: Settings → UI Structure → Atlas, off by
+  // default; safetyAlerts above). Off, nothing here is read or drawn. On, a
+  // flagged opening's room rings amber (rebuildISO's alertOpenings) and a
+  // wall screen names the worst alert across its top until it clears. Rain
+  // is the Atlas's own weather decision, as the rain over the map has it.
+  let alerts = null, alertOpenings = null;
+  if (host.alertPulse) {
+    let wet = null;
+    try {
+      const w = host.weather;
+      const d = WX && w && w.settings ? WX.decideAtlasWeather(WX.weatherSettingsFrom(w.settings), w.states, w.entities) : null;
+      wet = d && (d.kind === "rain" || d.kind === "snow") ? d.kind : null;
+    } catch (_) { wet = null; }
+    alerts = safetyAlerts(Object.values(host.lightsByEid || {}),
+      { wet, floodLatches: host.floodLatches || {}, doorInvert: doorInvertOf(host.model), nowMs: Date.now() });
+    alertOpenings = {};
+    for (const a of alerts) if (a.kind === "rain_open" || a.kind === "left_open") alertOpenings[a.eid] = a.kind;
+    if (WALL && alerts.length) {
+      const top = alerts[0].kind;
+      mapCard.appendChild(el("div", { class: "lv-alertbar" + (top === "rain_open" || top === "left_open" ? " lv-alertbar-open" : ""),
+        role: "alert", "data-alert": top }, alertBannerText(alerts)));
+    }
+  }
 
   // Vacation Mode banner — pinned dead-center of the screen, on both Atlas
   // surfaces (this shared card) and nowhere else (Garry, 2026-09-21: "I
@@ -2952,12 +3031,19 @@ export function buildLightsMapCard(hostIn){
     return zArr.map(z => floorNameAtLevel(_frame, host.model, floors, z) || `L${z}`).join(" + ");
   };
   view.focusIdx = Math.max(0, Math.min(view.focusIdx, isoPos.length - 1));
+  // A wall that cycles through its floors (lights_panel.js _wallCycle):
+  // All and each floor on its own, not the pairs between them.
+  if (host.wall) view.wallStops = isoPos.map((p, i) => (Array.isArray(p) ? -1 : i)).filter(i => i >= 0);
 
   // The container is always the full width of the panel. Zoom scales the
   // DRAWING inside it and scrolls — resizing this box instead just slid the
   // map from side to side, because the SVG was pinned to its natural size.
   const isoDiv = document.createElement("div");
   isoDiv.className = "lv-stage";
+  // For screen readers: the map is a figure (with people or tags shown,
+  // atlas_aboard.js names who is in which room as its description).
+  isoDiv.setAttribute("role", "figure");
+  isoDiv.setAttribute("aria-label", "House map");
   // Pan position, mirrored into view (the same persistent object zoom
   // already lives on) so it survives a full rebuild of this card, not just
   // an in-place rebuildISO() — the whole card (this isoDiv included) is
@@ -2983,17 +3069,25 @@ export function buildLightsMapCard(hostIn){
   // paid tier animates it, the free map shows it still — the same licence
   // line as placement.
   const wxSlot = WX && host.weather && host.weather.settings ? WX.atlasWeatherSlot(host.weather.slot) : null;
-  let wxOutdoorZ = null;
+  let wxOutdoorZ = null, wxOffsets = null, wxOffsetsKey = null;
   if (wxSlot) {
     try { wxOutdoorZ = WX.outdoorPlateLevels(_frame, isOutdoorFloorId); } catch (_) { wxOutdoorZ = null; }
   }
   const mountWeather = (svgStr) => {
     if (!wxSlot) return;
+    // The plates move with the Spacing and L/R sliders (and Reset view),
+    // which rebuild the drawing without rebuilding this card, so the offsets
+    // are taken from the gaps the drawing was just made with.
+    const gapKey = `${view.floorGap}|${view.horizGap}`;
+    if (gapKey !== wxOffsetsKey) {
+      wxOffsetsKey = gapKey;
+      try { wxOffsets = WX.plateOffsets(fabricFrame(host.model, floors, view.floorGap, view.horizGap)); } catch (_) { wxOffsets = null; }
+    }
     try {
       const w = host.weather;
       const theme = host.showcase ? (SHOWCASE_THEMES[host.showcaseTheme] || SHOWCASE_THEMES.classic) : SHOWCASE_THEMES.classic;
       wxSlot.attach(isoDiv, { settings: WX.weatherSettingsFrom(w.settings), states: w.states, entities: w.entities, svg: svgStr,
-        animate: lightingUnlocked(host.tier), colour: WX.weatherColourOf(theme), outdoorZ: wxOutdoorZ,
+        animate: lightingUnlocked(host.tier), colour: WX.weatherColourOf(theme), outdoorZ: wxOutdoorZ, plateOffsets: wxOffsets,
         zoom: view.zoom || 1, centred: V2, telemetry: w.telemetry });
     } catch (_) { /* attach counts its own failures; the map never sees one */ }
   };
@@ -3049,6 +3143,8 @@ export function buildLightsMapCard(hostIn){
           // The sun (sun.sun, else hass.config) and true north (the GPS
           // Bridge's bearing), from what the host already holds.
           states: h3.states, config: h3.config, bearing: h3.settings.fabric_bearing_deg,
+          // The director reads the states as they are now, between draws.
+          liveStates: typeof h3.liveStates === "function" ? h3.liveStates : null,
           saveNorth: typeof h3.saveNorth === "function" ? h3.saveNorth : null,
           // Taps and holds act through the host's own use api (the flat
           // map's), and motion reads quiet after a restart as it does here.
@@ -3072,9 +3168,9 @@ export function buildLightsMapCard(hostIn){
           showcase: { key: host.showcase ? (host.showcaseTheme || "classic") : "classic",
                       theme: (host.showcase && SHOWCASE_THEMES[host.showcaseTheme]) || SHOWCASE_THEMES.classic },
           // Live Aboard's look (atlas_3d_look): the same as this map unless
-          // "own" is chosen, and what this map wears: Showcase on or off, and
-          // the theme it reads its colours from (buildIsoSVG's own THEME).
-          look3d: h3.settings.atlas_3d_look === "own" ? "own" : "atlas",
+          // "own" or "studio" is chosen, and what this map wears: Showcase on
+          // or off, and the theme it reads its colours from (buildIsoSVG's own THEME).
+          look3d: h3.settings.atlas_3d_look === "own" || h3.settings.atlas_3d_look === "studio" ? h3.settings.atlas_3d_look : "atlas",
           atlasLook: { on: !!host.showcase, key: host.showcaseTheme || "classic",
                        theme: SHOWCASE_THEMES[host.showcaseTheme] || SHOWCASE_THEMES.classic },
           // Mapping → Furnish (P2): the Furnish tool open, what its flows and
@@ -3110,6 +3206,9 @@ export function buildLightsMapCard(hostIn){
           people: h3.settings.atlas_3d_people === true && h3.people ? abReader(h3.people) : null,
           // Show tags & scanners: the same snapshot, the same reader (read once for both).
           tags: h3.settings.atlas_3d_tags === true && h3.people ? abReader(h3.people) : null,
+          // Trails (people_trails.js): Traceback's last half hour, read only
+          // while people or tags show and that screen turned Trails on.
+          trails: (h3.settings.atlas_3d_people === true || h3.settings.atlas_3d_tags === true) && h3.trails ? h3.trails : null,
           // ☰'s class chips, the leak sensors' 2-day latch, the codes (none
           // while "Hide device codes" is on), and ⚙'s zoom label to keep up.
           classFilter: host.classFilter || null, floodLatches: host.floodLatches || {},
@@ -3264,7 +3363,13 @@ export function buildLightsMapCard(hostIn){
     // routinely a wall-kiosk tab that may not be the OS's focused window),
     // the map simply never getting fitted — reading as "not reaching side
     // to side."
-    svg.style.width = `${Math.round((view.zoom || 1) * 100)}%`;
+    // On a wall, as wide as the stage or as tall as it, whichever comes
+    // first (the stage is a size container: 100cqh is its height), so the
+    // whole house is on the screen at 100%; zoomed in, it grows from there.
+    const vb = svg.viewBox && svg.viewBox.baseVal;
+    const wallW = WALL && vb && vb.width && vb.height
+      ? `min(${Math.round((view.zoom || 1) * 100)}%, calc(${(view.zoom || 1)} * 100cqh * ${(vb.width / vb.height).toFixed(5)}))` : null;
+    svg.style.width = wallW || `${Math.round((view.zoom || 1) * 100)}%`;
     // 2026-09-22, after three straight rounds of this still being wrong
     // live (a visible flash, then not filling the width, then the whole
     // map shrinking further and "stupid short" — Garry: "you really need
@@ -3287,7 +3392,7 @@ export function buildLightsMapCard(hostIn){
       svg.style.margin = "0 auto";
     }
     // The weather overlay takes the same width and centring as the SVG.
-    if (wxSlot) wxSlot.fit(view.zoom, V2);
+    if (wxSlot) wxSlot.fit(view.zoom, V2, wallW);
     if (host.codeChip && codesShown !== null && codesShown !== codesVisibleAtZoom(view.zoom)) rebuildISO();
   };
   // Zoom about a point (pinch midpoint / wheel): keep what is under the
@@ -3312,6 +3417,7 @@ export function buildLightsMapCard(hostIn){
     const svgStr = buildIsoSVG(host.model, abDrawn ? abDrawn.byRoom : host.byRoom, host.hiddenEidsMap || host.hiddenEids, getFocusZ(view.focusIdx),
       view.floorGap, view.horizGap, abDrawn ? abDrawn.lightsByEid : host.lightsByEid, host.lightsLoading, floors,
       { showcase: !!host.showcase, showcaseTheme: host.showcaseTheme || "classic",
+        liveColours: !!host.liveColours,
         fitRooms: !!host.showcase && !!host.fitRooms,
         ambient: host.ambient, isolux: !!host.showcase && !!host.isolux,
         sceneField: host.showcase ? sceneFieldFor(host.sceneName, host.sceneAngle) : null,
@@ -3324,6 +3430,10 @@ export function buildLightsMapCard(hostIn){
         classFilter: host.classFilter || null, hitHalo: !!host.hitHalo,
         collapseUnplaced: !!host.collapseUnplaced,
         locateEid: host.locateEid || null, dropMarker: !!host.onDropPlace,
+        labelScale: WALL && host.wallLabel ? host.wallLabel() : 1,
+        // Temperature / humidity / CO2 heatmap (atlas_heatmap.js): off unless
+        // the host's layer chip picked a kind.
+        heatmap: host.heatmap || null,
         // When HA came up (model_get's ha_started_at) — a motion sensor whose
         // last_changed is just the restart's restored timestamp draws quiet.
         haStartedMs: Date.parse(host.model && host.model.ha_started_at) || 0,
@@ -3332,6 +3442,8 @@ export function buildLightsMapCard(hostIn){
         // live wall-gap preview so positioning it is visible feedback, not
         // a guess.
         barrierHit: !!host.barrierHit,
+        // Alert pulse's flagged openings, {entity_id: kind}; null while off.
+        alertOpenings,
         doorCircleArmedEid: host.doorCircleArmedEid || null,
         doorCircleM: host.doorCircleM || null,
         // Working, proven beacons (Garry, 2026-09-09) — read-only, host
@@ -4057,8 +4169,26 @@ export function buildLightsMapCard(hostIn){
   // many devices are on / sensors tripped up there) — and each floor keeps
   // its own camera (zoom + scroll), restored when you come back to it.
   const allLights = Object.values(host.lightsByEid || {});
-  if (host.onClassFilter || sortedLevels.length > 1) {
+  // The heatmap chip: offered for the kinds this house has a sensor of,
+  // cycling Off → Temperature → Humidity → CO₂ → Off.
+  const heatKinds = host.onHeatmap ? [
+    allLights.some(l => l.isTemp) && "temp",
+    allLights.some(l => l.isHumidity) && "humidity",
+    allLights.some(l => l.isAir && l.device_class === "carbon_dioxide") && "co2",
+  ].filter(Boolean) : [];
+  if (host.onClassFilter || sortedLevels.length > 1 || heatKinds.length) {
     const bar = el("div", { class: "lv-layerbar" });
+    if (heatKinds.length) {
+      const cur = heatKinds.includes(host.heatmap) ? host.heatmap : null;
+      const LBL = { temp: "Temperature", humidity: "Humidity", co2: "CO₂" };
+      bar.appendChild(el("button", {
+        class: "lv-chipbtn" + (cur ? " on" : ""),
+        title: "Heatmap — temperature, humidity or CO₂ across each room, between the placed sensors "
+          + "(a room's own sensors at its centre where none is placed). Tap to cycle.",
+        onclick: () => host.onHeatmap(heatKinds[heatKinds.indexOf(cur) + 1] || null),
+      }, [cur ? `♨ ${LBL[cur]}` : "♨ Heatmap"]));
+      if (host.onClassFilter || sortedLevels.length > 1) bar.appendChild(SEP());
+    }
     if (host.onClassFilter) {
       const present = new Set(allLights.map(l => lightClassOf(l)));
       const cur = host.classFilter || "all";
@@ -4117,7 +4247,7 @@ export function buildLightsMapCard(hostIn){
           const pick = allLights.find(l => l.isMotion && l.state === "on") || allLights.find(l => l.state === "on");
           if (!pick) { if (host.toast) host.toast("Nothing is on"); return; }
           if (la3dDo(s => s.findDevice(pick.entity_id))) return;
-          const g = isoDiv.querySelector(`.lhex[data-eid="${String(pick.entity_id).replace(/"/g, '\\"')}"]`);
+          const g = isoDiv.querySelector(`.lhex[data-eid="${CSS.escape(String(pick.entity_id))}"]`);
           const svg = isoDiv.querySelector("svg");
           if (!g || !svg || !g.getBoundingClientRect) return;
           const gr = g.getBoundingClientRect(), sr = isoDiv.getBoundingClientRect();
@@ -4219,7 +4349,7 @@ export function buildLightsMapCard(hostIn){
   const legend = buildShapeLegend(el, Object.values(abLegend
     ? _AB.drawnWith(host.lightsByEid, host.byRoom, _AB.kindShapes(abLegend, host.lightsByEid, h3.settings.light_shapes)).lightsByEid
     : host.lightsByEid));
-  if (legend) mapCard.appendChild(legend);
+  if (legend) { legend.classList.add("lv-shapes"); mapCard.appendChild(legend); }   // a wall leaves it out (styles.css)
   rebuildISO();
   // Restore the pan position a previous rebuild of this same card saved
   // (see the scroll listener above) — skipped on the very first-ever

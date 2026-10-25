@@ -117,11 +117,17 @@ export function render(ctx){
   const objSummary = snap && snap.objects && snap.objects.summary;
   if(objSummary){
     const total = objSummary.total || 0;
-    const identified = objSummary.identified || 0;
     const ble = objSummary.ble || 0;
     const unid = objSummary.unidentified || 0;
 
-    const displayTotal = _quietMode ? identified : total;
+    // Quiet mode: how many objects the filter hides (not labelled, identified or followed).
+    const quietList = _quietMode ? (snap.objects.list || []) : [];
+    const quietHidden = _quietMode
+      ? (quietList.filter(o => !o.user_label && !o.identified
+          && !(ctx.actions.followedHas && ctx.actions.followedHas(o.address || o.key || ""))).length)
+      : 0;
+    // Tracked and hidden add up to the list.
+    const displayTotal = _quietMode ? quietList.length - quietHidden : total;
 
     const unidBadge = _quietMode ? null : (unid > 0
       ? el("span",{class:"badge warn",style:"cursor:pointer"}, `${unid} unidentified`)
@@ -139,6 +145,7 @@ export function render(ctx){
       el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-top:8px"},[
         el("span",{class:"badge"}, `${displayTotal} ${_quietMode ? "tracked" : "total"}`),
         _quietMode ? null : el("span",{class:"badge"}, `${ble} BLE ads`),
+        quietHidden > 0 ? el("span",{class:"muted",style:"font-size:11px;color:#64748b;white-space:nowrap;align-self:center"}, `${quietHidden} hidden (quiet mode)`) : null,
         unidBadge,
       ].filter(Boolean)),
     ]));

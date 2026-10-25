@@ -54,7 +54,7 @@ def _case(h: dict, prefix: str) -> None:
 
 @pytest.mark.parametrize("prefix,least", [
     ("floors:", 3), ("floorsTop:", 1), ("walls:", 6), ("cutaway:", 1), ("quality:", 3), ("lights:", 5),
-    ("sun:", 5), ("compass:", 1), ("north:", 1), ("spin:", 4), ("telemetry:", 1),
+    ("sun:", 5), ("compass:", 1), ("north:", 1), ("spin:", 4), ("room height:", 5), ("telemetry:", 1),
 ])
 def test_the_house_harness_covers_each_part(house, prefix, least) -> None:
     got = [k for k in house["cases"] if k.startswith(prefix)]
@@ -95,7 +95,8 @@ def test_the_report_words_are_the_frontends(house) -> None:
     assert set(T.HOUSE3D_EVENTS) == {"house3d_opened", "house3d_fallback:no_webgl", "house3d_fallback:slow_gpu",
                                      "house3d_fallback:context_lost", "house3d_fallback:error",
                                      "house3d_wet_window",   # 0.38.127: the open-window-in-the-rain alert showed
-                                     "house3d_loft_rail", "house3d_mezzanine"}   # 0.38.147: a railing on an open edge, a mezzanine
+                                     "house3d_loft_rail", "house3d_mezzanine",   # 0.38.147: a railing on an open edge, a mezzanine
+                                     "house3d_wall_capped"}   # 0.38.164: a wall stopped under a floor above
 
 
 def _hass(on: bool = True):
@@ -164,3 +165,27 @@ def test_the_view_draws_each_wall_by_the_one_corner_rule() -> None:
     draft = (_VIEWS / "live_aboard_draft.js").read_text(encoding="utf-8")
     assert "splitPiece(W, WL, wx, wy, t0, t1, mine)" in draft
     assert "DRAFT.splitPiece(W, WL, wx, wy, t0, t1, { kind, mat, barrier: b })" in (_VIEWS / "live_aboard_house.js").read_text(encoding="utf-8")
+
+
+def test_the_open_edge_help_gives_the_rises_to_setup() -> None:
+    """0.38.164: the Open (Loft) help says what Floor Heights says: keep the
+    floor's normal height and give the tall room Rises to in Rooms (a hall
+    floor made tall makes every room on it tall)."""
+    for path in (_VIEWS / "maps.js", _WWW / "help_content.js"):
+        src = path.read_text(encoding="utf-8")
+        assert "given its full height in Floor Heights" not in src, path.name
+        assert "with the floor kept at its normal height in Floor Heights and the hall given its full height with Rises to in Rooms" in src, path.name
+
+
+def test_hidden_floors_cut_a_tall_rooms_walls() -> None:
+    """0.38.164: with the floor stepper hiding the floors above, a tall room's
+    walls stop under the lowest hidden floor (applyTop sets F.clip); a wall no
+    more than a slab's worth past it, and every wall with all floors showing,
+    is placed as before."""
+    la = (_VIEWS / "live_aboard.js").read_text(encoding="utf-8")
+    top = la[la.index("  function applyTop(){"):la.index("  /** Walls or floors changed:")]
+    assert "const hid = floorsUi.filter(F => !F.fl.outdoor && !F.group.visible).map(F => F.fl.elev);" in top
+    assert "clip = over.length ? Math.min(...over) - F.fl.elev - HOUSE.SLAB_T : null;" in top
+    assert "for (const P of F.pieces) placePiece(F, P, P.cut);" in top
+    place = la[la.index("  function placePiece(F, P, cut){"):la.index("    if (P.open && P.open.wet) placeWet(F, P, cut);")]
+    assert "if (F.clip !== undefined && F.clip !== null && z1 > F.clip + 0.3) z1 = Math.max(e.z0, F.clip);" in place

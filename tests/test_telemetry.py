@@ -19,6 +19,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
 
 from custom_components.padspan_bright import telemetry as T
 from custom_components.padspan_bright.const import (
@@ -246,7 +249,18 @@ def test_nothing_from_the_house_is_in_the_report():
     # (0.38.132's one-name fix needed its field signal).
     # Raised 4200 -> 4230 for features.overview_atlas (~25 bytes): Garry,
     # 2026-10-17, a Pro option to show the Atlas as Overview.
-    assert len(text) < 4230
+    # Raised 4230 -> 4270 for features.day_theme and features.light_theme
+    # (~36 bytes): which themes anyone wears, now that there are seven.
+    # Raised 4270 -> 4295 for env.rooms_with_height (~24 bytes): whether
+    # anyone gives a room its own height (Live Aboard's tall rooms).
+    # Raised 4295 -> 4335 for licence_group (~35 bytes): Garry, 2026-10-21,
+    # a licence's homes seen together (homes 3-5 need their report on).
+    # Raised 4335 -> 4365 (2026-10-22) for env.quiet_hidden (~26 bytes, only
+    # from a house with quiet mode on, as this fixture is). How each Overview
+    # screen is set up adds nothing here: only settings changed from their
+    # defaults are sent (features.ov_*), and the per-screen lists
+    # (env.screens) only from a house with two screens or more.
+    assert len(text) < 4365
 
 
 def test_presets_are_capped_at_ten_per_report():
@@ -729,6 +743,7 @@ def test_an_unconfigured_house_says_so():
     T.assert_shareable(p)
     assert p["env"]["calibration_no_floor"] == 2, "neither fixture point has a floor"
     assert p["env"]["floors_with_height"] == 0
+    assert p["env"]["rooms_with_height"] == 0
     assert p["env"]["scanners_with_z"] == 0
     assert p["health"]["has_metre_anchor"] is False, "no map carries a measurement"
     assert p["health"]["floors_all_default"] is True
@@ -742,6 +757,10 @@ def test_a_configured_house_says_that_instead():
         {"id": "main", "floor_to_floor_m": 2.8},
         {"id": "up", "base_elevation_m": 2.8},
     ]
+    dom[DATA_MODEL].data["room_meta"] = {
+        "Living": {"floor_id": "main", "color": "#112233", "height_m": 5.6},
+        "Kitchen": {"floor_id": "main", "color": "#445566"},
+    }
     dom[DATA_FABRIC].data["scanner_positions_m"] = {
         "a": {"x_m": 1.0, "y_m": 1.0, "z_m": 0.9},
         "b": {"x_m": 2.0, "y_m": 2.0, "z_m": 3.6},
@@ -754,6 +773,8 @@ def test_a_configured_house_says_that_instead():
     T.assert_shareable(p)
     assert p["env"]["calibration_no_floor"] == 0
     assert p["env"]["floors_with_height"] == 2
+    assert p["env"]["rooms_with_height"] == 1
+    assert "Living" not in json.dumps(p), "a count, never the room"
     assert p["env"]["scanners_with_z"] == 2
     assert p["health"]["floors_all_default"] is False
     assert p["health"]["scanner_z_uniform"] is False, "two distinct mounting heights"
@@ -1083,11 +1104,13 @@ def test_a_full_day_fits_by_sending_fewer_presets_not_by_refusing(monkeypatch):
     assert 0 < len(p["presets"]) < 10, "the fixture no longer overflows the cap with ten presets"
     one_more = {**p, "presets": p["presets"] + p["presets"][:1]}
     assert len(json.dumps(p)) <= T._MAX_BYTES < len(json.dumps(one_more)), "only as many dropped as needed"
-    # A day with room for them all sends all ten.
+    # A day with room for them all sends all ten. (Without the log counts:
+    # with them, this day sat 12 bytes under the cap, and the theme flags
+    # took those. 2026-10-22: nor the Find My counts — the Overview's set-up
+    # words, in every report, took the rest; such a full day sends nine.)
+    monkeypatch.setattr(ws_common, "_log_handler", SimpleNamespace(counts={}))
     h2 = _findmy_house()
     h2.data[DOMAIN][DATA_SETTINGS].data["lights_showcase_presets"] = h.data[DOMAIN][DATA_SETTINGS].data["lights_showcase_presets"]
-    for n in _FM_EVENTS:
-        T.bump(h2, n, 250)
     assert len(T.build_payload(h2)["presets"]) == 10
 
 
@@ -1232,6 +1255,8 @@ def _busy_day(h, hours: float = 24.0):
         w.add("pos_unk", rnd.uniform(0, 100))
         w.add("pos_heard", rnd.uniform(0, 12))
         w.add("pos_chg", 1.0)
+        w.add("pos_unsure", rnd.uniform(0, 100))
+        w.add("fusion_chg", 1.0)
         w.add("occ_unk", rnd.uniform(0, 9))
         w.add("occ_conf", rnd.choice((0.0, 1.0, 2.0)))
     # PadSpan's own size on a busy street, and Home Assistant by view
@@ -1304,7 +1329,9 @@ def test_a_full_load_section_is_small_and_every_word_is_on_the_list():
     # 2500 -> 2600 (0.38.136): HA's device and entity registry sizes and the
     # most same-named devices, beside the "ha" phase they may explain.
     # 2600 -> 2650 (0.38.139): readings the per-receiver minimum signal kept out.
-    assert section < 2650, section
+    # 2650 -> 2700 (0.38.165): the unsure share and fusion's room changes,
+    # each sent only while its (off by default) setting is on.
+    assert section < 2700, section
     assert len(json.dumps(p)) <= T._MAX_BYTES
 
 
@@ -1610,3 +1637,147 @@ def test_the_move_out_of_www_is_reported_only_when_it_did_something():
 
 def test_a_stale_floor_plan_link_is_a_known_event():
     assert T.event_allowed("map_image_stale")
+
+
+def test_new_switches_are_reported_only_when_on():
+    """0.38.160: a house that never turns the new features on sends the report it always did."""
+    from pathlib import Path
+    src = Path(T.__file__).read_text(encoding="utf-8")
+    assert "for k, word in _FEATURE_ON_ONLY.items():\n        if settings.get(k):" in src.replace("\r\n", "\n")
+    assert "room_hold_used" in T.EVENTS and "vacuum_imported" in T.EVENTS and "vacuum_point_accepted" in T.EVENTS
+
+
+# ── Quiet mode's field signal and the Overview's set-up (2026-10-22) ─────────
+
+def _quiet_house(quiet: bool, objects: list[dict]):
+    h = _hass()
+    h.data[DOMAIN][DATA_SETTINGS].data["quiet_mode"] = quiet
+    h.data[DOMAIN]["snapshot_cache"][1]["objects"]["list"] = objects
+    return h
+
+
+def test_quiet_hidden_buckets_the_share_quiet_mode_hides():
+    """Unlabelled, unidentified and unfollowed, of all objects in the snapshot."""
+    def bucket(n_hidden, n_shown):
+        objs = ([{"kind": "ble", "address": f"hidden-{i}"} for i in range(n_hidden)]
+                + [{"kind": "ble", "address": f"shown-{i}", "identified": True} for i in range(n_shown)])
+        p = T.build_payload(_quiet_house(True, objs))
+        T.assert_shareable(p)
+        return p["env"].get("quiet_hidden")
+    assert bucket(0, 4) == "lt25" and bucket(1, 3) == "25_50" and bucket(2, 2) == "50_75"
+    assert bucket(3, 1) == "gt75" and bucket(4, 0) == "gt75"
+    # Labelled or followed (by address, or an iBeacon's key) counts as shown.
+    objs = [{"kind": "ble", "address": "x1", "user_label": "Keys"},
+            {"kind": "ble", "address": _MAC1.lower()},
+            {"kind": "ibeacon", "key": "beacon-1"}, {"kind": "ble", "address": "x4"}]
+    h = _quiet_house(True, objs)
+    h.data[DOMAIN][DATA_SETTINGS].data["followed_addrs"] = [_MAC1, "BEACON-1"]
+    assert T.build_payload(h)["env"]["quiet_hidden"] == "25_50"
+    # No objects: nothing to say.
+    assert "quiet_hidden" not in T.build_payload(_quiet_house(True, []))["env"]
+    # Only words from the list leave.
+    p = T.build_payload(_quiet_house(True, objs))
+    p["env"]["quiet_hidden"] = "37%"
+    with pytest.raises(ValueError, match="quiet_hidden"):
+        T.assert_shareable(p)
+
+
+def test_a_quiet_off_report_is_unchanged_by_the_quiet_signal():
+    """43 of 57 houses run quiet mode off: their report carries no quiet_hidden,
+    and is byte for byte the quiet-on report less that key and the switch."""
+    objs = [{"kind": "ble", "address": "a"}, {"kind": "ble", "address": "b", "identified": True}]
+    on = T.build_payload(_quiet_house(True, objs))
+    off = T.build_payload(_quiet_house(False, objs))
+    assert "quiet_hidden" not in off["env"] and on["env"]["quiet_hidden"] == "50_75"
+    del on["env"]["quiet_hidden"]
+    on["features"]["quiet_mode"] = False
+    assert json.dumps(off) == json.dumps(on)
+    # Missing or any non-True value reads as off too.
+    for v in (None, 0, "yes"):
+        h = _quiet_house(False, objs)
+        h.data[DOMAIN][DATA_SETTINGS].data["quiet_mode"] = v
+        assert "quiet_hidden" not in T.build_payload(h)["env"]
+
+
+def test_each_overview_screen_sends_only_what_it_changed():
+    def ov(**settings):
+        h = _hass()
+        h.data[DOMAIN][DATA_SETTINGS].data.update(settings)
+        p = T.build_payload(h)
+        T.assert_shareable(p)
+        return {k: v for k, v in p["features"].items() if k in T.OVERVIEW_SET}
+    # Every screen on its defaults: nothing at all.
+    assert ov() == {}
+    assert "overview_kind" not in T.build_payload(_hass())["features"]
+    gaps = {60: "gap_tight", 119: "gap_tight", 120: "gap_custom", 180: "gap_custom", 181: "gap_wide"}
+    assert {g: ov(overview_iso_floor_gap=g)["ov_house"] for g in gaps} == {g: [w] for g, w in gaps.items()}
+    assert ov(overview_iso_floor_gap=150) == {}
+    assert ov(overview_iso_horiz_gap=-40, overview_iso_focus=2, overview_show_trails=True)["ov_house"] == \
+        ["offset", "one_floor", "trails"]
+    # Focus 0 is All floors: what a saved view writes by default.
+    assert ov(overview_iso_focus=0) == {} and ov(overview_iso_focus=None) == {}
+    zooms = {0.4: "zoom_lt1", 1.5: "zoom_1_2", 2.0: "zoom_1_2", 2.5: "zoom_gt2"}
+    assert {z: ov(overview_iso_zoom=z)["ov_atlas"] for z in zooms} == {z: [w] for z, w in zooms.items()}
+    assert ov(atlas_layout_v2=False, atlas_emergency_button=False)["ov_atlas"] == ["classic", "no_emergency"]
+    assert ov(atlas_weather_enabled=False, atlas_weather_strength=1.4)["ov_atlas"] == ["no_weather"]
+    assert ov(atlas_weather_strength=0.5)["ov_atlas"] == ["weather_lt1"]
+    # The 3D house's list only while it is on.
+    three = dict(atlas_3d_quality="low", atlas_3d_people=True, atlas_3d_look="own")
+    assert ov(**three) == {}
+    assert ov(atlas_3d_enabled=True, **three)["ov_3d"] == ["q_low", "people", "look_own"]
+    assert ov(atlas_3d_enabled=True, atlas_3d_quality="auto") == {}
+    # The home-view timeout is never reported (test_live_aboard_panel.py).
+    assert ov(atlas_3d_enabled=True, atlas_3d_home_idle_s=0) == {}
+    # Never the numbers themselves.
+    h = _hass()
+    h.data[DOMAIN][DATA_SETTINGS].data.update(overview_iso_floor_gap=217, overview_iso_zoom=1.37, overview_iso_horiz_gap=-63)
+    text = json.dumps(T.build_payload(h)["features"])
+    assert "217" not in text and "1.37" not in text and "63" not in text
+    # A word outside the list is refused.
+    p = T.build_payload(_hass())
+    p["features"]["ov_house"] = ["gap_217"]
+    with pytest.raises(ValueError):
+        T.assert_shareable(p)
+
+
+def test_overview_shown_words_match_the_panel():
+    js = (ROOT / "custom_components/padspan_bright/www/padspan-bright/views/overview.js").read_text(encoding="utf-8")
+    m = re.search(r"export const OVERVIEW_SHOWN = \[([^\]]*)\]", js)
+    assert m and tuple(re.findall(r'"([a-z_0-9]+)"', m.group(1))) == T.OVERVIEW_SHOWN
+    assert all(T.event_allowed(f"overview_shown:{w}") for w in T.OVERVIEW_SHOWN)
+
+
+def test_screens_are_listed_only_from_two_up_and_never_by_id():
+    h = _hass()
+    h.data[DOMAIN][DATA_SETTINGS].data["telemetry_enabled"] = True
+    a, b = "0123456789abcdef", "fedcba9876543210"
+    T.note_screen_word(h, a, "overview_shown:atlas_3d")
+    T.note_screen_word(h, a, "client_screen:res_4k")
+    T.note_screen_word(h, a, "wall_screen:atlas:kiosk")
+    T.note_screen_word(h, a, "client_screen:dpr_2")          # not a listed word
+    T.note_screen_word(h, a, "overview_shown:atlas_3d")      # once
+    assert "screens" not in T.build_payload(h)["env"]        # one screen: the counts say it all
+    T.note_screen_word(h, b, "overview_shown:room_grid")
+    T.note_screen_word(h, b, "client_screen:kind_phone")
+    p = T.build_payload(h)
+    T.assert_shareable(p)
+    assert p["env"]["screens"] == [["atlas_3d", "atlaspage_kiosk", "res_4k"], ["kind_phone", "room_grid"]]
+    assert a not in json.dumps(p) and b not in json.dumps(p)
+    # Five screens at most; a bad id or an unknown event adds nothing.
+    for i in range(10):
+        T.note_screen_word(h, f"{i:016x}", "overview_shown:house")
+    T.note_screen_word(h, "not-an-id", "overview_shown:house")
+    T.note_screen_word(h, "1111111111111111", "tab:overview")
+    assert len(T.build_payload(h)["env"]["screens"]) == 5
+    # A failed send gives the lists back; a sent one starts the window afresh.
+    taken = T._take_windows(h)
+    assert "screens" not in T.build_payload(h)["env"]
+    T._give_back_windows(h, taken)
+    assert len(T.build_payload(h)["env"]["screens"]) == 5
+    T._take_windows(h)
+    assert "screens" not in T.build_payload(h)["env"]
+    # Opting in again forgets the lists from before.
+    T.note_screen_word(h, a, "overview_shown:house")
+    T.note_screen_word(h, b, "overview_shown:house")
+    T.reset_windows(h)
+    assert "screens" not in T.build_payload(h)["env"]

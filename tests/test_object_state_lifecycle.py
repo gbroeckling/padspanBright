@@ -43,6 +43,8 @@ SITE_STATE: frozenset[str] = frozenset({
     "_scanner_agree", "_room_centroids", "_floor_bounds", "_floor_bases",
     "_floor_rooms", "_floor_stack_idx", "_pl_fits", "_door_debounce",
     "_floor_cache",                     # each receiver's minimum signal, from settings (by scanner)
+    "_corr_cache",                      # motion/occupancy per area for sensor fusion (by room)
+    "_last_source_to_area",             # the last poll's scanner -> area map (by scanner)
 })
 
 # Keyed by an object key or by a resolved address. These belong to one object
@@ -60,9 +62,12 @@ OBJECT_STATE: frozenset[str] = frozenset({
     # 2026-10-12: a short gap's "from" room, and Follow room alerts held by
     # their cooldown with the last room each reported.
     "_room_before_gap", "_room_alert_held", "_room_alert_reported",
+    "_room_gap_mono",                   # when _room_before_gap was set (display-only hold_last_room_s)
     # Keyed by device group (a label, or the key itself) -> present keys;
     # rebuilt every poll, and _evict_object takes an evicted key out of it.
     "_prev_groups",
+    "_room_unsure",                     # positioning_unsure's reason while a room is held
+    "_unsure_run",                      # ...and how many unsure polls in a row named one room
 })
 
 # The subset of OBJECT_STATE that says WHERE the object was. An absence breaks
@@ -73,7 +78,7 @@ LOCATION_STATE: frozenset[str] = frozenset({
     "_room_votes", "_confirmed_room", "_room_confidence", "_knn_position",
     "_smooth_xy", "_spatial_position", "_spatial_smooth_xy",
     "_coverage_hist", "_outside_by_cov", "_floor_evidence", "_device_floor",
-    "_adaptive_last_vec",
+    "_adaptive_last_vec", "_room_unsure", "_unsure_run",
 })
 
 

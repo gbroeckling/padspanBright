@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.157";
-const RELEASE_BUILD_ID = "20261020T174200Z";
+const APP_VERSION = "0.38.166";
+const RELEASE_BUILD_ID = "20261025T083043Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -121,10 +121,12 @@ import(`./views/pro_invite.js?b=${BUILD_ID}`)
   .catch(err => console.warn("PadSpan: pro_invite module failed to load", err));
 
 // Hide HA / Show HA (ha_sidebar.js), shared with the sidebar Atlas. Until it
-// lands the button keeps its first word and a press does nothing.
+// lands the button keeps its first word and a press does nothing; panels that
+// tried to paint it before then are repainted when it does.
 let HA_SIDEBAR = null;
+const _haSideWaiting = new Set();
 import(`./ha_sidebar.js?b=${BUILD_ID}`)
-  .then(m => { HA_SIDEBAR = m; })
+  .then(m => { HA_SIDEBAR = m; _haSideWaiting.forEach(p => p._paintHaSide()); _haSideWaiting.clear(); })
   .catch(err => console.warn("PadSpan: ha_sidebar module failed to load", err));
 
 // Which PadSpan module an uncaught error came from (views/ui_error.js). Until
@@ -135,6 +137,13 @@ let DAY_THEME = null;
 import(`./views/ui_error.js?b=${BUILD_ID}`)
   .then(m => { UI_ERROR = m; })
   .catch(err => console.warn("PadSpan: ui_error module failed to load", err));
+
+// The map as text for screen readers (views/map_text.js). Until it lands, or
+// if it never does, the Overview simply has no hidden text.
+let MAP_TEXT = null;
+import(`./views/map_text.js?b=${BUILD_ID}`)
+  .then(m => { MAP_TEXT = m; })
+  .catch(err => console.warn("PadSpan: map_text module failed to load", err));
 
 // ── Dynamic view imports ─────────────────────────────────────────────────────
 // Two-phase loading for fast first paint:
@@ -603,6 +612,8 @@ class PadSpanHaApp extends HTMLElement {
     // The Atlas as Overview (views/overview.js) is the sidebar Atlas page,
     // which reads states off its own hass: hand it each new one.
     if(this.state && this.state._overviewAtlas) this.state._overviewAtlas.hass = hass;
+    // Follow the sun (_sunLook): the look changes at sunrise and sunset.
+    if(this.state?.settings?.theme_follow_sun === true && (hass?.states?.["sun.sun"]?.state || null) !== (this._sunSeen ?? null)) this._applyTheme();
     // Motion sensors back from an offline blip (motion_reconnects.py), pushed
     // on every change — one subscription per connection (a new connection,
     // or a re-entry after disconnectedCallback, subscribes afresh), kept
@@ -669,6 +680,10 @@ class PadSpanHaApp extends HTMLElement {
   // recovery" path by the watchdog when the DOM is irrecoverably corrupted.
   connectedCallback(){
     if(!this.shadowRoot) this.attachShadow({mode:"open"});
+    // The rebuild below drops the theme's stylesheets and the skin link:
+    // forget them, so _applyTheme and _applySkin put them back on the new page.
+    if (this._dayOff) { this._dayOff(); this._dayOff = null; }
+    this._dayKey = ""; this._skin = null;
     this.shadowRoot.innerHTML = `
       <link rel="stylesheet" href="/padspan_bright_static/padspan-bright/styles.css?v=${APP_VERSION}&b=${BUILD_ID}">
       <!-- 2025 skin overlay. Deliberately href-less until _applySkin() decides:
@@ -750,6 +765,9 @@ class PadSpanHaApp extends HTMLElement {
     this.$nav = this.$("#nav");
     this.$content = this.$("#content");
     this.$modal = this.$("#modal");
+    // A re-entry with the settings already read: the 2025 skin goes back on
+    // the new page at once, not at the next settings read (a flash of classic).
+    if (this.state?.settings) this._applySkin();
 
     // Kiosk chrome hiding runs after state init (URL parsed later in this
     // method) — schedule for after the constructor body completes.
@@ -1066,7 +1084,7 @@ class PadSpanHaApp extends HTMLElement {
   _openReleaseNotes(){
     // Read at call time, not import time: editions.js is allowed to fail.
     // The literal is the same URL release.py writes into the update manifest.
-    const historyUrl = (EDITIONS && EDITIONS.WHATSNEW_URL) || "https://padspan.traks.ca/#whatsnew";
+    const historyUrl = (EDITIONS && EDITIONS.WHATSNEW_URL) || "https://padspan.traks.ca/?hl=en#whatsnew";
     import(`./views/release_notes.js?b=${BUILD_ID}`)
       .then(m => m.openReleaseNotes(this.$modal, {
         url: `/padspan_bright_static/padspan-bright/assets/whatsnew.json?v=${APP_VERSION}&b=${BUILD_ID}`,
@@ -1594,7 +1612,28 @@ class PadSpanHaApp extends HTMLElement {
   // User-triggered renders (tab clicks, actions): execute IMMEDIATELY.
   // Background renders (poll, wakeUp, refreshAll): batch via rAF to prevent
   // multiple DOM rebuilds within the same frame.
+  // Who is in which room on the Overview's map, as text in a box no one sees
+  // (views/map_text.js: a screen reader hears a room's line when it changes,
+  // at most every 10 s). Elsewhere, or with the Atlas as Overview (it has its
+  // own), the box is empty.
+  _updateMapText(){
+    const main = MAP_TEXT && this.shadowRoot ? this.shadowRoot.querySelector("main.main") : null;
+    if (!main) return;
+    if (!this._mapTextBox) this._mapTextBox = MAP_TEXT.createMapText("psMapText", "Who is in which room");
+    const mt = this._mapTextBox;
+    if (mt.el.parentNode !== main) main.appendChild(mt.el);
+    const list = this.state.live?.snapshot?.objects?.list;
+    const atlasHome = !!(VIEWS.overview && VIEWS.overview.atlasHomeOn && VIEWS.overview.atlasHomeOn({ state: this.state }));
+    if (this.state.view !== "overview" || atlasHome || !Array.isArray(list)) { mt.clear(); return; }
+    const t = awayTimeoutS(this.state.settings), fa = this.state.followedAddrs, isScanner = this._ctx().helpers.isScanner;
+    const followed = (o) => !!fa && [o.address, o.entity_id, o.key].some(a => !!a && fa.has(String(a).toUpperCase()));
+    mt.update(MAP_TEXT.roomLines(MAP_TEXT.overviewEntries(list, { followed, away: (o) => isAway(o, t), isScanner }),
+      MAP_TEXT.mapRooms(this.state.model)));
+  }
+
   _scheduleRender(fromPoll = false) {
+    // The screen-reader text must never stop the Overview from drawing.
+    try { this._updateMapText(); } catch (e) { console.debug("PadSpan: map text skipped", e); }
     if (!fromPoll) {
       // User action — render immediately, no delay
       this._renderCurrentView(false);
@@ -1651,7 +1690,7 @@ class PadSpanHaApp extends HTMLElement {
         root: this.shadowRoot || this,
         viewClass: () => (this.state.view === "maps" && this.state.mapsTab === "lights") ? "atlas" : "other",
         enabled: () => !!this.state.settings?.telemetry_enabled,
-        send: (name) => this._telemetryEvent(name),
+        send: (name, extra) => this._telemetryEvent(name, extra),
         states: () => this._hass && this._hass.states,
       });
     }).catch(() => { this._clientPerfLoading = null; });
@@ -1800,7 +1839,18 @@ class PadSpanHaApp extends HTMLElement {
     if(!this._hass) throw new Error("hass not ready");
     this._wsCount(payload.type);
     this._logEvent("ws_call", payload.type);
-    return await this._hass.callWS(payload);
+    try {
+      return await this._hass.callWS(payload);
+    } catch (err) {
+      // Enhanced security is on and this person is not an admin
+      // (ws_common.require_admin_if_enhanced): say so plainly, and keep that
+      // message up over the view's own "failed" toast that follows it.
+      if (err && err.code === "admin_only") {
+        this._toast(err.message || "Only an admin can change this while Enhanced security is on");
+        this._adminOnlyToastUntil = Date.now() + 4500;
+      }
+      throw err;
+    }
   }
 
   // Fetch settings and store quietly (no re-render, no toast) — called from _refreshAll
@@ -1869,14 +1919,16 @@ class PadSpanHaApp extends HTMLElement {
   async _applyTheme(){
     // Day wins, then Light (the inversion), then a palette (day_theme.js
     // PALETTES); none of them is Night.
-    // Day and the four palettes are PadSpan Pro's: without Pro (a lapsed key
-    // too) it is Night. Light, the accessibility inversion, is everyone's.
+    // Day and three palettes are PadSpan Pro's: without Pro (a lapsed key
+    // too) they are Night. Light, the accessibility inversion, and High
+    // contrast are everyone's.
     const pro = String(this.state.settings?.tier || "").toLowerCase() === "pro";
-    const day = pro && !!this.state.settings?.day_theme;
-    const named = String(this.state.settings?.theme_palette || "");
-    const pal = !day && !this.state.settings?.light_theme && pro && ["graphite", "ocean", "dusk", "contrast"].includes(named) ? named : "";
+    const look = this._sunLook(pro);
+    const day = pro && !!look.day_theme;
+    const named = String(look.theme_palette || "");
+    const pal = !day && !look.light_theme && (pro ? ["graphite", "ocean", "dusk", "contrast"] : ["contrast"]).includes(named) ? named : "";
     const on = day || !!pal;
-    const invert = !on && !!this.state.settings?.light_theme;
+    const invert = !on && !!look.light_theme;
     this.style.filter = invert ? "invert(1) hue-rotate(180deg)" : "";
     if (invert) this.setAttribute("data-invert", ""); else this.removeAttribute("data-invert");
     const want = on ? (day ? "day" : pal) + ":" + (this._skin || "classic") : "";
@@ -1890,17 +1942,31 @@ class PadSpanHaApp extends HTMLElement {
       const urls = Array.from(this.shadowRoot.querySelectorAll('link[rel="stylesheet"][href]')).map(l => l.href);
       const css = await Promise.all(urls.map(u => fetch(u).then(r => r.ok ? r.text() : "").catch(() => "")));
       if (this._dayKey !== want) return;   // switched again while loading
-      const content = this.shadowRoot.querySelector("#content");
       this._dayOff = DAY_THEME.attachDayTheme(this.shadowRoot, {
         extraCss: css.filter(Boolean),
         color: day ? DAY_THEME.dayColor : DAY_THEME.paletteColor(pal),
-        frozen: (n) => this.state.view === "purelive" && !!content && content.contains(n),
+        frozen: (n) => { const content = this.shadowRoot.querySelector("#content"); return this.state.view === "purelive" && !!content && content.contains(n); },
       });
       this.setAttribute("data-theme", day ? "day" : pal);
     } catch (e) {
       this._dayKey = "";
       console.warn("PadSpan: day theme failed to load", e);
     }
+  }
+
+  // Follow the sun (settings.theme_follow_sun, off by default): while the sun
+  // is up (sun.sun above_horizon) the panel is Day, or Light (inverted)
+  // without PadSpan Pro; once it sets, the Theme picked, unless that is Day
+  // or Light itself, which give Night. Off, or with no sun.sun, the Theme
+  // picked as it always was. set hass() asks again only when the sun's state
+  // changes.
+  _sunLook(pro){
+    const s = this.state.settings || {};
+    const sun = s.theme_follow_sun === true ? this._hass?.states?.["sun.sun"]?.state : null;
+    this._sunSeen = sun || null;
+    if (sun === "above_horizon") return pro ? { day_theme: true } : { light_theme: true };
+    if (sun === "below_horizon") return { theme_palette: s.theme_palette };
+    return s;
   }
 
   // Chrome skin. "classic" is v0.35.0 untouched; "2025" links styles-2025.css
@@ -1941,7 +2007,8 @@ class PadSpanHaApp extends HTMLElement {
   // sidebar gone it is the way back.
   _paintHaSide(){
     const b = this.shadowRoot && this.shadowRoot.querySelector("#haSide");
-    if (!b || !HA_SIDEBAR) return;
+    if (!HA_SIDEBAR) { _haSideWaiting.add(this); return; }
+    if (!b) return;
     b.textContent = HA_SIDEBAR.haLabel(this._hass);
     b.setAttribute("aria-pressed", String(HA_SIDEBAR.haHidden(this._hass)));
   }
@@ -1949,15 +2016,19 @@ class PadSpanHaApp extends HTMLElement {
     if (!HA_SIDEBAR) return;
     this._telemetryEvent(HA_SIDEBAR.toggleHaSidebar(this, this._hass));
   }
-  _telemetryEvent(name){
+  _telemetryEvent(name, extra){
     const s = this.state.settings;
     if (!s || !("telemetry_enabled" in s)) {
       const q = this._telemetryQueue || (this._telemetryQueue = []);
-      if (q.length < 50) q.push(String(name));
+      // Screen-counted events need their id, so they wait for the next tick;
+      // anything else is kept by name (a wall_screen word just loses its id).
+      if (q.length < 50 && !(extra && /^(client_screen|overview_shown)/.test(String(name)))) q.push(String(name));
       return;
     }
     if (!s.telemetry_enabled) { this._telemetryQueue = null; return; }
-    this._callWS({ type: "padspan_bright/telemetry_event", event: String(name) }).catch(() => {});
+    // `extra` only ever carries this browser's screen id (client_perf.js).
+    const screen = extra && typeof extra.screen === "string" ? { screen: extra.screen } : {};
+    this._callWS({ type: "padspan_bright/telemetry_event", event: String(name), ...screen }).catch(() => {});
   }
   // Called whenever settings land. Counts the view that was already open
   // once — it was set directly, never through setView — then releases
@@ -1967,7 +2038,11 @@ class PadSpanHaApp extends HTMLElement {
   _screenReport(){
     if (_screenReported) return;
     _screenReported = true;
-    this._telemetryEvent("wall_screen:panel:" + screenKind(this.state.kioskMode));
+    // With the screen id (read, never made): its word in the report's list of screens.
+    let sid = null;
+    try { sid = localStorage.getItem("padspan_screen_id"); } catch (_) {}
+    this._telemetryEvent("wall_screen:panel:" + screenKind(this.state.kioskMode),
+      /^[0-9a-f]{16}$/.test(sid || "") ? { screen: sid } : undefined);
     if (_reloadNote) this._telemetryEvent("wall_reload:panel:" + _reloadNote);
   }
   // A ?view= link (#93), once settings say whether it stays open.
@@ -2161,13 +2236,26 @@ class PadSpanHaApp extends HTMLElement {
     try { reloadedFor = sessionStorage.getItem("padspan_reloaded_for") || ""; } catch(e) {}
     const wall = this.state.kioskMode || (wallScreen(false) && untouchedFor(120000));
     const act = staleBuildAction(RELEASE_BUILD_ID, be, wall, reloadedFor);
-    if(act && act.reload){
+    // Not under someone's hands (the guards _renderCurrentView keeps): an
+    // open dialog, a pin being placed, a map being dragged, uploaded or
+    // edited. The periodic check tries again. An open dialog counts only
+    // while somebody is there, though: a room or scanner dialog opened by one
+    // tap never closes by itself, and counting it after two untouched minutes
+    // kept a wall screen on the old build for good. Idle that long, the dialog
+    // is closed and the page reloads; unsaved work in Maps or a drag still waits.
+    const s = this.state;
+    const idle = untouchedFor(120000);
+    const busy = (!idle && this.$modal && !this.$modal.classList.contains("hidden"))
+      || s._calibTune?._dragging || s._calibBeacon?._dragging || s._calibTune?._confirming || s._calibBeacon?._confirming
+      || s.maps?._stackDragging || s.maps?._editDragging
+      || (s.view === "maps" && (s.mapsTab === "upload" || s.mapsTab === "stack" || s.mapsTab === "edit"));
+    if(act && act.reload && !busy){
       let remembered = false;
       try {
         sessionStorage.setItem("padspan_reloaded_for", be); remembered = true;
         sessionStorage.setItem("padspan_reload_how", "panel:" + (this.state.kioskMode ? "kiosk" : "fullscreen"));
       } catch(e) {}
-      if(remembered){ location.reload(); return; }   // can't remember it: show the bar, don't risk a loop
+      if(remembered){ this._closeModal(); location.reload(); return; }   // can't remember it: show the bar, don't risk a loop
     }
     const bar = this.$("#staleBuild");
     if(!bar) return;
@@ -3013,7 +3101,7 @@ class PadSpanHaApp extends HTMLElement {
         applyDataMode: (mode) => this._applyDataMode(mode),
         // Opt-in usage report: count one allow-listed event. A no-op unless the
         // person turned the report on — no traffic leaves the browser otherwise.
-        telemetryEvent: (name) => this._telemetryEvent(name),
+        telemetryEvent: (name, extra) => this._telemetryEvent(name, extra),
         // ── Followed Beacons ──────────────────────────────────────────────
         // Multi-device follow set — persisted both to server (via settings_set)
         // and to localStorage as a fallback. Addresses are stored uppercase.
@@ -3287,6 +3375,11 @@ class PadSpanHaApp extends HTMLElement {
         if (obj.private_ble_name) statusItems.push(el("div", {class:"muted", style:"font-size:11px"}, `Identity: ${obj.private_ble_name}`));
         if (Array.isArray(obj.all_addresses) && obj.all_addresses.length > 1)
           statusItems.push(el("div", {class:"muted", style:"font-size:11px"}, `Active rotating MACs: ${obj.all_addresses.length}`));
+      }
+      // Unsure (positioning_unsure, off by default): the room is kept on thin evidence
+      if (obj.room_unsure) {
+        statusItems.push(el("div", {class:"muted", style:"font-size:11px"},
+          obj.room_unsure === "few_scanners" ? "Room unsure: fewer than 3 scanners hear it" : "Room unsure: no calibration point matches it well"));
       }
       // KNN calibration confidence
       if (obj.knn_confidence > 0) {
@@ -4290,6 +4383,7 @@ class PadSpanHaApp extends HTMLElement {
   _toast(msg, isErr=false){
     const t = this.$("#toast");
     if(!t) return;
+    if(isErr && this._adminOnlyToastUntil && Date.now() < this._adminOnlyToastUntil) return;
     t.textContent = msg;
     t.classList.toggle("error", !!isErr);
     t.classList.remove("hidden");

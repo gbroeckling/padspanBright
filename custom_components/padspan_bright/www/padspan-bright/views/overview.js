@@ -15,10 +15,55 @@ const { render2DMap } =
   await import(`./plan_viewer.js${new URL(import.meta.url).search}`);
 // Keyed morph + breadcrumb trails for the object layer — see its own header
 // for why this exists: without it, every tracked dot teleports each poll.
-const { mergeObjectLayer, trailPush, trailSvg } =
+const { mergeObjectLayer, trailPush, trailSvg, prefersStill } =
   await import(`./iso_motion.js${new URL(import.meta.url).search}`);
 const { tierAtLeast: _ovTierAtLeast } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
+// The iPhone setup path (#69): with iphone_irk_guide on, an iPhone is told
+// about its IRK, never the Android-only BLE Transmitter.
+// If it can't load, the Overview goes on as it always was (the guide reads as off).
+const { iphoneGuideOn, isApplePhone, iphoneSetupAlert, IPHONE_META, NO_PHONES_TEXT, HELP_NOTE_TEXT } =
+  await import(`./iphone_irk.js${new URL(import.meta.url).search}`)
+    .catch(() => ({ iphoneGuideOn: () => false, isApplePhone: () => false, iphoneSetupAlert: () => "",
+                    IPHONE_META: "", NO_PHONES_TEXT: "", HELP_NOTE_TEXT: "" }));
+
+// What the Overview tab actually drew, for the opt-in report (telemetry.py
+// OVERVIEW_SHOWN, held equal by tests/test_telemetry.py): the classic screen
+// changes with how far a house got through setup, which settings can't tell.
+// Live data only, never Pure Live's classic side. With this browser's screen
+// id (client_perf.js keeps it; read here, never made or changed), Home
+// Assistant counts each screen once per report and lists the first five, so
+// a word is sent again at most once an hour; without one, once per page.
+export const OVERVIEW_SHOWN = ["house", "house_empty", "floor_plan", "room_grid",
+                               "flat", "atlas", "atlas_3d", "basic"];
+const _ovShownAt = new Map();      // word -> when it was last sent (0: for good)
+function _ovScreenId(){
+  try {
+    const id = localStorage.getItem("padspan_screen_id");
+    return /^[0-9a-f]{16}$/.test(id || "") ? id : "";   // "" = not made yet
+  } catch (_) { return null; }                          // no storage at all
+}
+function _ovShown(ctx, words){
+  const s = ctx.state.settings;
+  if (ctx.state.view !== "overview" || ctx.state.dataMode !== "live" || !ctx.state.live?.snapshot
+      || !s || !s.telemetry_enabled || !ctx.actions.telemetryEvent) return;
+  const sid = _ovScreenId();
+  if (sid === "") return;          // client_perf makes it on its first tick: the next draw sends
+  const now = Date.now();
+  for (const w of words) {
+    if (!OVERVIEW_SHOWN.includes(w)) continue;
+    const at = _ovShownAt.get(w);
+    if (at !== undefined && (at === 0 || now - at < 3600000)) continue;
+    _ovShownAt.set(w, sid ? now : 0);
+    ctx.actions.telemetryEvent("overview_shown:" + w, sid ? { screen: sid } : undefined);
+  }
+}
+// The Atlas as Overview on 3D: this browser's own Map / 3D choice
+// (lights_map.js _la3dPicked, the "atlas" screen), read only.
+function _ovAtlas3d(ctx){
+  if (!(ctx.state.settings && ctx.state.settings.atlas_3d_enabled === true)) return false;
+  try { return localStorage.getItem("padspan_lv_3d_atlas") === "1"; } catch (_) { return false; }
+}
 
 /** Pro, with Settings → UI Structure → "Overview shows the Atlas" on. */
 export function atlasHomeOn(ctx){
@@ -36,6 +81,9 @@ function _renderAtlasHome(ctx){
   let app = ctx.state._overviewAtlas;
   if (!app) {
     app = ctx.state._overviewAtlas = document.createElement("padspan-bright-lights-app");
+    // Inside the panel: the panel owns the wall-screen count and the build
+    // check, so the Atlas skips its own (set before hass, which boots it).
+    app._embedded = true;
     import(`../lights_panel.js${new URL(import.meta.url).search}`)
       .catch(() => { if (ctx.toast) ctx.toast("The Atlas could not load. Turn \"Overview shows the Atlas\" off in Settings → UI Structure.", true); });
   }
@@ -102,7 +150,11 @@ function _presentInRoom(ctx, o, room){
 }
 
 export function render(ctx){
-  if (atlasHomeOn(ctx)) return _renderAtlasHome(ctx);
+  if (atlasHomeOn(ctx)) {
+    const atlas = _renderAtlasHome(ctx);
+    _ovShown(ctx, [_ovAtlas3d(ctx) ? "atlas_3d" : "atlas"]);
+    return atlas;
+  }
   return renderClassic(ctx);
 }
 
@@ -150,7 +202,11 @@ export function renderClassic(ctx){
 
   const objSummary = (liveSnap && liveSnap.objects && liveSnap.objects.summary) ? liveSnap.objects.summary : null;
   const _quietMode = !!(ctx.state.settings && ctx.state.settings.quiet_mode);
-  const objectsTotal = objSummary ? (_quietMode ? objSummary.identified : objSummary.total) : tagsCount;
+  // Quiet mode counts what every other view shows: labelled, identified or followed.
+  const objectsTotal = objSummary ? (_quietMode
+    ? ((liveSnap.objects.list || []).filter(o => o.user_label || o.identified
+        || (ctx.actions.followedHas && ctx.actions.followedHas(o.address || o.key || ""))).length)
+    : objSummary.total) : tagsCount;
   const unidentifiedCount = objSummary ? objSummary.unidentified : 0;
 
   const radios = (liveSnap && liveSnap.ble && Array.isArray(liveSnap.ble.radios)) ? liveSnap.ble.radios : [];
@@ -735,9 +791,12 @@ export function renderClassic(ctx){
   // impossible to certify photo-free. Called through _render2DMap below.
 
   // ---------- 3D Iso Floor Stack (uses uploaded maps data + live presence) ----------
+  // Which form the map below took (_ovShown's word).
+  let _ovForm = "house";
   function renderIsoFloorStack(){
     // ── Experimental 2D mode gate ──
     if(ctx.state.settings && ctx.state.settings.overview_2d_mode){
+      _ovForm = "flat";
       return render2DMap(ctx, {
         esc: s2 => String(s2||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"),
         renderRoomGrid,
@@ -750,6 +809,7 @@ export function renderClassic(ctx){
     // here when no image had been uploaded, however complete the fabric was.
     const _fabRooms0 = (ctx.state.model || {}).room_geometry_m || {};
     if(!Object.keys(_fabRooms0).length){
+      _ovForm = (liveSnap && liveSnap.floor_plan) ? "floor_plan" : "room_grid";
       if(liveSnap && liveSnap.floor_plan) return renderFloorPlan(liveSnap.floor_plan);
       return renderRoomGrid();
     }
@@ -948,6 +1008,7 @@ export function renderClassic(ctx){
     // so a floor that had rooms but no picture was not a floor at all — it
     // drew nothing, and neither did anything on it.
     const sortedIsoLevels = _fabOK ? [..._fabF.levels] : [];
+    if(!sortedIsoLevels.length) _ovForm = "house_empty";
     const levelColor = (z) => LAYER_PAL[sortedIsoLevels.indexOf(z) % LAYER_PAL.length];
     // The floor ids the fabric places at a storey.
     const _floorIdsAt = (z) => {
@@ -1954,6 +2015,11 @@ export function renderClassic(ctx){
     // the map feels cramped against the edges.
     const MAP_SIDE_PAD_PCT = 2;
     isoDiv.style.cssText = "overflow:auto;border-radius:8px;background:#071008;padding:8px " + MAP_SIDE_PAD_PCT + "%";
+    // For screen readers: the map is a figure, described by who is in which
+    // room (panel.js _updateMapText, a box no one sees). Nothing drawn changes.
+    isoDiv.setAttribute("role", "figure");
+    isoDiv.setAttribute("aria-label", "House map");
+    isoDiv.setAttribute("aria-describedby", "psMapText");
 
     // ── 3D map loading indicator ────────────────────────────────────────
     const _isoProgressFill = { style: {} }; // stub — no visual progress bar
@@ -2011,7 +2077,8 @@ export function renderClassic(ctx){
         });
       };
 
-      if (!_isoRebuiltOnce) {
+      // prefers-reduced-motion: the new map in place, without the crossfade.
+      if (!_isoRebuiltOnce || prefersStill()) {
         _isoRebuiltOnce = true;
         doBuild();
         return;
@@ -2859,6 +2926,7 @@ export function renderClassic(ctx){
   // Always try iso floor stack first; falls back to sample floor plan or room grid if no maps
   const mapEl = renderIsoFloorStack();
   if (mapEl) mapEl.setAttribute("data-padspan-map", "true");
+  if (mapEl && !liveLoading) _ovShown(ctx, isBasic ? [_ovForm, "basic"] : [_ovForm]);
 
   // ── SUSPENDED banner builder (used by both basic + advanced sections) ──
   const _buildSuspendBanner = () => {
@@ -3081,7 +3149,8 @@ export function renderClassic(ctx){
           const res = await ctx.actions.wsCall("padspan_bright/companion_discover", {});
           const phones = res.phones || [];
           if (!phones.length) {
-            _bLoadMsg.textContent = "No phones detected. Enable the HA Companion App with BLE Transmitter.";
+            _bLoadMsg.textContent = iphoneGuideOn(ctx.state.settings) ? NO_PHONES_TEXT
+              : "No phones detected. Enable the HA Companion App with BLE Transmitter.";
             _bLoadMsg.style.color = "#64748b";
             return;
           }
@@ -3262,7 +3331,14 @@ export function renderClassic(ctx){
               };
             };
 
-            if (phone.state === "sensor_not_registered") {
+            if (phone.state === "sensor_not_registered" && iphoneGuideOn(ctx.state.settings) && isApplePhone(phone)) {
+              // An iPhone: no BLE Transmitter exists for it, so the IRK steps.
+              meta.textContent = (phone.model ? phone.model + " · " : "") + IPHONE_META;
+              btn.textContent = "Setup";
+              btn.style.color = "#f59e0b";
+              btn.style.borderColor = "#92400e";
+              btn.addEventListener("click", () => alert(iphoneSetupAlert()));
+            } else if (phone.state === "sensor_not_registered") {
               // Phone is registered with HA but BLE Transmitter sensor isn't enabled
               meta.textContent = (phone.model ? phone.model + " · " : "") + "BLE Transmitter sensor not enabled";
               btn.textContent = "Setup";
@@ -3498,12 +3574,14 @@ export function renderClassic(ctx){
         const res = await ctx.actions.wsCall("padspan_bright/companion_discover", {});
         const phones = res.phones || [];
         if (!phones.length) {
-          _aLoadMsg.textContent = "No phones detected. Enable the HA Companion App with BLE Transmitter.";
+          _aLoadMsg.textContent = iphoneGuideOn(ctx.state.settings) ? NO_PHONES_TEXT
+            : "No phones detected. Enable the HA Companion App with BLE Transmitter.";
           _aLoadMsg.style.color = "#64748b";
           return;
         }
 
-        _aLoadMsg.textContent = "Phones running the HA Companion App with BLE Transmitter. Click to track.";
+        _aLoadMsg.textContent = iphoneGuideOn(ctx.state.settings) ? "Phones running the HA Companion App. Click to track; an iPhone shows Setup."
+          : "Phones running the HA Companion App with BLE Transmitter. Click to track.";
 
         for (const phone of phones) {
           const row = document.createElement("div");
@@ -3605,12 +3683,15 @@ export function renderClassic(ctx){
 
           // Phone registered but BLE sensor not enabled (common on Android)
           if (phone.state === "sensor_not_registered") {
-            meta.textContent = (phone.model ? phone.model + " · " : "") + "BLE Transmitter sensor not enabled in Companion App";
+            // An iPhone (with the iPhone setup path on) gets the IRK steps instead.
+            const _iphone = iphoneGuideOn(ctx.state.settings) && isApplePhone(phone);
+            meta.textContent = (phone.model ? phone.model + " · " : "") + (_iphone ? IPHONE_META : "BLE Transmitter sensor not enabled in Companion App");
             const setupBtn = document.createElement("button");
             setupBtn.className = "btn inline";
             setupBtn.style.cssText = "font-size:12px;padding:4px 14px;color:#f59e0b;border-color:#92400e;font-weight:600;white-space:nowrap";
             setupBtn.textContent = "Setup";
             setupBtn.addEventListener("click", () => {
+              if (_iphone) { alert(iphoneSetupAlert()); return; }
               alert(
                 "To enable phone tracking:\n\n" +
                 "1. Open the HA Companion App on your phone\n" +
@@ -3765,6 +3846,7 @@ export function renderClassic(ctx){
 
         // Help note
         const helpNote = el("div",{style:"font-size:11px;color:#64748b;margin-top:8px"},
+          iphoneGuideOn(ctx.state.settings) ? HELP_NOTE_TEXT :
           "Not seeing your phone? Open Companion App \u2192 Settings \u2192 Companion App \u2192 Manage Sensors \u2192 BLE Transmitter \u2192 Enable. The phone will appear here once the transmitter is active.");
         _aPhoneBody.appendChild(helpNote);
       } catch (e) {

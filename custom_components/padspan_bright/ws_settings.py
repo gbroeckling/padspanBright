@@ -27,7 +27,7 @@ from .const import (
     LIGHT_TYPE_OVERRIDE_KINDS,
 )
 from .bluetooth_live import get_bluetooth_live
-from .ws_common import _LIGHT_SHAPE_KINDS, _OBJECT_HISTORY_DAYS_DEFAULT, _OBJECT_HISTORY_DAY_CHOICES, _get_settings, _invalidate_snapshot_cache, _padspan_pro_active
+from .ws_common import require_admin_if_enhanced, _LIGHT_SHAPE_KINDS, _OBJECT_HISTORY_DAYS_DEFAULT, _OBJECT_HISTORY_DAY_CHOICES, _get_settings, _invalidate_snapshot_cache, _padspan_pro_active
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -135,8 +135,9 @@ def _atlas_3d_quality(value: Any) -> str:
     return v if v in _ATLAS_3D_QUALITY else "auto"
 
 
-# Live Aboard's look: the same as the Atlas (the default), or its own.
-_ATLAS_3D_LOOK = ("atlas", "own")
+# Live Aboard's look: the same as the Atlas (the default), its own, or Studio
+# (its own colours under soft light, a sky and a stage).
+_ATLAS_3D_LOOK = ("atlas", "own", "studio")
 
 
 def _atlas_3d_look(value: Any) -> str:
@@ -198,6 +199,84 @@ def _atlas_3d_carries(raw: Any) -> dict[str, list[str]]:
         if clean:
             out[eid] = clean
     return out
+
+
+# The director (views/live_aboard_director.js): the doorbells, doors, alarms
+# and sensors the sidebar's Live Aboard flies to when they go off, each with
+# the camera whose snapshot its card shows ("" for none).
+DIRECTOR_MAX = 12
+DIRECTOR_DOMAINS = ("event", "binary_sensor", "alarm_control_panel")
+_DIRECTOR_EID = re.compile(r"^([a-z_]+)\.(?!_)[a-z0-9_]{1,250}(?<!_)$")
+
+
+def _atlas_3d_director(raw: Any) -> list[dict[str, str]]:
+    """[{entity, camera}]: each trigger once, of the three kinds, at most
+    DIRECTOR_MAX; a camera that is not camera.* is none. Anything else is
+    dropped."""
+    out: list[dict[str, str]] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if len(out) >= DIRECTOR_MAX:
+            break
+        if not isinstance(item, dict):
+            continue
+        eid, cam = item.get("entity"), item.get("camera")
+        m = _DIRECTOR_EID.match(eid) if isinstance(eid, str) else None
+        if not m or m.group(1) not in DIRECTOR_DOMAINS or any(o["entity"] == eid for o in out):
+            continue
+        c = cam if isinstance(cam, str) and (cm := _DIRECTOR_EID.match(cam)) and cm.group(1) == "camera" else ""
+        out.append({"entity": eid, "camera": c})
+    return out
+
+
+# The director's people (the same Settings row): the people and tags it flies
+# to when they go into a room, by the key Live Aboard draws them with (a
+# person's entity id, or "beacon:" and the tag's tracked key), each with the
+# rooms that count ([] = any room, or a person arriving home). Personal, like
+# carries: kept in this install's settings and its backups only.
+DIRECTOR_PEOPLE_MAX, DIRECTOR_ROOMS_MAX = 12, 12
+_DIRECTOR_ROOM = re.compile(r"^[^\x00-\x1f\x7f]{1,120}$")
+
+
+def _atlas_3d_director_people(raw: Any) -> list[dict[str, Any]]:
+    """[{key, rooms}]: each person or tag once, at most DIRECTOR_PEOPLE_MAX,
+    each with at most DIRECTOR_ROOMS_MAX room names, once each. Anything else
+    is dropped."""
+    out: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if len(out) >= DIRECTOR_PEOPLE_MAX:
+            break
+        if not isinstance(item, dict):
+            continue
+        key, rooms = item.get("key"), item.get("rooms")
+        ok = isinstance(key, str) and (bool(_CARRIES_PERSON.match(key)) or (
+            key.startswith("beacon:") and bool(_CARRIES_KEY.match(key[len("beacon:"):]))))
+        if not ok or any(o["key"] == key for o in out):
+            continue
+        clean: list[str] = []
+        for r in rooms if isinstance(rooms, list) else []:
+            if isinstance(r, str) and _DIRECTOR_ROOM.match(r) and r.strip() and r not in clean:
+                clean.append(r)
+            if len(clean) >= DIRECTOR_ROOMS_MAX:
+                break
+        out.append({"key": key, "rooms": clean})
+    return out
+
+
+def _clamped(value: Any, lo: float, hi: float, default: float, *, zero_ok: bool = False) -> float:
+    """A number kept lo..hi (0 kept too when zero_ok); unreadable is the default."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if v != v:
+        return default
+    if zero_ok and v <= 0:
+        return 0.0
+    return round(max(lo, min(hi, v)), 2)
 
 
 def _weather_strength(value: Any) -> float:
@@ -377,6 +456,21 @@ def _sanitize_whole_house_presets(presets_in: Any) -> list[dict[str, Any]]:
 
 
 
+# How each person's own screen looks and what it has already been shown:
+# open to everyone even with Enhanced security on (ws_common), because the
+# panel writes these as anyone uses it. Every other key changes what PadSpan
+# does for the whole home.
+_EVERYONE_KEYS = frozenset({
+    "whatsnew_seen_version", "telemetry_asked", "trial_nudge_done", "tester_nudge_done",
+    "onboarding_completed", "health_reminder_last_ts", "locate_self_key", "followed_addrs",
+    "hidden_map_ids", "lights_hidden", "maps_iso_floor_gap", "maps_iso_horiz_gap", "maps_iso_focus",
+    "overview_iso_floor_gap", "overview_iso_horiz_gap", "overview_iso_focus", "overview_iso_zoom",
+    "traceback_house_focus", "overview_show_walls", "overview_show_outdoor", "overview_show_trails",
+    "overview_persistent_pins", "overview_2d_mode", "advanced_extra_tabs",
+    "light_theme", "day_theme", "theme_palette", "theme_follow_sun", "ui_skin",
+})
+
+
 @websocket_api.websocket_command({"type": "padspan_bright/settings_get"})
 
 @websocket_api.async_response
@@ -406,6 +500,11 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("path_loss_exp"): vol.Coerce(float),
         vol.Optional("kalman_q"): vol.Coerce(float),
         vol.Optional("kalman_r"): vol.Coerce(float),
+        vol.Optional("hold_last_room_s"): vol.Coerce(float),   # display-only room hold through a short gap; 0 = off
+        vol.Optional("room_reason_attribute"): bool,          # "why this room" attribute on area sensors
+        vol.Optional("positioning_pick_better"): bool,        # prefer the method that wins the held-out test
+        vol.Optional("positioning_unsure"): bool,             # hold + flag a room on thin evidence
+        vol.Optional("positioning_sensor_fusion"): bool,      # motion sensors + usual moves as a tie-breaker
         vol.Optional("assumed_device_height_m"): vol.Coerce(float),
         vol.Optional("fabric_origin_lat"): vol.Any(vol.Coerce(float), None),
         vol.Optional("fabric_origin_lon"): vol.Any(vol.Coerce(float), None),
@@ -424,13 +523,23 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("overview_iso_zoom"): vol.Coerce(float),
         vol.Optional("lights_hidden"): list,
         vol.Optional("atlas_emergency_button"): bool,
+        vol.Optional("atlas_live_colours"): bool,
         vol.Optional("overview_atlas"): bool,
         vol.Optional("emergency_entities"): list,             # emergency_test.py — [] = find them
+        vol.Optional("atlas_alert_pulse"): bool,
+        vol.Optional("atlas_heatmap_enabled"): bool,
         vol.Optional("atlas_weather_enabled"): bool,
         vol.Optional("atlas_weather_rain_entity"): vol.Any(str, None),
         vol.Optional("atlas_weather_condition_entity"): vol.Any(str, None),
         vol.Optional("atlas_weather_warning_entity"): vol.Any(str, None),
         vol.Optional("atlas_weather_strength"): vol.Coerce(float),
+        vol.Optional("wall_screen_in"): vol.Coerce(float),
+        vol.Optional("wall_distance_m"): vol.Coerce(float),
+        vol.Optional("wall_text_arcmin"): vol.Coerce(float),
+        vol.Optional("wall_night_dim"): vol.Coerce(float),
+        vol.Optional("wall_pixel_shift"): bool,
+        vol.Optional("wall_floor_cycle_s"): vol.Coerce(float),
+        vol.Optional("wall_fully"): bool,
         vol.Optional("atlas_3d_enabled"): bool,
         vol.Optional("atlas_3d_quality"): vol.Any(str, None),
         vol.Optional("atlas_3d_people"): bool,
@@ -442,6 +551,8 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("atlas_3d_look"): vol.Any(str, None),
         vol.Optional("atlas_3d_home_idle_s"): vol.Any(int, float, str, None),
         vol.Optional("atlas_3d_carries"): vol.Any(dict, None),
+        vol.Optional("atlas_3d_director"): vol.Any(list, None),
+        vol.Optional("atlas_3d_director_people"): vol.Any(list, None),
         vol.Optional("lights_showcase"): bool,
         vol.Optional("lights_hide_untouched"): bool,
         vol.Optional("lights_hide_device_codes"): bool,
@@ -469,6 +580,7 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("ha_entity_distance_enabled"): bool,
         vol.Optional("ha_entity_scanner_distance_enabled"): bool,
         vol.Optional("ha_entity_occupancy_enabled"): bool,
+        vol.Optional("subzones_enabled"): bool,
         vol.Optional("mqtt_publish_enabled"): bool,
         vol.Optional("espresense_mqtt_enabled"): bool,
         vol.Optional("espresense_topic_prefix"): str,
@@ -487,6 +599,7 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("light_theme"): bool,
         vol.Optional("day_theme"): bool,
         vol.Optional("theme_palette"): vol.Any(str, None),
+        vol.Optional("theme_follow_sun"): bool,
         vol.Optional("ui_skin"): str,
         vol.Optional("light_shapes"): dict,
         vol.Optional("light_type_overrides"): dict,
@@ -511,10 +624,14 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("walk_to_identify_enabled"): bool,
         vol.Optional("radio_map_enabled"): bool,
         vol.Optional("distortion_map_enabled"): bool,
+        vol.Optional("roomplan_import_enabled"): bool,
+        vol.Optional("vacuum_import_enabled"): bool,
         vol.Optional("phone_wizard_enabled"): bool,
+        vol.Optional("iphone_irk_guide"): bool,
         vol.Optional("mac_rotation_bridging"): bool,
         vol.Optional("apple_auto_classify"): bool,
         vol.Optional("low_memory_mode"): bool,
+        vol.Optional("enhanced_security"): bool,              # admin only; ws_common.require_admin_if_enhanced
         vol.Optional("forensics_enabled"): bool,
         vol.Optional("license_tier_override"): str,
         vol.Optional("bright_reveal_presence"): bool,
@@ -545,6 +662,14 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
     """
     st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
     if st:
+        if "enhanced_security" in msg:
+            # The switch itself is always an administrator's, on or off.
+            _user = getattr(connection, "user", None)
+            if _user is not None and getattr(_user, "is_admin", True) is False:
+                connection.send_error(msg["id"], "unauthorized", "Only an administrator can change Enhanced security")
+                return
+        if (set(msg) - {"id", "type"} - _EVERYONE_KEYS) and not require_admin_if_enhanced(hass, connection, msg):
+            return
         # North: the 3D compass writes it, the GPS Bridge and the 3D sun read
         # it, and % 360 keeps NaN as NaN (an infinity becomes NaN). Refused
         # before anything else in the message is acted on.
@@ -597,14 +722,16 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                 connection.send_error(msg["id"], "unauthorized",
                                       "Only an administrator can change Live Aboard's library or photo settings")
                 return
-        if "atlas_3d_people" in msg or "atlas_3d_tags" in msg or "atlas_3d_carries" in msg:
+        if "atlas_3d_people" in msg or "atlas_3d_tags" in msg or "atlas_3d_carries" in msg or "atlas_3d_director" in msg or "atlas_3d_director_people" in msg:
             # Who shows in the house, and what each person carries (personal):
             # an administrator's, as Live Aboard's Views menu and Settings say.
             _user = getattr(connection, "user", None)
             if _user is not None and getattr(_user, "is_admin", True) is False:
                 connection.send_error(msg["id"], "unauthorized",
-                                      "Only an administrator can change who shows in Live Aboard and what each person carries")
+                                      "Only an administrator can change who shows in Live Aboard, what each person carries and what it flies to")
                 return
+        if "enhanced_security" in msg:
+            payload["enhanced_security"] = bool(msg.get("enhanced_security"))
         if "telemetry_asked" in msg:
             payload["telemetry_asked"] = bool(msg.get("telemetry_asked"))
         if "trial_nudge_done" in msg:
@@ -631,6 +758,13 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             payload["kalman_q"] = max(0.01, min(1.0, float(msg["kalman_q"])))
         if "kalman_r" in msg:
             payload["kalman_r"] = max(0.5, min(50.0, float(msg["kalman_r"])))
+        if "hold_last_room_s" in msg:
+            payload["hold_last_room_s"] = _clamped(msg["hold_last_room_s"], 1, 600, 0.0, zero_ok=True)
+        if "room_reason_attribute" in msg:
+            payload["room_reason_attribute"] = bool(msg.get("room_reason_attribute"))
+        for _hk in ("positioning_pick_better", "positioning_unsure", "positioning_sensor_fusion"):
+            if _hk in msg:
+                payload[_hk] = bool(msg.get(_hk))
         if "assumed_device_height_m" in msg:
             payload["assumed_device_height_m"] = max(0.0, min(3.0, float(msg["assumed_device_height_m"])))
         if "fabric_origin_lat" in msg:
@@ -748,6 +882,17 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                 payload[_wkey] = _weather_entity(msg[_wkey], _wdoms)
         if "atlas_weather_strength" in msg:
             payload["atlas_weather_strength"] = _weather_strength(msg["atlas_weather_strength"])
+        # Wall screens (settings_store: wall_*): kept to what a real wall can be.
+        if "wall_screen_in" in msg:
+            payload["wall_screen_in"] = _clamped(msg["wall_screen_in"], 10, 120, 0.0, zero_ok=True)
+        if "wall_distance_m" in msg:
+            payload["wall_distance_m"] = _clamped(msg["wall_distance_m"], 0.3, 10, 2.5)
+        if "wall_text_arcmin" in msg:
+            payload["wall_text_arcmin"] = _clamped(msg["wall_text_arcmin"], 14, 36, 20.0)
+        if "wall_night_dim" in msg:
+            payload["wall_night_dim"] = _clamped(msg["wall_night_dim"], 0, 0.7, 0.0)
+        if "wall_floor_cycle_s" in msg:
+            payload["wall_floor_cycle_s"] = int(_clamped(msg["wall_floor_cycle_s"], 10, 600, 0, zero_ok=True))
         if "atlas_3d_quality" in msg:
             payload["atlas_3d_quality"] = _atlas_3d_quality(msg["atlas_3d_quality"])
         if "atlas_3d_look" in msg:
@@ -759,6 +904,11 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
         if "atlas_3d_carries" in msg and isinstance(msg["atlas_3d_carries"], dict):
             # A non-dict is ignored, never stored as empty (light_shapes' rule).
             payload["atlas_3d_carries"] = _atlas_3d_carries(msg["atlas_3d_carries"])
+        if "atlas_3d_director" in msg and isinstance(msg["atlas_3d_director"], list):
+            # A non-list is ignored, never stored as empty (carries' rule).
+            payload["atlas_3d_director"] = _atlas_3d_director(msg["atlas_3d_director"])
+        if "atlas_3d_director_people" in msg and isinstance(msg["atlas_3d_director_people"], list):
+            payload["atlas_3d_director_people"] = _atlas_3d_director_people(msg["atlas_3d_director_people"])
         if "ble_max_age_s" in msg:
             payload["ble_max_age_s"] = max(30, min(14400, int(msg["ble_max_age_s"])))
         # ── Radio map / heatmap visualization controls (v0.15.x) ──────────
@@ -942,20 +1092,21 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
         for key in ("ha_entity_tracker_enabled", "ha_entity_area_enabled",
                     "ha_entity_distance_enabled", "ha_entity_scanner_distance_enabled",
                     "mqtt_publish_enabled", "espresense_mqtt_enabled", "tasmota_ble_enabled", "aggressive_ble_reseed",
-                    "ha_entity_occupancy_enabled",
-                    "overview_atlas", "lights_panel_enabled", "atlas_emergency_button", "bermuda_ignore", "bright_reveal_presence",
-                    "atlas_weather_enabled",
+                    "ha_entity_occupancy_enabled", "subzones_enabled",
+                    "overview_atlas", "lights_panel_enabled", "atlas_emergency_button", "atlas_live_colours", "bermuda_ignore", "bright_reveal_presence",
+                    "atlas_weather_enabled", "atlas_alert_pulse", "atlas_heatmap_enabled",
                     "atlas_3d_enabled", "atlas_3d_people", "atlas_3d_tags", "atlas_3d_library",
                     "atlas_3d_weather", "atlas_3d_showcase",
                     "tags_room_events_enabled", "tags_nfc_identify_enabled",
-                    "tags_phone_autolink_enabled", "quiet_mode", "light_theme", "day_theme",
+                    "tags_phone_autolink_enabled", "quiet_mode", "light_theme", "day_theme", "theme_follow_sun", "wall_pixel_shift", "wall_fully",
                     "beacon_auto_calibrate", "overview_persistent_pins", "overview_show_walls",
                     "overview_show_outdoor", "overview_show_trails",
                     "overview_2d_mode", "beacon_profiling_enabled",
                     "walk_to_identify_enabled",
                     "radio_map_enabled", "distortion_map_enabled",
+                    "roomplan_import_enabled", "vacuum_import_enabled",
                     "rssi_capture_enabled",
-                    "phone_wizard_enabled", "mac_rotation_bridging",
+                    "phone_wizard_enabled", "iphone_irk_guide", "mac_rotation_bridging",
                     "apple_auto_classify", "low_memory_mode"):
             if key in msg:
                 payload[key] = bool(msg[key])
@@ -1078,6 +1229,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     "enabled": bool(r.get("enabled", True)),
                 })
             payload["padspan_automations"] = _clean_rules
+        _tel_before = bool(st.data.get("telemetry_enabled"))
         await st.async_set(**payload)
 
         # ── Live Aboard turned on → its heights join the placement records
@@ -1091,6 +1243,15 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             from . import PLATFORMS, presence_keepalive  # noqa: PLC0415
             if not PLATFORMS:
                 presence_keepalive(hass, payload["bright_reveal_presence"])
+
+        # ── Usage report turned on or off with a licence key → the licence
+        # server hears now, not at tomorrow's check: a key on more than two
+        # homes needs every home's report on (update_check._revalidate_license,
+        # the daily check itself; it never clears the key).
+        if ("telemetry_enabled" in payload and payload["telemetry_enabled"] != _tel_before
+                and str(st.data.get("forensics_license_key") or "").strip()):
+            from .update_check import _revalidate_license  # noqa: PLC0415
+            hass.async_create_task(_revalidate_license(hass))
 
         # ── Excluded scanners changed → retrain the forest (issue #59) ───────
         # k-NN masks per query, but the Random Forest bakes its feature columns

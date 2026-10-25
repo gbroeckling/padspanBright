@@ -39,6 +39,7 @@ still works for tests and callers.
 
 
 import logging
+import math
 
 import voluptuous as vol
 from typing import Any
@@ -46,6 +47,7 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import area_registry
 
+from .ws_common import admin_if_enhanced_security
 from .const import (
     DOMAIN,
     VERSION,
@@ -151,8 +153,10 @@ from .ws_maps import (  # noqa: F401  (re-exported: registration, tests, callers
     ws_maps_upload,
 )
 from .ws_floorplan_import import (  # noqa: F401  (re-exported: registration, tests, callers)
+    ws_floorplan_import_roomplan,
     ws_floorplan_import_sh3d,
 )
+from .ws_vacuum import HANDLERS as _VACUUM_HANDLERS
 from .ws_objects import (  # noqa: F401  (re-exported: registration, tests, callers)
     ws_findmy_unlink,
     ws_object_label_delete,
@@ -164,6 +168,7 @@ from .ws_forensics import (  # noqa: F401  (re-exported: registration, tests, ca
     ws_forensics_clear,
     ws_forensics_license_activate,
     ws_forensics_license_reveal,
+    ws_licence_homes,
     ws_forensics_query,
     ws_forensics_stats,
     ws_trial_start,
@@ -301,8 +306,12 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_maps_delete_migrate)
     websocket_api.async_register_command(hass, ws_maps_revert_extend)
     websocket_api.async_register_command(hass, ws_floorplan_import_sh3d)
+    websocket_api.async_register_command(hass, ws_floorplan_import_roomplan)
+    for _h in _VACUUM_HANDLERS:   # robot-vacuum import (ws_vacuum.py)
+        websocket_api.async_register_command(hass, _h)
     websocket_api.async_register_command(hass, ws_model_get)
     websocket_api.async_register_command(hass, ws_model_update)
+    websocket_api.async_register_command(hass, ws_room_height_set)
     websocket_api.async_register_command(hass, ws_object_label_set)
     websocket_api.async_register_command(hass, ws_object_label_delete)
     websocket_api.async_register_command(hass, ws_object_label_list)
@@ -342,6 +351,10 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     # The Atlas "Test emergency lighting" button (emergency_test.py).
     from .emergency_test import WS_COMMANDS as _emergency_commands
     for _cmd in _emergency_commands:
+        websocket_api.async_register_command(hass, _cmd)
+    # Sub-zones (ws_subzones.py) — normally off; list works, the rest refuse while off.
+    from .ws_subzones import WS_COMMANDS as _subzone_commands
+    for _cmd in _subzone_commands:
         websocket_api.async_register_command(hass, _cmd)
     # Live Aboard, the 3D house (ws_house3d.py) — normally off; get works, the rest refuse while off.
     from .ws_house3d import WS_COMMANDS as _house3d_commands
@@ -447,6 +460,7 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_forensics_clear)
     websocket_api.async_register_command(hass, ws_forensics_license_activate)
     websocket_api.async_register_command(hass, ws_forensics_license_reveal)
+    websocket_api.async_register_command(hass, ws_licence_homes)
     websocket_api.async_register_command(hass, ws_trial_start)
     websocket_api.async_register_command(hass, ws_pro_invite_claim)
     websocket_api.async_register_command(hass, ws_pro_invite_decline)
@@ -578,6 +592,7 @@ async def ws_model_get(hass: HomeAssistant, connection, msg) -> None:
     }
 )
 @websocket_api.async_response
+@admin_if_enhanced_security
 async def ws_model_update(hass: HomeAssistant, connection, msg) -> None:
     """Update room_meta (color, floor assignment). Floors are read-only from HA floor registry."""
     mdl = hass.data.get(DOMAIN, {}).get(DATA_MODEL)
@@ -586,6 +601,36 @@ async def ws_model_update(hass: HomeAssistant, connection, msg) -> None:
         return
     updated = await mdl.async_update(room_meta=msg.get("room_meta"))
     connection.send_result(msg["id"], updated)
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "padspan_bright/room_height_set",
+        vol.Required("room"): vol.All(str, vol.Length(min=1, max=120)),
+        # Metres from the room's floor to the top of its space; null = its floor's.
+        vol.Required("height_m"): vol.Any(None, vol.Coerce(float)),
+    }
+)
+@websocket_api.async_response
+@admin_if_enhanced_security
+async def ws_room_height_set(hass: HomeAssistant, connection, msg) -> None:
+    """Set one room's own height (room_meta[room].height_m) for Live Aboard:
+    a double-height living room, a hall under a mezzanine, on a floor that
+    keeps its normal height. Kept 1.5 m to 30 m (ROOM_HEIGHT_MAX_M); null clears it.
+    Drawing only: positioning reads the floors' heights, never this."""
+    mdl = hass.data.get(DOMAIN, {}).get(DATA_MODEL)
+    if not mdl:
+        connection.send_error(msg["id"], "no_model_store", "Model store not initialized")
+        return
+    h = msg["height_m"]
+    if h is not None and not math.isfinite(h):
+        connection.send_error(msg["id"], "invalid", "height_m must be a height in metres, or null for the floor's")
+        return
+    ok, stored = await mdl.async_set_room_height(msg["room"], h)
+    if not ok:
+        connection.send_error(msg["id"], "not_found", f"{msg['room']} is not a room on the map.")
+        return
+    connection.send_result(msg["id"], {"ok": True, "room": msg["room"], "height_m": stored})
 
 
 # ── Settings Helpers ───────────────────────────────────────────────────────────
@@ -720,6 +765,7 @@ async def ws_lost_and_found_get(hass: HomeAssistant, connection, msg) -> None:
     "key": str,
 })
 @websocket_api.async_response
+@admin_if_enhanced_security
 async def ws_lost_and_found_forget(hass: HomeAssistant, connection, msg) -> None:
     """Explicitly clear one object's lost-and-found record."""
     from .const import DATA_LOST_AND_FOUND
@@ -865,6 +911,7 @@ async def ws_flood_reset(hass: HomeAssistant, connection, msg) -> None:
     vol.Optional("minutes", default=60): vol.All(int, vol.Range(min=1, max=480)),
 })
 @websocket_api.async_response
+@admin_if_enhanced_security
 async def ws_suspend_databases(hass: HomeAssistant, connection, msg) -> None:
     """Suspend all learned databases — raw radio + spatial centroid only."""
     coord = hass.data.get(DOMAIN, {}).get("presence_coordinator")
@@ -878,6 +925,7 @@ async def ws_suspend_databases(hass: HomeAssistant, connection, msg) -> None:
 
 @websocket_api.websocket_command({"type": "padspan_bright/unsuspend_databases"})
 @websocket_api.async_response
+@admin_if_enhanced_security
 async def ws_unsuspend_databases(hass: HomeAssistant, connection, msg) -> None:
     """End database suspension early — resume full pipeline."""
     coord = hass.data.get(DOMAIN, {}).get("presence_coordinator")
@@ -934,6 +982,7 @@ async def ws_unsuspend_databases(hass: HomeAssistant, connection, msg) -> None:
     vol.Optional("limit", default=200): int,
 })
 @websocket_api.async_response
+@admin_if_enhanced_security
 async def ws_logs_get(hass: HomeAssistant, connection, msg) -> None:
     """Return recent PadSpan log entries from the in-memory ring buffer."""
     handler = _ensure_log_handler()

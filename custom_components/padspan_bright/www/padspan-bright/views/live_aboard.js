@@ -61,6 +61,10 @@ const WEATHER = await import(`./live_aboard_weather.js${new URL(import.meta.url)
 // And the Atlas's Showcase look as this view's lighting (optional too).
 const LOOKS = await import(`./live_aboard_showcase.js${new URL(import.meta.url).search}`)
   .catch(err => { console.warn("PadSpan: live_aboard_showcase failed to load", err); return null; });
+// The Studio look (atlas_3d_look "studio"): a sky, a stage and soft light
+// round Live Aboard's own colours (optional too: missing, Studio is its own look).
+const STUDIO = await import(`./live_aboard_studio.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: live_aboard_studio failed to load", err); return null; });
 // The Atlas's own word for the air (its room sheet's "Air Good").
 const { airQualityWord, airQualityBadness } = await import(`./light_codes.js${new URL(import.meta.url).search}`);
 // The heights in Live Aboard's file no view reads (out of date: the map's).
@@ -72,6 +76,10 @@ const DEVICES = await import(`./live_aboard_devices.js${new URL(import.meta.url)
 // P6: beacons, scanners and people where PadSpan tracks them (optional too).
 const TRACKED = await import(`./live_aboard_tracked.js${new URL(import.meta.url).search}`)
   .catch(err => { console.warn("PadSpan: live_aboard_tracked failed to load", err); return null; });
+// Trails: where each person and tag went in the last half hour, from
+// Traceback's own history (optional too: missing, no Trails in the menu).
+const TRAILS = await import(`./people_trails.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: people_trails failed to load", err); return null; });
 // The screen's rules, shared with the flat Atlas (the map alone, full screen).
 const SCREEN = await import(`./atlas_screen.js${new URL(import.meta.url).search}`);
 // The Atlas's other devices (leak sensors, locks), its codes and its class
@@ -87,6 +95,14 @@ const MOTION = await import(`./live_aboard_motion.js${new URL(import.meta.url).s
 // the People chip, the two switches in Views ▾ (optional: missing, as it was).
 const PANEL = await import(`./live_aboard_panel.js${new URL(import.meta.url).search}`)
   .catch(err => { console.warn("PadSpan: live_aboard_panel failed to load", err); return null; });
+// The director (live_aboard_director.js): on the sidebar, the camera flies to
+// a doorbell, door or alarm that went off (optional: missing, nothing does).
+const DIRECTOR = await import(`./live_aboard_director.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: live_aboard_director failed to load", err); return null; });
+// The frame-rate readout (live_aboard_fps.js), Settings → Live Aboard →
+// Frame rate, this browser only (optional: missing, there is no readout).
+const FPS = await import(`./live_aboard_fps.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: live_aboard_fps failed to load", err); return null; });
 // The house itself (live_aboard_storey.js): a solid floor under each storey,
 // the roof, the openings stairs cut, how a door with no sensor stands
 // (optional: missing, the house is drawn as it was).
@@ -155,10 +171,40 @@ const WET_CSS = `.la3d-wet{position:absolute;left:50%;top:82px;z-index:2;transfo
 // Explode: with All floors showing, each storey lifted this much more (m)
 // than the one under it, so the floors under the top one show too.
 const PREF_EXPLODE = "explode", EXPLODE_M = 4;
+const PREF_TRAILS = "trails";              // Trails on this screen ("1"), off by default
+const PREF_FPS = "fps";                    // the frame-rate readout on this screen ("1"), off by default
 // Readable night: a floor keeps this much of its day colour, its outline and
 // the wall tops show, and a fixture that is off darkens with the house.
 const NIGHT_FLOOR = 0.3, NIGHT_EDGE = 0.85, NIGHT_TOP = 0.42, NIGHT_GRID = 0.6;
 const NAME_PX = [12, 17];                  // a room's name on screen (px), never under / over
+// On a wall (?kiosk=1, lights_panel.js _wallOn) the names and the controls
+// grow with the screen: --wall-ui is the screen against 1080p, never under 1.
+// The wall is the page (the Atlas element carries data-wall), not the card,
+// so it holds when the view leaves the card for the whole screen. Read once
+// per window size (it is asked every frame), and only once the view is on
+// the page: before that it can't see the wall it is in.
+const onWallPage = (el) => {
+  const rn = el && el.getRootNode ? el.getRootNode() : null;
+  return !!(rn && rn.host && rn.host.hasAttribute && rn.host.hasAttribute("data-wall"));
+};
+const wallUiOf = (() => {
+  const seen = new Map();   // property -> [key, value]
+  return (el, prop = "--wall-ui") => {
+    if (!el || !el.isConnected) return 1;
+    const host = el.getRootNode && el.getRootNode().host;
+    const k = `${innerWidth}x${innerHeight}:${host && host.style ? host.style.getPropertyValue(prop) : ""}`;
+    const had = seen.get(prop);
+    if (had && had[0] === k) return had[1];
+    let v = 1;
+    if (onWallPage(el)) {
+      const n = parseFloat(getComputedStyle(el.getRootNode().host).getPropertyValue(prop));
+      if (Number.isFinite(n) && n >= 1) v = n;
+      else if (prop !== "--wall-ui") v = wallUiOf(el);   // a wall without --wall-ctl: the controls go with the text
+    }
+    seen.set(prop, [k, v]);
+    return v;
+  };
+})();
 
 // The view's own look: everything is scoped under .la3d, and the sheet travels
 // inside the long-lived element, so nothing is added to styles.css and the
@@ -253,7 +299,19 @@ const CSS = `
 .la3d-card li{margin:3px 0}
 .la3d-card button{all:unset;box-sizing:border-box;cursor:pointer;padding:7px 16px;border-radius:9px;font-weight:700;
   background:#2d6a4f;border:1px solid #52b788;color:#e2e8f0;float:right}
-@media (prefers-reduced-motion:reduce){.la3d.la3d-cover,.la3d-bar,.la3d-compass,.la3d-tip{transition:none}}`;
+@media (prefers-reduced-motion:reduce){.la3d.la3d-cover,.la3d-bar,.la3d-compass,.la3d-tip{transition:none}}
+/* Wall mode (?kiosk=1 on the sidebar Atlas; styles.css .lv-wall): the view
+   takes what the legend leaves beside the scaled rail, its controls grow with
+   the wall up to finger size (--wall-ctl), what is read (the HUD) with
+   --wall-ui, and the touch hint goes. */
+.lv-mapcard.lv-display.lv-wall > .la3d{flex:1 1 auto;min-height:0;height:auto;
+  width:calc(100% - 44px * var(--wall-ctl,var(--wall-ui,1)));margin-left:calc(44px * var(--wall-ctl,var(--wall-ui,1)))}
+.lv-mapcard.lv-display.lv-wall > .lv-rail.hidden ~ .la3d{width:100%;margin-left:0}
+:host([data-wall]) .la3d-hud{zoom:var(--wall-ui,1)}
+:host([data-wall]) .la3d-bar,:host([data-wall]) .la3d-compass,:host([data-wall]) .la3d-north,
+:host([data-wall]) .la3d-menu,:host([data-wall]) .la3d-toast,:host([data-wall]) .la3d-solo,:host([data-wall]) .la3d-corner,
+:host([data-wall]) .la3d-dircard,:host([data-wall]) .la3d-sheet,:host([data-wall]) .la3d-card{zoom:var(--wall-ctl,var(--wall-ui,1))}
+:host([data-wall]) .la3d-tip{display:none}`;
 // While Live Aboard shows (its sheet travels with it): the flat Atlas's
 // symbol legend matches nothing in 3D; on the sidebar the header's flat hint
 // gives way to the view's own, and on a narrow screen the emergency pill
@@ -391,6 +449,7 @@ function createSlot(slotKey){
   let touchCb = null;                      // the card's "the map was touched" (closes an open drawer)
   let observers = [];
   let frames = 0, pending = false, dirty = true, visible = true, drawnW = 0, drawnH = 0;
+  let fpsUi = null;                        // the frame-rate readout, while this screen has it on
   // The house, as drawn: shell (floors, rooms, walls) and fixtures.
   let shellSig = null, lightsSig = null, house = null, floorsUi = [], lights = [];
   // The map's house as last read (readHouse) and what it was read from: a
@@ -460,6 +519,11 @@ function createSlot(slotKey){
   // The same look as the Atlas (atlas_3d_look "atlas"; LOOKS.atlasLook):
   // its page, rooms, floor numbers and readouts. null: Live Aboard's own.
   let atlas = null;
+  // The Studio look (live_aboard_studio.js), made only while it is picked.
+  let studio = null;
+  // Studio could not be made on this slot (createStudio threw): the normal
+  // look from then on, warned once, not tried again on every sync.
+  let studioFailed = false;
   // Furniture (P2 Furnish, live_aboard_furnish.js): every piece drawn on its
   // floor (layer). furnishP: what the Furnish tool needs of the host (its
   // connection, toast, settings, states), from the newest card; topCb: the
@@ -474,6 +538,9 @@ function createSlot(slotKey){
   // live snapshot as the host last handed it
   // (read through it, never more often than it says); off, none of it.
   let tracked = null, peopleSnap = null, peopleAt = 0, peopleLoad = null, peopleReads = 0;
+  // Trails (people_trails.js): the last read (trailsOf's), when, the read in
+  // flight, and how many reads; only while this screen has them on.
+  let trailData = null, trailAt = 0, trailLoad = null, trailReads = 0;
   // live_aboard_marks.js: leak sensors and locks (marks), the code chips
   // (codes), the class chips' pick (classF), and the zoom label's callback.
   let marks = null, codes = null, classF = null, zoomCb = null, zoomShown = null;
@@ -482,6 +549,8 @@ function createSlot(slotKey){
   let wetEl = null, wetRows = [], wetKey = "";           // a window open while it rains: its glow and its chip
   // live_aboard_panel.js: the home view, going back to it, Follow, the People chip.
   let panel = null;
+  // live_aboard_director.js: the flight to what went off, its card, and back.
+  let director = null;
   // live_aboard_storey.js: each storey's floor and roof (storeyL); roofWant:
   // the roof is showing or on its way (the walls under it stand).
   let storeyL = null, roofWant = false;
@@ -539,6 +608,7 @@ function createSlot(slotKey){
     devices = null; emOutlines = []; emKey = "";
     try { if (tracked) tracked.dispose(); } catch (_) { /* gone with the view */ }
     tracked = null; peopleSnap = null; peopleAt = 0; peopleLoad = null;
+    trailData = null; trailAt = 0; trailLoad = null;
     try { if (marks) marks.dispose(); if (codes) codes.dispose(); } catch (_) { /* gone with the view */ }
     marks = null; codes = null; zoomCb = null;
     try { if (motionL) motionL.dispose(); if (mchip) mchip.dispose(); } catch (_) { /* gone with the view */ }
@@ -548,6 +618,10 @@ function createSlot(slotKey){
     motionL = null; mchip = null;
     try { if (panel) panel.dispose(); } catch (_) { /* gone with the view */ }
     panel = null;
+    try { if (director) director.dispose(); } catch (_) { /* gone with the view */ }
+    director = null;
+    try { if (fpsUi) fpsUi.dispose(); } catch (_) { /* gone with the view */ }
+    fpsUi = null;
     if (peopleTimer !== null) { clearTimeout(peopleTimer); peopleTimer = null; }
     try { if (layer) layer.dispose(); } catch (_) { /* gone with the view */ }
     layer = null; furnishP = null; topCb = null;
@@ -564,6 +638,8 @@ function createSlot(slotKey){
     try { if (scene) scene.traverse((o) => { if (o.isSprite && o.geometry) o.geometry.dispose(); }); } catch (_) { /* best effort */ }
     try { if (wx) wx.dispose(); } catch (_) { /* gone with the scene */ }
     wx = null;
+    try { if (studio) studio.dispose(); } catch (_) { /* gone with the scene */ }
+    studio = null;
     // Give the GPU its context back: the flat Atlas needs none.
     try { if (renderer) { renderer.dispose(); if (failed !== "context_lost") renderer.forceContextLoss(); } } catch (_) { /* best effort */ }
     renderer = null; scene = null; house = null; floorsUi = []; lights = [];
@@ -590,7 +666,7 @@ function createSlot(slotKey){
     root = d("div", "la3d");
     root.setAttribute("data-la3d", slotKey);
     const style = d("style");
-    style.textContent = CSS;
+    style.textContent = CSS + (FPS ? FPS.FPS_CSS : "");
     root.appendChild(style);
     bar = d("div", "la3d-bar");
     const seg = (label, items) => {
@@ -764,7 +840,8 @@ function createSlot(slotKey){
     const rn = root.getRootNode ? root.getRootNode() : null, scope = rn && rn.querySelector ? rn : document;
     if (coverStyle) coverStyle.textContent = coverCss(c, !!scope.querySelector(".lv-emerg"));
   }
-  const COVER_KEYS = ["position", "margin", "borderRadius", "border", "zIndex", "maxWidth", "left", "top", "width", "height"];
+  const COVER_KEYS = ["position", "margin", "borderRadius", "border", "zIndex", "maxWidth", "left", "top", "width", "height",
+                      "translate"];   // a wall's burn-in shift moves the full screen; back in the card, the card's own does
   function paintCover(){
     const want = !!(root && mapOnly && (bare || fsOn));
     if (want === cover) { layCover(); return; }
@@ -948,7 +1025,9 @@ function createSlot(slotKey){
     floorKey = key;
     if (was === null || key === null) return;
     if (panel) panel.floorChanged();
-    floorCams.set(was, { theta: cam.theta, phi: cam.phi, radius: cam.radius, target: cam.target.toArray() });
+    // Not yet framed (the floor the host picked as the view opened): there
+    // is no view of that floor to keep, only the camera's starting values.
+    if (!cam.needsFit) floorCams.set(was, { theta: cam.theta, phi: cam.phi, radius: cam.radius, target: cam.target.toArray() });
     const c = keepCam ? null : floorCams.get(key);
     if (c) {
       cam.fly = null; cam.moved = true; cam.needsFit = false;
@@ -1058,7 +1137,18 @@ function createSlot(slotKey){
     const saved = readViews();
     return [{ text: "Whole house", act: () => wholeHouse() }, { text: "How it works", act: () => showHint(true) },
             ...saved.map((v, i) => ({ text: v.name, act: () => goView(v), del: () => { saved.splice(i, 1); writeViews(saved); } })),
-            { text: "Save this view", act: () => saveView() }, ...(panel ? panel.menuItems() : [])];
+            { text: "Save this view", act: () => saveView() },
+            ...(trailsOffered() ? [{ text: `Trails, last 30 min: ${prefGet(PREF_TRAILS) === "1" ? "On" : "Off"}`, on: prefGet(PREF_TRAILS) === "1",
+                                     title: "Where each person and tag went in the last half hour (this screen only)", act: () => toggleTrails() }] : []),
+            ...(panel ? panel.menuItems() : [])];
+  }
+  // The frame-rate readout: off unless this browser turned it on (Settings
+  // → Live Aboard → Frame rate); each card the host builds asks again.
+  function fpsOn(){ return prefGet(PREF_FPS) === "1"; }
+  function syncFps(){
+    if (!FPS || !root) return;
+    if (!fpsUi && fpsOn()) fpsUi = FPS.createFpsReadout({ root, frames: () => frames, now: () => performance.now() });
+    if (fpsUi) fpsUi.sync(fpsOn() && !failed);
   }
   /** The room the camera looks at, on the top floor showing it. */
   function roomNear(x, y){
@@ -1131,8 +1221,11 @@ function createSlot(slotKey){
     }
     root.appendChild(m);
     const rr = root.getBoundingClientRect(), ar = anchor.getBoundingClientRect();
-    m.style.left = `${Math.max(8, Math.min(ar.left - rr.left, rr.width - 8 - (m.offsetWidth || 180)))}px`;
-    m.style.bottom = `${Math.max(8, rr.bottom - ar.top + 6)}px`;
+    // On a wall the menu is drawn k times larger (CSS zoom), and zoom scales
+    // its left/bottom too: place it in screen pixels, then divide by k.
+    const k = wallUiOf(root, "--wall-ctl"), mw = m.getBoundingClientRect().width || 180 * k;
+    m.style.left = `${Math.max(8, Math.min(ar.left - rr.left, rr.width - 8 - mw)) / k}px`;
+    m.style.bottom = `${Math.max(8, rr.bottom - ar.top + 6) / k}px`;
     menuEl = m;
     const away = guard((e) => { const path = e.composedPath ? e.composedPath() : []; if (!path.includes(m) && !path.includes(anchor)) closeMenu(); });
     const esc = guard((e) => { if (e.key === "Escape") closeMenu(); });
@@ -1148,6 +1241,7 @@ function createSlot(slotKey){
     const seen = prefGet(PREF_HINT) === "1";
     hintShown = true;
     if (seen && !again) return;
+    if (!again && onWallPage(root)) return;   // a wall: nobody there to tap Got it
     const d = (tag, text) => { const n = document.createElement(tag); if (text) n.textContent = text; return n; };
     const card = document.createElement("div");
     card.className = "la3d-card";
@@ -1233,8 +1327,9 @@ function createSlot(slotKey){
       recipeOf: (p) => stairRecipe(p) });
     devices = DEVICES ? DEVICES.createDeviceLayer({ THREE, layer, FURN: () => FURN, halo: shared.haloMats.m,
       quality: () => (profileOf().pbr ? "high" : "low") }) : null;
-    tracked = TRACKED ? TRACKED.createTrackedLayer({ THREE, FURN: () => FURN, floors: () => floorsUi,
-      canon: (fid) => (house && house.canon ? house.canon(fid) : String(fid)), quality: () => (profileOf().pbr ? "high" : "low") }) : null;
+    tracked = TRACKED ? TRACKED.createTrackedLayer({ THREE, FURN: () => FURN, floors: () => floorsUi, uiScale: () => wallUiOf(root),
+      canon: (fid) => (house && house.canon ? house.canon(fid) : String(fid)), quality: () => (profileOf().pbr ? "high" : "low"),
+      fadeOf: TRAILS ? TRAILS.fadeOf : null, colourOf: TRAILS ? TRAILS.trailColour : null }) : null;
     marks = MARKS ? MARKS.createMarkLayer({ THREE, quality: () => (profileOf().pbr ? "high" : "low") }) : null;
     // Under the roof while it shows is hidden too (a marker, a code).
     const hidden = (v) => blocked(v) || !!(storeyL && storeyL.hides(v.x, v.z, v.y));
@@ -1245,6 +1340,7 @@ function createSlot(slotKey){
     storeyL = STOREY ? STOREY.createStoreyLayer({ THREE, lit: (g, spec, c, r) => lit(g, spec, c, r), slabT: HOUSE.SLAB_T,
       quality: () => (profileOf().pbr ? "high" : "low") }) : null;
     panel = PANEL ? makePanel() : null;
+    director = DIRECTOR && panel ? makeDirector() : null;
     planCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 400);
     planCam.up.set(0, 0, -1);                                // the plan as drawn: its top up
     // The 3D editor: its page in this element, its marks in this scene, its
@@ -1440,7 +1536,7 @@ function createSlot(slotKey){
     for (const r of h.rooms) {
       if (r.floor.outdoor) continue;
       for (const p of r.pts) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
-      z0 = Math.min(z0, r.floor.elev - HOUSE.SLAB_T); z1 = Math.max(z1, r.floor.elev + r.floor.h - HOUSE.SLAB_T);
+      z0 = Math.min(z0, r.floor.elev - HOUSE.SLAB_T); z1 = Math.max(z1, r.floor.elev + (r.h ?? r.floor.h) - HOUSE.SLAB_T);
     }
     houseBox = Number.isFinite(x0) ? { x0, y0, x1, y1, z0, z1 } : { x0: -5, y0: -5, x1: 5, y1: 5, z0: 0, z1: 3 };
     // Stairs cut their opening in the floor they reach: its tiles and its storey's floor.
@@ -1566,6 +1662,7 @@ function createSlot(slotKey){
     // as a railing, and a floor inside a taller one (a mezzanine in a hall).
     if ([...h.perFloor.values()].some(per => per.pieces.some(pc => pc.loftRail))) HOUSE.countHouse3dOnce("house3d_loft_rail", send);
     if (HOUSE.hasNestedFloor(h)) HOUSE.countHouse3dOnce("house3d_mezzanine", send);
+    if ([...h.perFloor.values()].some(per => per.pieces.some(pc => pc.capped))) HOUSE.countHouse3dOnce("house3d_wall_capped", send);
     if (atlas) platesOf(h);
     // The ground and the sun, sized to the house.
     const cx = (houseBox.x0 + houseBox.x1) / 2, cy = (houseBox.y0 + houseBox.y1) / 2;
@@ -1584,6 +1681,7 @@ function createSlot(slotKey){
     gridLines.material.transparent = true;                   // it fades at night (paintNight)
     shellRes.push(gGeo, gridLines.geometry, gridLines.material);
     scene.add(ground, gridLines);
+    if (studio) studio.house({ box: houseBox, groundY, ground, grid: gridLines });
     placeSun();
     applyTop();
     paintNight();
@@ -1733,6 +1831,7 @@ function createSlot(slotKey){
     // The Showcase look's sky (Classic: none, and today's brightness).
     if (theme3d) { if (theme3d.skyMix) hemi.color.lerp(_c.set(theme3d.sky), theme3d.skyMix); hemi.intensity *= theme3d.ambient; }
     placeSun();
+    if (studio) studio.sun(look, sunDir);                    // Studio: its sky and light follow the sun
     roseDeg = null;
     requestRender();
     return true;
@@ -1924,7 +2023,9 @@ function createSlot(slotKey){
   // leaf as open as its sensor has it.
   function placePiece(F, P, cut){
     for (const e of P.els) {
-      const z1 = cut && e.cuttable ? Math.min(e.z1, HOUSE.CUT_H) : e.z1, hgt = z1 - e.z0;
+      let z1 = cut && e.cuttable ? Math.min(e.z1, HOUSE.CUT_H) : e.z1;
+      if (F.clip !== undefined && F.clip !== null && z1 > F.clip + 0.3) z1 = Math.max(e.z0, F.clip);   // applyTop: under the hidden floors
+      const hgt = z1 - e.z0;
       e.mesh.setMatrixAt(e.i, hgt < 0.005 ? ZERO : P.open && e === P.open.leaf ? (P.open.slots ? ZERO : leafMatrix(F, P, e.z0, hgt, e.thick))
         : compose(P.mx, F.fl.elev + e.z0, P.my, P.yaw, P.len, hgt, e.thick));
       e.mesh.instanceMatrix.needsUpdate = true;
@@ -2182,8 +2283,10 @@ function createSlot(slotKey){
         // Moved whole to its height in the 3D file, if it has one (part C).
         // Laid out with the Strip tool: drawn along its run (on a piece: where the piece stands now).
         const own = RUNS.readRun(zs[L0.eid]), run = RUNS.placed(own, vdP), on = run && own.piece ? vdP[own.piece] : null;
-        const lift = run ? DRAFT.liftParts(HOUSE.fixtureParts({ ...L0, kind: set || L0.kind, run, pieceAt: on ? [on.x_m, on.y_m] : null }, ctx), null, F.fl.h - HOUSE.SLAB_T)
-          : DRAFT.liftParts(HOUSE.fixtureParts(set ? { ...L0, kind: set } : L0, ctx), zs[L0.eid], F.fl.h - HOUSE.SLAB_T), parts = lift.parts;
+        // Under the ceiling of the room it is in (a tall room's own), else the floor's.
+        const ceil0 = HOUSE.ceilAt(F.rooms, F.fl, L0.x, L0.y) - HOUSE.SLAB_T;
+        const lift = run ? DRAFT.liftParts(HOUSE.fixtureParts({ ...L0, kind: set || L0.kind, run, pieceAt: on ? [on.x_m, on.y_m] : null }, ctx), null, ceil0)
+          : DRAFT.liftParts(HOUSE.fixtureParts(set ? { ...L0, kind: set } : L0, ctx), zs[L0.eid], ceil0), parts = lift.parts;
         const L = { ...L0, F, kf: parts.kf, drawn: parts.kind, guess, wall: null, refs: { bulbs: [], houses: [], halos: [], washes: [], pools: [] },
                     key: null, look: null, z: lift.z, zDefault: lift.zDefault, spin: null };
         // A wall it hangs on (or a part of it does: a cove's sides) repaints it as it is cut.
@@ -2433,9 +2536,12 @@ function createSlot(slotKey){
     if (!pp) { peopleSnap = null; peopleAt = 0; peopleLoad = null; }
     else if (typeof pp.snapshot === "function") { peopleSnap = pp.snapshot() || null; peopleReads++; }
     else if (typeof pp.read === "function") readPeople(pp);
+    const tr = trailReader(p);
+    if (!tr) { trailData = null; trailAt = 0; trailLoad = null; }
+    else readTrails(tr);
     if (tracked.sync({ model: p.model, looks: vd.devices, figures: vd.figures, snapshot: pp ? peopleSnap : null,
                        states: p.states || {}, people: on(p.people), tags: on(p.tags),
-                       carries: p.settings3d ? p.settings3d.atlas_3d_carries : null }, rebuilt)) requestRender();
+                       carries: p.settings3d ? p.settings3d.atlas_3d_carries : null, trails: tr ? trailData : null }, rebuilt)) requestRender();
     if (panel) panel.peopleChanged();
     peopleClock();
   }
@@ -2450,6 +2556,36 @@ function createSlot(slotKey){
       peopleLoad = null; peopleSnap = snap && typeof snap === "object" ? snap : null;
       if (lastP && renderer && !failed) syncTracked(lastP, viewData(), false);
     }, () => { if (peopleLoad === mine) peopleLoad = null; });
+  }
+  /** The host's Traceback reader (p.trails: {read(msg) → Promise}) while
+   *  people or tags are drawn and this screen has Trails on, else null. */
+  function trailReader(p){
+    const on = (x) => !!(x && typeof x === "object");
+    if (!TRAILS || !p || !(on(p.people) || on(p.tags)) || prefGet(PREF_TRAILS) !== "1") return null;
+    return on(p.trails) && typeof p.trails.read === "function" ? p.trails : null;
+  }
+  /** Can this screen have Trails (a reader, and people or tags drawn)? */
+  function trailsOffered(){
+    const p = lastP, on = (x) => !!(x && typeof x === "object");
+    return !!(TRAILS && p && (on(p.people) || on(p.tags)) && on(p.trails) && typeof p.trails.read === "function");
+  }
+  /** The last half hour from Traceback, never sooner than TRAIL_MS after the
+   *  last read (it rides the people read's own clock); drawn once it is in. */
+  function readTrails(tr){
+    if (trailLoad || (trailAt && Date.now() - trailAt < TRAILS.TRAIL_MS)) return;
+    trailAt = Date.now();
+    trailReads++;
+    const mine = trailLoad = Promise.resolve().then(() => tr.read(TRAILS.trailRequest(Date.now() / 1000))).then((r) => {
+      if (trailLoad !== mine) return;
+      trailLoad = null;
+      trailData = TRAILS.trailsOf(r && Array.isArray(r.frames) ? r.frames : [], Date.now() / 1000);
+      if (lastP && renderer && !failed) syncTracked(lastP, viewData(), false);
+    }, () => { if (trailLoad === mine) trailLoad = null; });
+  }
+  function toggleTrails(){
+    prefSet(PREF_TRAILS, prefGet(PREF_TRAILS) === "1" ? "0" : "1");
+    trailAt = 0; trailLoad = null;
+    if (lastP && renderer && !failed) syncTracked(lastP, viewData(), false);
   }
   /** The host's reader ({read(), everyMs}) while Show people or Show tags &
    *  scanners is on, else null (a {snapshot()} host has its own data). */
@@ -2501,8 +2637,9 @@ function createSlot(slotKey){
       const g = new THREE.Group();
       F.sensorGroup = g;
       F.group.add(g);
-      const ceil = F.fl.h - HOUSE.SLAB_T, motion = [], here = [], zs = viewData().devices;
+      const motion = [], here = [], zs = viewData().devices;
       for (const S0 of mine) {
+        const ceil = HOUSE.ceilAt(F.rooms, F.fl, S0.x, S0.y) - HOUSE.SLAB_T;
         const z = HOUSE.deviceZ(S0.kind, ceil, zs[S0.eid] || null);
         const S = { ...S0, F, z, zDefault: HOUSE.deviceZ(S0.kind, ceil, null), pos: new THREE.Vector3(S0.x, F.fl.elev + z, S0.y),
                     room: HOUSE.roomAt(F.rooms, S0.x, S0.y), shown: null,
@@ -2860,6 +2997,7 @@ function createSlot(slotKey){
       _hit.near = 0; _hit.far = Math.max(0, d - 0.05);
       return _hit.intersectObjects(occ, false).length > 0;
     };
+    const wallK = wallUiOf(root);
     for (const F of floorsUi) {
       if (!F.group.visible) continue;
       const occ = above(F);
@@ -2868,7 +3006,7 @@ function createSlot(slotKey){
         if (!u.home) u.home = lbl.position.clone();
         lbl.position.copy(u.home);
         const mpp = mppAt(lbl.position), roomPx = u.ext / mpp;
-        const letters = Math.max(NAME_PX[0], Math.min(NAME_PX[1], roomPx / 9)), hPx = letters / u.letters, wPx = hPx * u.aspect;
+        const letters = Math.max(NAME_PX[0] * wallK, Math.min(NAME_PX[1] * wallK, roomPx / 9)), hPx = letters / u.letters, wPx = hPx * u.aspect;
         if (persp) u.behind = !u.covered && (underRoof(F, lbl.position) || behind(lbl.position, occ));
         // Exploded, a storey above can hang over a room's middle while the
         // rest of it shows: the name moves toward a corner that is in view.
@@ -2887,7 +3025,7 @@ function createSlot(slotKey){
       if (!C.F.group.visible) continue;
       if (C.label) C.sprite.position.copy(C.label.position);   // under its name, wherever the name went
       const mpp = mppAt(C.sprite.position);
-      const hPx = Math.max(READ_PX[0], Math.min(READ_PX[1], READ_H / mpp)) * READ_C / (READ_C - 8);
+      const hPx = Math.max(READ_PX[0] * wallK, Math.min(READ_PX[1] * wallK, READ_H / mpp)) * READ_C / (READ_C - 8);
       C.sprite.scale.set(hPx * READ_W / READ_C * k, hPx * k, 1);
       C.px = hPx;
       // Under the room's name (or where the name would be), clear of it.
@@ -2915,6 +3053,15 @@ function createSlot(slotKey){
   // ── floors, walls, quality ────────────────────────────────────────────────
   function applyTop(){
     for (const F of floorsUi) F.group.visible = HOUSE.floorShown(F.fl, topElev);
+    // With the floors above hidden, a tall room's walls stop where they
+    // start (under that floor's slab), as the rest of the house does.
+    const hid = floorsUi.filter(F => !F.fl.outdoor && !F.group.visible).map(F => F.fl.elev);
+    for (const F of floorsUi) {
+      const over = hid.filter(e => e > F.fl.elev + 1e-3), clip = over.length ? Math.min(...over) - F.fl.elev - HOUSE.SLAB_T : null;
+      if (clip === (F.clip === undefined ? null : F.clip)) continue;
+      F.clip = clip;
+      for (const P of F.pieces) placePiece(F, P, P.cut);
+    }
     coverNames();
     lampsDirty = true;
     liveMs = liveRate(performance.now());                    // a floor shown again may be swinging or flashing
@@ -2967,10 +3114,21 @@ function createSlot(slotKey){
     paintWallButtons();
     requestRender();
   }
+  // A wall's pixel budget: a 4K wall drawn at every pixel is 8.3 million a
+  // frame, and the frame rate pays for it. On a wall the 3D view draws at most
+  // about 1440p's worth and the browser scales it up; from across the room it
+  // reads the same. Anywhere else, the quality profile's ratio as before.
+  const WALL_PX = 2560 * 1440;
+  let profileDpr = 1;
+  function ratioFor(w, h){
+    if (!onWallPage(root) || !w || !h) return profileDpr;
+    return Math.max(0.5, Math.min(profileDpr, Math.sqrt(WALL_PX / (w * h))));
+  }
   function applyProfile(name){
     const Q = HOUSE.QUALITY_PROFILES[name];
     if (!Q || !renderer) return;
-    renderer.setPixelRatio(Q.dpr === "device" ? Math.min(window.devicePixelRatio || 1, 3) : 1);
+    profileDpr = Q.dpr === "device" ? Math.min(window.devicePixelRatio || 1, 3) : 1;
+    renderer.setPixelRatio(ratioFor(root ? root.clientWidth : 0, root ? root.clientHeight : 0));
     renderer.shadowMap.enabled = !!Q.shadows;
     sun.castShadow = !!Q.shadows;
     lampPool.forEach((l, i) => { l.visible = i < Q.lamps; });
@@ -2981,6 +3139,7 @@ function createSlot(slotKey){
     if (layer) layer.sync(viewData().pieces);              // furniture's finishes and shadows go with the profile
     if (lastP) { syncDevices(lastP, viewData()); syncTracked(lastP, viewData(), false); }
     for (const L of lights) if (L.spin) L.spin.rps = (L.spin.base || 0) * fanK(name);   // a running fan's speed goes with the profile
+    if (studio) studio.profile();
     lampsDirty = true;
     resize();
   }
@@ -3230,7 +3389,7 @@ function createSlot(slotKey){
     for (const r of (house && house.rooms) || []) {
       if (r.floor.outdoor || !HOUSE.floorShown(r.floor, topElev)) continue;
       for (const p of r.pts) pts.push(new THREE.Vector3(p[0], r.floor.elev - HOUSE.SLAB_T, p[1]),
-                                      new THREE.Vector3(p[0], r.floor.elev + r.floor.h - HOUSE.SLAB_T, p[1]));
+                                      new THREE.Vector3(p[0], r.floor.elev + (r.h ?? r.floor.h) - HOUSE.SLAB_T, p[1]));
     }
     if (!pts.length) {
       const b = houseBox;
@@ -3325,14 +3484,27 @@ function createSlot(slotKey){
     if (byHand && bare) setBare(false, false);
   }
   /** The first view: the Atlas's angle, the whole house; on a phone held
-   *  upright, room scale (about ROOM_SPAN across) at the middle of the house. */
+   *  upright (not a portrait wall), room scale (about ROOM_SPAN across) at
+   *  the middle of the house. */
   const ROOM_SPAN = 9;
   function openView(){
     if (panel && panel.open()) return;                      // the sidebar opens on its home view
     preset("iso");
-    if (camera.aspect >= 0.8) return;
+    if (camera.aspect >= 0.8 || onWallPage(root)) return;   // a portrait wall is not a phone: the whole house
     const r = ROOM_SPAN / (2 * Math.tan(FOV / 2 * D2R) * camera.aspect);
     if (r < cam.radius) { cam.radius = Math.max(MIN_R, r); applyCam(); }
+  }
+  /** Studio's arrival, once a view: the camera glides in to the view it just
+   *  opened on, from a little farther out and round. Not with reduced motion,
+   *  and the camera still counts as untouched (the house is fitted again as before). */
+  function arrive(){
+    if (!studio || !studio.takeArrival()) return;
+    if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const to = { target: cam.target.clone(), radius: cam.radius, theta: cam.theta, phi: cam.phi };
+    const A = STUDIO.STUDIO_ARRIVAL;
+    const from = { target: cam.target.clone(), radius: cam.radius * A.radius, theta: cam.theta - A.turn, phi: Math.max(MIN_PHI, cam.phi - A.rise) };
+    cam.fly = { t0: performance.now(), from, to, dTh: A.turn, inward: false, ms: A.ms };
+    requestRender();
   }
   // ── flying the camera (a double-tap on a room, a saved view) ──────────────
   function flyTo(goal, inward){
@@ -3345,7 +3517,7 @@ function createSlot(slotKey){
   function stepFly(now){
     const f = cam.fly;
     if (!f) return;
-    const u = Math.min(1, Math.max(0, (now - f.t0) / FLY_MS)), k = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+    const u = Math.min(1, Math.max(0, (now - f.t0) / (f.ms || FLY_MS))), k = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
     cam.target.lerpVectors(f.from.target, f.to.target, k);
     cam.radius = f.from.radius + (f.to.radius - f.from.radius) * k;
     cam.theta = f.from.theta + f.dTh * k;
@@ -3597,13 +3769,14 @@ function createSlot(slotKey){
     // Something moving by itself draws on its own clock (liveRate).
     const due = dirty || !!quality.measuring || (liveMs > 0 && t - lastAmbient >= liveMs - 4);
     if (due) {
-      if (cam.needsFit && (canvas.clientWidth || 0) > 0) openView();
+      if (cam.needsFit && (canvas.clientWidth || 0) > 0) { openView(); if (studio) arrive(); }
       updateCutaway();
       animateLive(performance.now());                        // and how often it moves now (liveMs)
       lastAmbient = t;
       sizeSprites();
       if (lampsDirty || lampTarget.distanceToSquared(cam.target) > 1) assignLamps();
       const vp = viewports();
+      if (studio) studio.prepare(camera);
       if (!vp.plan) renderer.render(scene, camera);
       else {
         // Furnish: the 3D view and the plan, each in its own part of the one canvas.
@@ -3614,6 +3787,7 @@ function createSlot(slotKey){
           renderer.setViewport(r[0], drawnH - r[1] - r[3], r[2], r[3]);
           renderer.setScissor(r[0], drawnH - r[1] - r[3], r[2], r[3]);
           if (c === planCam) sizeNames(planCam, r[3]);         // the names, upright and sized for the plan
+          if (studio) studio.prepare(c);                     // the plan keeps the view's own ground
           renderer.render(scene, c);
         }
         renderer.setScissorTest(false);
@@ -3731,6 +3905,8 @@ function createSlot(slotKey){
     drawnW = w; drawnH = h;
     narrow = w < NARROW_W;
     root.classList.toggle("la3d-narrow", narrow);
+    const pr = ratioFor(w, h);
+    if (renderer.getPixelRatio() !== pr) renderer.setPixelRatio(pr);
     renderer.setSize(w, h, false);
     const d3 = viewports().d3;                               // Furnish's plan may take part of it
     camera.aspect = (d3 ? d3[2] : w) / h;
@@ -3924,7 +4100,7 @@ function createSlot(slotKey){
     const L = lights.find(x => x.eid === eid), S = L ? null : sensorsUi.find(x => x.eid === eid), X = L || S;
     if (!X || typeof X.z !== "number") return markInfo(eid);
     const l = lbe[eid];
-    return { section: L ? "lights" : "devices", eid, F: X.F, z: X.z, zDefault: X.zDefault, l: l || X.l || null,
+    return { section: L ? "lights" : "devices", eid, F: X.F, z: X.z, zDefault: X.zDefault, l: l || X.l || null, x: X.x, y: X.y,
              kind: L ? L.drawn : null, guess: L ? L.guess : null,
              label: l ? `${l.code ? l.code + " · " : ""}${l.friendly_name || eid}` : eid,
              at: new THREE.Vector3(X.x, X.F.fl.elev + X.z, X.y) };
@@ -3978,7 +4154,7 @@ function createSlot(slotKey){
       // press finds it and where its lamp hangs.
       if (typeof L.z !== "number" || !L.look) return false;
       const F = L.F, st = vd.lights[eid], want = st && typeof st.z_m === "number" && Number.isFinite(st.z_m) ? st.z_m : null;
-      const z = want === null ? L.zDefault : DRAFT.clampHeight(want, F.fl.h - HOUSE.SLAB_T), d = z - L.z;
+      const z = want === null ? L.zDefault : DRAFT.clampHeight(want, HOUSE.ceilAt(F.rooms, F.fl, L.x, L.y) - HOUSE.SLAB_T), d = z - L.z;
       for (const r of L.refs.bulbs) r.m.elements[13] += d;
       for (const r of L.refs.houses) {
         r.hh.h += d;
@@ -4003,7 +4179,7 @@ function createSlot(slotKey){
     }
     const S = sensorsUi.find(x => x.eid === eid);
     if (!S) return marks ? marks.move(eid, vd.devices[eid] || null) : false;
-    S.z = HOUSE.deviceZ(S.kind, S.F.fl.h - HOUSE.SLAB_T, vd.devices[eid] || null);
+    S.z = HOUSE.deviceZ(S.kind, HOUSE.ceilAt(S.F.rooms, S.F.fl, S.x, S.y) - HOUSE.SLAB_T, vd.devices[eid] || null);
     S.pos.y = S.F.fl.elev + S.z;
     if (S.mesh) { S.mesh.setMatrixAt(S.i, compose(S.x, S.pos.y, S.y, 0, 0.055, 0.04, 0.055)); S.mesh.instanceMatrix.needsUpdate = true; }
     if (motionL && S.kind === "motion") motionL.move(eid, S.z);
@@ -4118,7 +4294,7 @@ function createSlot(slotKey){
     const M = marks ? marks.info(eid) : null;
     if (!M) return null;
     const l = lbe[eid];
-    return { section: "devices", eid, F: M.F, z: M.z, zDefault: M.zDefault, l: l || null, kind: null, guess: null,
+    return { section: "devices", eid, F: M.F, x: M.x, y: M.y, z: M.z, zDefault: M.zDefault, l: l || null, kind: null, guess: null,
              label: l ? `${l.code ? l.code + " · " : ""}${l.friendly_name || eid}` : eid, at: new THREE.Vector3(M.x, M.F.fl.elev + M.z, M.y) };
   }
   // ⚙'s Zoom: − and + step out and in about the view's middle, 100% is the
@@ -4182,7 +4358,8 @@ function createSlot(slotKey){
       root, guard, slotKey, prefGet, prefSet,
       host: () => lastP,
       sidebar: () => mapOnly && !!stage && !failed,
-      busy: () => (editor && editor.active ? "edit" : furnishOn ? "furnish" : fsOn ? "full" : PANEL.hostCardOpen(root) ? "card" : null),
+      busy: () => (editor && editor.active ? "edit" : furnishOn ? "furnish" : fsOn ? "full" : PANEL.hostCardOpen(root) ? "card"
+        : director && director.showing() ? "director" : null),
       cam: () => ({ theta: cam.theta, phi: cam.phi, radius: cam.radius, target: cam.target.toArray() }),
       floorNow: () => (selIds && selIds.size ? [...selIds].sort()[0] : null),
       onFloor: (fid) => (fid === null ? !selIds : !!(selIds && selIds.has(fid))),
@@ -4202,6 +4379,24 @@ function createSlot(slotKey){
       toast: (t) => toast(t), render: () => requestRender(),
     });
   }
+  /** The director: what it needs of the view and of the panel. */
+  function makeDirector(){
+    return DIRECTOR.createDirector({
+      root, guard,
+      settings: () => (lastP && lastP.settings3d && typeof lastP.settings3d === "object" ? lastP.settings3d : null),
+      // The host's states as they are now (the card's own are from its last draw).
+      states: () => (lastP && typeof lastP.liveStates === "function" ? lastP.liveStates() : lastP && lastP.states) || {},
+      sidebar: () => mapOnly && !!stage && !failed,
+      busy: () => (editor && editor.active ? "edit" : furnishOn ? "furnish" : fsOn ? "full" : PANEL.hostCardOpen(root) ? "card" : null),
+      following: () => panel.following(),
+      touchedAt: () => panel.touchedAt(),
+      fly: (eid) => panel.moveQuietly(() => findDevice(String(eid))),
+      // People and tags (settings.atlas_3d_director_people): the rooms the tracked layer already has, and Follow's own flight.
+      rooms: () => (tracked ? tracked.rooms() : []),
+      flyTo: (key) => panel.moveQuietly(() => flyToPerson(String(key))),
+      goHome: () => panel.goHome(),
+    });
+  }
   /** That floor at the top (null: All), the camera left where it is. */
   function setFloor(fid){
     if (fid === null) { if (floorSteps && !floorSteps.all) { keepCam = true; try { floorSteps.go(-1); } finally { keepCam = false; } } }
@@ -4217,7 +4412,7 @@ function createSlot(slotKey){
   function homeGoal(){
     const a = isoAngle(), g = frameFor(a.theta, a.phi, visiblePoints());
     fitR = g.radius;
-    if (camera.aspect < 0.8) g.radius = Math.max(MIN_R, Math.min(g.radius, ROOM_SPAN / (2 * Math.tan(FOV / 2 * D2R) * camera.aspect)));
+    if (camera.aspect < 0.8 && !onWallPage(root)) g.radius = Math.max(MIN_R, Math.min(g.radius, ROOM_SPAN / (2 * Math.tan(FOV / 2 * D2R) * camera.aspect)));
     return { theta: g.theta, phi: g.phi, radius: g.radius, target: g.target.toArray() };
   }
   /** The camera to g ({theta, phi, radius, target: [x, y, z]}): flown, or at once. */
@@ -4253,7 +4448,11 @@ function createSlot(slotKey){
     // off), its rooms, floor numbers and readouts. Otherwise Live Aboard's own.
     let A = null;
     try { A = LOOKS && p.look3d === "atlas" ? LOOKS.atlasLook(p.atlasLook) : null; } catch (_) { A = null; }
-    const key = A ? A.key : LOOKS && p.showcase3d === true && p.showcase && p.showcase.key ? String(p.showcase.key) : "classic";
+    // Studio (p.look3d "studio"): Live Aboard's own colours, its sky, stage and light round them.
+    let wantStudio = !!STUDIO && p.look3d === "studio" && !studioFailed;
+    if (wantStudio !== !!studio) syncStudio(wantStudio);
+    if (studioFailed) wantStudio = false;
+    const key = wantStudio ? "studio" : A ? A.key : LOOKS && p.showcase3d === true && p.showcase && p.showcase.key ? String(p.showcase.key) : "classic";
     if (key === lookKey) return;
     lookKey = key;
     atlas = A;
@@ -4263,7 +4462,26 @@ function createSlot(slotKey){
     scene.background.set(bg);
     scene.fog.color.set(bg);
     shellSig = null;                                         // the tiles and the lights, built again with it
+    if (studio) studio.profile();                            // Studio paints its own sky over the page's
     if (sunNow) drawSun(bearingNow(), true);
+    requestRender();
+  }
+  /** Studio made or let go of (it puts back all it changed). */
+  function syncStudio(on){
+    try {
+      if (!on) { if (studio) studio.dispose(); studio = null; }
+      else if (!studio && renderer) {
+        studio = STUDIO.createStudio({ THREE, renderer, scene, root, canvas, hemi, sun, wallBox: shared.wallBox,
+                                       profile: () => (profileOf().pbr ? "high" : "low") });
+        shellSig = null;                                     // its stage goes under the house as it is drawn again
+        if (sunNow) drawSun(bearingNow(), true);             // and its light over the sun's
+      }
+    } catch (err) {
+      console.warn("PadSpan: Studio look failed", err);
+      if (on) studioFailed = true;
+      try { if (studio) studio.dispose(); } catch (_) { /* best effort */ }
+      studio = null;
+    }
     requestRender();
   }
   /** Rain and snow (live_aboard_weather.js): the flat Atlas's own decision,
@@ -4271,7 +4489,7 @@ function createSlot(slotKey){
    *  (settings.atlas_3d_weather: on unless false). Off, none of it is made,
    *  and what was showing is let go of. Never the view's failure: weather
    *  that cannot be drawn is simply not drawn. */
-  const plainSky = () => lookKey === "classic" || (!!atlas && !atlas.on);
+  const plainSky = () => lookKey === "classic" || lookKey === "studio" || (!!atlas && !atlas.on);
   /** How the house is drawn this frame, for what the rain keeps off: the
    *  roof closing the house (wanted and at least half in, as it covers and
    *  hides: coming, from halfway; going, at once, as the walls are cut the
@@ -4290,7 +4508,7 @@ function createSlot(slotKey){
         // What falls: the flat Atlas's colour for the Showcase theme this view
         // wears (Classic: white), or the look's own where that would not show
         // on its ground (a light theme); what settles: the flat Atlas's.
-        colour: plainSky() ? "#ffffff" : (theme3d && theme3d.weather) || WEATHER.colourOf(p.showcase && p.showcase.theme),
+        colour: studio ? studio.rain() : plainSky() ? "#ffffff" : (theme3d && theme3d.weather) || WEATHER.colourOf(p.showcase && p.showcase.theme),
         snowColour: plainSky() ? "#ffffff" : WEATHER.colourOf(p.showcase && p.showcase.theme),
         profile: quality.profile || quality.measuring || "low", nowMs: Date.now(),
         house: { key: `${shellGen}|${topElev}`, rooms: house.rooms, ground: house.ground - HOUSE.SLAB_T - 0.02,
@@ -4444,8 +4662,9 @@ function createSlot(slotKey){
         if (editor && want && want.tool) Promise.resolve(editor.startTool(want.tool, want.eid || null)).catch(() => {});
         if (failed) return false;
         place(s);
-        paintFloors(); paintFull(); showHint(); peopleClock();
+        paintFloors(); paintFull(); showHint(); peopleClock(); syncFps();
         if (panel) panel.attach();
+        if (director) director.attach();
         return !failed;
       } catch (_) {
         fail("error");
@@ -4457,7 +4676,7 @@ function createSlot(slotKey){
     /** The 3D file changed elsewhere (Settings → Remove all furniture): read
      *  again now while showing, else when the screen is next shown. */
     reload(){ try { fileLoad = null; if (stage && lastP && !failed) loadFile(lastP); } catch (_) { /* read when next shown */ } },
-    detach(){ try { fileLoad = null; dirty = true; cam.fly = null; dropPointers(); cancelNorth(); endScreen(); if (use) use.clear(); if (editor) editor.leave(); showFlat(); peopleClock(); if (panel) panel.detach(); } catch (_) { /* nothing to undo */ } },
+    detach(){ try { fileLoad = null; dirty = true; cam.fly = null; dropPointers(); cancelNorth(); endScreen(); if (use) use.clear(); if (editor) editor.leave(); showFlat(); peopleClock(); if (fpsUi) fpsUi.sync(false); if (panel) panel.detach(); if (director) director.detach(); } catch (_) { /* nothing to undo */ } },
     /** Something wants this screen to leave 3D (Map picked): with unsaved
      *  3D edits the editor asks first, in the view, and holds (true); `go`
      *  runs once they are saved or discarded. */
@@ -4521,7 +4740,7 @@ function createSlot(slotKey){
                          flying: !!cam.fly, menu: !!menuEl, hint: !!hintCard,
                          // The floors: a camera kept for each one left, the corner's name.
                          floorKey, floorCams: [...floorCams.keys()], corner: { on: cornerOn && bare, text: cornerEl ? cornerEl.textContent : "" } },
-               peopleClock: peopleTimer !== null,
+               peopleClock: peopleTimer !== null, fps: fpsUi ? fpsUi.state() : null,
                night: { k: nightK, top: topGlow.value, floor: floorsUi.map(F => (F.lift ? F.lift.material.opacity : 0)),
                         edges: floorsUi.map(F => (F.edges ? F.edges.material.opacity : 0)), grid: gridLines ? gridLines.material.opacity : null,
                         ...offBulb() },
@@ -4547,7 +4766,7 @@ function createSlot(slotKey){
                                tiles: floorsUi.reduce((a, F) => a + (F.tiles ? F.tiles.geometry.attributes.color.array.reduce((s, v) => s + v, 0) : 0), 0),
                                halos: floorsUi.reduce((a, F) => a + Object.values(F.halos || {})
                                  .reduce((s, h) => s + h.geometry.attributes.color.array.reduce((u, v) => u + v, 0), 0), 0) } : null,
-               weather: wx ? wx._state() : null,
+               weather: wx ? wx._state() : null, studio: studio ? studio.state() : null,
                // P2 Furnish: the furniture as drawn, and the views.
                pieces: layer ? layer.state() : [], furnish: furnishOn,
                // P5: what each linked piece shows, the fixtures that stepped
@@ -4555,7 +4774,8 @@ function createSlot(slotKey){
                devices: devices ? devices.state() : [], swapped: lights.filter(L => L.swap).map(L => L.eid),
                outlined: emOutlines.length, lamps: lampPool.filter(l => l.intensity > 0).map(l => l.position.toArray().map(v => Math.round(v * 100) / 100)),
                // P6: scanners, beacons and people as drawn, and how often the snapshot was read.
-               tracked: tracked ? tracked.state() : [], peopleReads, panel: panel ? panel.state() : null,
+               tracked: tracked ? tracked.state() : [], peopleReads, trails: tracked && tracked.trails ? tracked.trails() : [], trailReads, panel: panel ? panel.state() : null,
+               director: director ? director.state() : null,
                // The Atlas's drawers and its other devices (live_aboard_marks.js).
                marks: marks ? marks.state() : [], codes: codes ? codes.state() : null, classF, zoomPct: zoomPctNow(),
                chipsFaded: chips.filter(C => C.sprite.material.opacity < 1).map(C => (C.room ? C.room.name : null)),
@@ -4564,6 +4784,8 @@ function createSlot(slotKey){
     },
     /** The wall panel (live_aboard_panel.js: the harness drives it). */
     _panel(){ return panel; },
+    /** The director (live_aboard_director.js: the harness drives it). */
+    _director(){ return director; },
     /** The Furnish tool (the harness builds a piece of any kind through it). */
     _furnish(){ return editor ? editor.furnish : null; },
     /** The Strip tool (the harness lays out a light through it). */

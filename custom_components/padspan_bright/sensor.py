@@ -44,6 +44,28 @@ from .const import (
 from .presence_coordinator import PresenceCoordinator
 from .presence_rules import away_timeout_s, calc_distance as _calc_distance
 from .entity_identity import alternates_of, pick_uid_key, registry_ready, uid_safe
+from .subzones import SubzoneEntityMixin, async_setup_entities as _subzone_entities
+
+# A PadSpan device names its Bluetooth address as a device connection. Before
+# Home Assistant 2026.8 the device registry matched connections across ALL
+# integrations, so a labelled device and, say, Bermuda's device for the same
+# address became ONE device, and PadSpan's name, manufacturer and model
+# overwrote the other integration's. From 2026.8 the registry keeps each
+# integration's devices apart, and the connection stays as it always was.
+# Before it, PadSpan leaves the connection out. If the version can't be read,
+# nothing changes.
+try:
+    from homeassistant.const import MAJOR_VERSION as _HA_MAJOR, MINOR_VERSION as _HA_MINOR
+    _HA_KEEPS_BT_APART = (int(_HA_MAJOR), int(_HA_MINOR)) >= (2026, 8)
+except Exception:  # noqa: BLE001
+    _HA_KEEPS_BT_APART = True
+
+
+def _bt_connections(address: Any) -> set:
+    """This device's Bluetooth connection, unless HA would merge it into another integration's."""
+    if not address or not _HA_KEEPS_BT_APART:
+        return set()
+    return {(dr.CONNECTION_BLUETOOTH, address)}
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -182,6 +204,9 @@ async def async_setup_entry(
         await occ_coord.async_config_entry_first_refresh()
         async_add_entities([PadSpanOccupancySensor(occ_coord)])
 
+    # ── Sub-zones: who is in each (subzones.py; none unless switched on and added) ──
+    await _subzone_entities(hass, entry, async_add_entities, PadSpanSubzoneWhoSensor)
+
 
 def _should_track(obj: dict[str, Any]) -> bool:
     """Only create entities for BLE objects the user has explicitly labelled."""
@@ -276,7 +301,7 @@ class PadSpanAreaSensor(CoordinatorEntity[PresenceCoordinator], SensorEntity):
             "model": "BLE Presence Tracker",
             "model_id": model_id,
             "serial_number": serial_number,
-            "connections": {(dr.CONNECTION_BLUETOOTH, address)}
+            "connections": _bt_connections(address),
         }
 
     # ── state ─────────────────────────────────────────────────────────────────
@@ -312,6 +337,10 @@ class PadSpanAreaSensor(CoordinatorEntity[PresenceCoordinator], SensorEntity):
             "room_confidence": obj.get("room_confidence"),
             "rssi_margin_confidence": obj.get("rssi_margin_confidence"),
         }
+        # Unsure (positioning_unsure, OFF by default): the room is the one it
+        # had, kept on thin evidence. Absent when off or sure.
+        if obj.get("room_unsure"):
+            attrs["room_unsure"] = obj["room_unsure"]
         if obj.get("ibeacon_uuid"):
             attrs["ibeacon_uuid"] = obj["ibeacon_uuid"]
             attrs["ibeacon_major"] = obj.get("ibeacon_major")
@@ -322,7 +351,37 @@ class PadSpanAreaSensor(CoordinatorEntity[PresenceCoordinator], SensorEntity):
             # Cap the list persisted to the recorder — high-rotation devices (iPhone IRK)
             # can accumulate hundreds of MACs and exceed the 16384-byte attribute limit.
             attrs["all_addresses"] = all_addrs[:5]
+        # "Why this room" (room_reason_attribute, OFF by default): what the
+        # last poll already decided, in one attribute. Absent when off, so
+        # the entity is unchanged for anyone who does not turn it on.
+        st = self.coordinator.hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
+        st_data = (st.data if st else {}) or {}
+        if st_data.get("room_reason_attribute"):
+            attrs["room_reason"] = self._room_reason(obj, st_data)
         return attrs
+
+    def _room_reason(self, obj: dict[str, Any], st_data: dict[str, Any]) -> dict[str, Any]:
+        coord = self.coordinator
+        reason: dict[str, Any] = {}
+        try:
+            if hasattr(coord, "room_reason"):
+                reason.update(coord.room_reason(self._key))
+        except Exception:
+            _LOGGER.debug("room_reason failed for %s", self._key, exc_info=True)
+        scores = obj.get("room_scores")
+        if isinstance(scores, dict) and scores:
+            reason["top_room_scores"] = {
+                r: v for r, v in sorted(scores.items(), key=lambda kv: -float(kv[1] or 0))[:3]
+            }
+        held = False
+        try:
+            hold_s = float(st_data.get("hold_last_room_s") or 0.0)
+            if hold_s > 0 and not obj.get("room") and hasattr(coord, "held_room"):
+                held = bool(coord.held_room(self._key, hold_s))
+        except Exception:
+            held = False
+        reason["room_held"] = held
+        return reason
 
 
 class PadSpanDistanceSensor(CoordinatorEntity[PresenceCoordinator], SensorEntity):
@@ -373,7 +432,7 @@ class PadSpanDistanceSensor(CoordinatorEntity[PresenceCoordinator], SensorEntity
             "model": "BLE Presence Tracker",
             "model_id": model_id,
             "serial_number": serial_number,
-            "connections": {(dr.CONNECTION_BLUETOOTH, address)}
+            "connections": _bt_connections(address),
         }
 
     @property
@@ -461,7 +520,7 @@ class PadSpanScannerDistanceSensor(CoordinatorEntity[PresenceCoordinator], Senso
             "model": "BLE Presence Tracker",
             "model_id": model_id,
             "serial_number": serial_number,
-            "connections": {(dr.CONNECTION_BLUETOOTH, address)}
+            "connections": _bt_connections(address),
         }
 
     @property
@@ -579,3 +638,22 @@ class PadSpanOccupancySensor(CoordinatorEntity["PadSpanOccupancyCoordinator"], S
                        for p in (d.get("people") or [])],
             "rooms": room_summary,
         }
+
+
+class PadSpanSubzoneWhoSensor(SubzoneEntityMixin, CoordinatorEntity, SensorEntity):
+    """Who is in a sub-zone: their labels, comma-separated, or "none"."""
+
+    _attr_icon = "mdi:account-box-outline"
+    _suffix = "who"
+
+    def __init__(self, coordinator, zid: str) -> None:
+        super().__init__(coordinator)
+        self._setup(zid)
+
+    @property
+    def name(self) -> str:
+        return "Who"
+
+    @property
+    def native_value(self) -> str:
+        return (", ".join(self._people) or "none")[:255]

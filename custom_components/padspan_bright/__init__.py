@@ -44,6 +44,7 @@ from .const import (
     DATA_FABRIC,
     DATA_OBJECTS,
     DATA_ALERTS,
+    DATA_SUBZONES,
     DATA_MOVEMENT,
     DATA_LOST_AND_FOUND,
     DATA_ADAPTIVE,
@@ -161,6 +162,15 @@ async def _ensure_stores(hass: HomeAssistant, *, critical_only: bool = False) ->
         await lf_store.async_load()
         return (DATA_LOST_AND_FOUND, lf_store, f"LostAndFoundStore ready ({len(lf_store.records)} records)")
 
+    async def _init_vacuum():
+        # Robot-vacuum import (vacuum_import.py): reads a robot only while
+        # the user has turned its link on — start() is a no-op otherwise.
+        from .vacuum_import import DATA_VACUUM, VacuumStore
+        vs = VacuumStore(hass)
+        await vs.async_load()
+        vs.start()
+        return (DATA_VACUUM, vs, "VacuumStore ready")
+
     async def _init_forensics():
         from .forensics_store import ForensicsStore
         fs_store = ForensicsStore(hass)
@@ -272,6 +282,8 @@ async def _ensure_stores(hass: HomeAssistant, *, critical_only: bool = False) ->
         deferred.append(_init_tag())
     if DATA_WLED_LOOKS not in hass.data[DOMAIN]:
         deferred.append(_init_wled_looks())
+    if "vacuum_import" not in hass.data[DOMAIN]:   # vacuum_import.DATA_VACUUM
+        deferred.append(_init_vacuum())
 
     if deferred:
         for res in await asyncio.gather(*deferred, return_exceptions=True):
@@ -381,6 +393,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # had before keeps its last real change (motion_reconnects.py).
     from .motion_reconnects import async_setup_motion_reconnects  # noqa: PLC0415
     async_setup_motion_reconnects(hass)
+    # Assist's "which room is Alice in" — answers only once the user adds the
+    # custom sentences (docs/GETTING_STARTED.md); nothing calls it otherwise.
+    try:
+        from .intents import async_setup_intents  # noqa: PLC0415
+        async_setup_intents(hass)
+    except Exception as err:  # defensive: do not break HA startup
+        _LOGGER.exception("Assist intent registration failed: %s", err)
 
     _LOGGER.info("PadSpan Bright starting v%s (build %s)", BUILD_VERSION, BUILD_ID)
 
@@ -780,6 +799,10 @@ async def async_remove_config_entry_device(hass: HomeAssistant, entry: ConfigEnt
         # its leftover device is exactly what this exists to clear.
         _st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
         return not bool(_st and (_st.data or {}).get("ha_entity_occupancy_enabled"))
+    # A sub-zone's device (subzones.py) is in use while its sub-zone exists.
+    _sz = hass.data.get(DOMAIN, {}).get(DATA_SUBZONES)
+    if any(i.startswith("subzone_") and _sz is not None and i[len("subzone_"):] in _sz.zones() for i in ids):
+        return False
     coord = hass.data.get(DOMAIN, {}).get("presence_coordinator")
     for key, obj in ((getattr(coord, "data", None) or {}) if coord else {}).items():
         if isinstance(obj, dict) and obj.get("user_label"):
@@ -852,6 +875,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async_stop_house3d_people(hass)
     except Exception as err:
         _LOGGER.debug("Live Aboard people listener teardown error: %s", err)
+
+    # Stop reading a linked robot vacuum
+    try:
+        from .vacuum_import import DATA_VACUUM
+        _vs = hass.data.get(DOMAIN, {}).pop(DATA_VACUUM, None)
+        if _vs:
+            _vs.stop()
+    except Exception as err:
+        _LOGGER.debug("Vacuum link teardown error: %s", err)
 
     # Stop Vacation Mode's check timer
     try:

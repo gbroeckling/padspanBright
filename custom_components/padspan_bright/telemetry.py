@@ -12,8 +12,16 @@ that will go. What goes out is COUNTS and VERSIONS, never things:
     the country and language set in Home Assistant (Settings → System →
         General): a two-letter code and a language tag such as "en-GB",
         left out when blank — never looked up from the address
+    with a licence key on more than two homes, the licence's group code:
+        16 hex characters made from the key (never the key), the same in
+        every home of that licence, so its homes are seen together
+        (licence_homes.py: a key on more than two homes needs every home's
+        report on)
     how many scanners / floors / rooms / placed lights / walls / maps / IRKs
-    which feature switches are on
+    which feature switches are on, and which theme the panel wears
+        (Day, Light, or a named palette; Night is the absence of all three),
+        and how the Overview is set up (its kind, layout and display
+        switches, as words); with quiet mode on, the share it hides, bucketed
     how many times each tab was opened and each feature used since the
         last report (an allow-listed vocabulary — see EVENTS)
     a few health flags: crypto present, BLE callback alive, coverage floor
@@ -98,6 +106,7 @@ from .const import (
     DATA_SETTINGS,
     DOMAIN,
 )
+from .onboarding import BUCKET_WORDS as _ONB_BUCKETS, STEPS as _ONB_STEPS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -129,6 +138,10 @@ _MAX_BYTES = 8192
 # closed list, because the report's KEYS are also data that leaves the box,
 # and an open pattern would let any authenticated user put a word into it.
 EVENTS: frozenset[str] = frozenset({
+    # 0.38.160: a device's room held through a short gap (once per hold, so
+    # whether the setting ever does anything in a real house), and a robot
+    # vacuum's map imported / a walker point accepted into calibration.
+    "room_hold_used", "vacuum_imported", "vacuum_point_accepted",
     "light_placed", "light_removed", "wall_placed", "wall_removed",
     "room_committed", "irk_added", "irk_add_refused", "irk_validate",
     "calibration_point_added", "capture_started", "forensics_query",
@@ -269,7 +282,24 @@ EVENTS: frozenset[str] = frozenset({
     "wizard_la_opened", "wizard_la_finished",
     # Settings → Suggest an idea: which way people take (0.38.140).
     "suggest_idea_posted", "suggest_idea_browsed", "suggest_idea_mail",
+    # A Bluetooth proxy that suddenly hears far fewer advertisements than it
+    # usually does while the others are normal (proxy_health.py; the 2026.7
+    # ESPHome coexistence bug left proxies hearing ~9%). Counted per drop and
+    # reported only as a bucket (PROXY_DROP_EVENTS), never the number.
+    "proxy_rate_drop",
 })
+# A new install's first steps (onboarding.py): how long from setup to the
+# first room and to the first calibration point, as buckets, once per
+# install. Never bumped: build_payload adds them (count 1) until a report
+# carrying them is accepted.
+ONBOARDING_EVENTS: frozenset[str] = frozenset(f"{s}:{b}" for s in _ONB_STEPS for b in _ONB_BUCKETS)
+# The day's proxy_rate_drop count, as one of these instead of the number.
+PROXY_DROP_BUCKETS: tuple[str, ...] = ("1", "2_5", "gt5")
+PROXY_DROP_EVENTS: frozenset[str] = frozenset(f"proxy_rate_drops:{b}" for b in PROXY_DROP_BUCKETS)
+
+
+def _proxy_drop_bucket(n: int) -> str:
+    return "1" if n <= 1 else "2_5" if n <= 5 else "gt5"
 # The panel's views (panel.js _VIEW_PATHS — tests/test_telemetry.py asserts
 # equality) and the sub-tabs of the two views that have them.
 VIEWS: frozenset[str] = frozenset({
@@ -310,20 +340,28 @@ TAB_EVENTS: frozenset[str] = frozenset(
 UI_ERROR_HELPERS: frozenset[str] = frozenset({
     "atlas_weather", "fabric_compass", "live_aboard", "live_aboard_draft", "live_aboard_edit", "live_aboard_furniture",
     "live_aboard_house", "live_aboard_library", "live_aboard_use",
-    "live_aboard_weather", "live_aboard_showcase",
+    "live_aboard_weather", "live_aboard_showcase", "live_aboard_fps",
+    "live_aboard_studio",                           # Live Aboard's Studio look (atlas_3d_look "studio")
     "live_aboard_pieces", "live_aboard_furnish",   # Live Aboard P2 Furnish
     "live_aboard_import",
     "live_aboard_devices",                          # Live Aboard P5: furniture that is a device
     "live_aboard_tracked",                          # Live Aboard P6: beacons, scanners and people, live
+    "people_trails",                                # Trails: where each person and tag went in the last half hour
+    "iphone_irk",                                   # the iPhone setup path: IRK steps instead of BLE Transmitter
     "live_aboard_people", "live_aboard_photo",
     "live_aboard_runs", "live_aboard_strip",        # Live Aboard's Strip tool: strips and string lights
     "atlas_screen", "atlas_aboard",                 # the flat Atlas: the map alone, full screen; Live Aboard's on the map
+    "map_text",                                     # the map as text for screen readers (Overview, the flat Atlas)
+    "atlas_heatmap",                                # the flat Atlas: temperature / humidity / CO2 heatmap
     "live_aboard_marks",                            # Live Aboard: the Atlas's leak sensors, locks, codes and class chips
     "live_aboard_motion",                           # Live Aboard: motion (the ring, the room's glow, markers, coverage, the chip)
     "live_aboard_panel",                            # Live Aboard on the wall panel: its home view, Follow, the People chip
+    "live_aboard_director",                         # Live Aboard on the wall panel: flies to a doorbell, door or alarm that went off
     "live_aboard_storey",                           # Live Aboard: the house itself (each storey's floor, the roof, stair openings)
+    "vacuum_import",                                # the Mapping tab's "Import from a robot vacuum"
     "door_types",                                   # doors: which way one swings, its type, its panels (the flat Atlas and Live Aboard)
     "atlas_heights",                                # Mapping's Height row and Heights list (Live Aboard's heights)
+    "wall_scale", "wall_card",                      # wall screens: the scale, and Settings' Wall screens card
     "busy_times", "calibration_matrix", "editions", "evidence_diagram", "house_activity",
     "insights", "iso_lights", "iso_motion", "light_codes", "lights_map", "locate",
     "pan_zoom", "path_loss", "plan_viewer", "push_subscription", "radio_map",
@@ -332,6 +370,7 @@ UI_ERROR_HELPERS: frozenset[str] = frozenset({
     "wled_tab_leds", "wled_tab_look", "wled_tab_presets", "wled_tab_settings",
     "wled_tab_sync", "wled_ui", "trial_offer", "release_notes", "pro_invite",
     "aboard_wizard",                                # the Live Aboard setup wizard (Settings, Mapping → Atlas)
+    "i18n",                                         # the panel's translations helper (t / tn)
 })
 UI_ERROR_SHELLS: frozenset[str] = frozenset({"panel", "atlas_panel", "lib", "other"})
 UI_ERRORS: frozenset[str] = frozenset(
@@ -415,8 +454,11 @@ HOUSE3D_FALLBACK_KINDS: tuple[str, ...] = ("no_webgl", "slow_gpu", "context_lost
 # house3d_loft_rail: an open (Loft) edge over a drop was drawn as a railing;
 # house3d_mezzanine: a floor sits inside a taller one (a mezzanine in a hall,
 # roofed by the hall). Both once per page load (0.38.147).
+# house3d_wall_capped: a wall was stopped under a floor above it, or a
+# needle-thin stretch of a tall room kept to its floor's height, once per
+# page load (0.38.164).
 HOUSE3D_EVENTS: frozenset[str] = frozenset(
-    {"house3d_opened", "house3d_wet_window", "house3d_loft_rail", "house3d_mezzanine"}
+    {"house3d_opened", "house3d_wet_window", "house3d_loft_rail", "house3d_mezzanine", "house3d_wall_capped"}
     | {f"house3d_fallback:{k}" for k in HOUSE3D_FALLBACK_KINDS}
 )
 # Its photo step (ws_house3d_photo.py), counted by the server once per photo
@@ -443,10 +485,21 @@ CLIENT_DEV: tuple[str, ...] = ("mem_lt1g", "mem_1g", "mem_2g", "mem_4g", "mem_8g
                                # Do sensor states reach the panel with last_reported? (a steady
                                # room's temperature stays fresh by it, 0.38.126)
                                "lastrep_yes", "lastrep_no")
+# The screen a panel runs on (client_perf.js CLIENT_SCREEN, held equal by
+# tests/test_perf_memory.py): resolution by its long side in device pixels,
+# orientation, pixel density, kind of screen, one monitor or more. Buckets
+# only, never a size. client_screen_seen: one per screen per report window
+# (note_screen), so the report says how many screens a house runs.
+CLIENT_SCREEN: tuple[str, ...] = ("res_lt720", "res_720", "res_1080", "res_1440", "res_4k", "res_5k_up",
+                                  "orient_land", "orient_port", "dpr_1", "dpr_1_5", "dpr_2", "dpr_3_up",
+                                  "kind_phone", "kind_tablet", "kind_desktop", "kind_large",
+                                  "screens_1", "screens_2up", "screens_unknown")
 CLIENT_EVENTS: frozenset[str] = frozenset(
     {f"client_fps:{v}:{b}" for v in CLIENT_VIEWS for b in CLIENT_FPS}
     | {f"client_heap:{v}:{b}" for v in CLIENT_VIEWS for b in CLIENT_HEAP}
     | {f"client_dev:{d}" for d in CLIENT_DEV}
+    | {f"client_screen:{w}" for w in CLIENT_SCREEN}
+    | {"client_screen_seen"}
 )
 
 # Wall screens (panel.js, and lights_panel.js: the sidebar Atlas), once per
@@ -469,7 +522,34 @@ SCREEN_EVENTS: frozenset[str] = frozenset(
     # Home Assistant's sidebar hidden or shown again from PadSpan's toolbar
     # (0.38.153): used at all, and whether people come back to it.
     | {"ha_sidebar:hidden", "ha_sidebar:shown"}
+    # 4K wall mode (0.38.159, ?kiosk=1 on the sidebar Atlas): the scale it
+    # runs at (the screen against 1080p, bucketed) and whether Wake Lock held
+    # the screen on. Never the screen's size itself.
+    | {f"wall_ui:{b}" for b in ("1", "1.5", "2", "3", "4", "6")}
+    | {"wall_awake:on", "wall_awake:off"}
+    # Sized from the screen's resolution (auto) or from its size and the
+    # viewing distance (room: Settings → Wall screens, or the screen's link).
+    | {"wall_fit:auto", "wall_fit:room"}
 )
+
+# What the Overview tab actually drew (views/overview.js OVERVIEW_SHOWN, held
+# equal by tests/test_telemetry.py), once per page load per word, live data
+# only (Garry, 2026-10-22: the classic screen changes with how far a house
+# got through setup, which settings alone cannot tell):
+#   house        the isometric house with its beacons (rooms drawn)
+#   house_empty  the house frame, but no floor holds a room yet
+#   floor_plan   no rooms drawn: the uploaded floor-plan picture instead
+#   room_grid    no rooms drawn and no picture: the plain room grid
+#   flat         the flat 2D map (overview_2d_mode)
+#   atlas        "Overview shows the Atlas" (Pro), on its Map side
+#   atlas_3d     the same, with this browser's Map / 3D switch on 3D (picked:
+#                a screen that can't draw it shows the flat map, counted
+#                by house3d_fallback:*)
+#   basic        the screen was in Basic mode (sent with one of the above)
+# Words only. The Map / 3D choice is read, never written.
+OVERVIEW_SHOWN: tuple[str, ...] = ("house", "house_empty", "floor_plan", "room_grid",
+                                   "flat", "atlas", "atlas_3d", "basic")
+OVERVIEW_EVENTS: frozenset[str] = frozenset(f"overview_shown:{k}" for k in OVERVIEW_SHOWN)
 
 # The switches whose ON/OFF is reported (booleans only, by name). Every name
 # here must be READ by something outside the settings plumbing — a switch
@@ -494,10 +574,111 @@ _FEATURE_FLAGS: tuple[str, ...] = (
     "atlas_3d_enabled", "low_memory_mode",
     # Pro: the Atlas as Overview (0.38.137) — whether anyone wants it as the front door.
     "overview_atlas",
+    # Themes (0.38.157): Light for everyone, Day on Pro; the stored switch,
+    # so a lapsed Pro still says day_theme. theme_palette is in the ENUMS.
+    "day_theme", "light_theme",
 )
+# 0.38.160's switches, all off by default: whether anyone turns them on.
+# Sent ONLY when on (true), so a house that never touches them sends exactly
+# the report it always did. The last three are on when non-zero or non-empty,
+# reported as on only, never the number or what's in them.
+# Setting -> its word in the report (a word of its own: what a setting holds,
+# such as the director's entities, never goes, only that it is on).
+_FEATURE_ON_ONLY: dict[str, str] = {
+    "atlas_live_colours": "live_colours", "atlas_alert_pulse": "alert_pulse",
+    "atlas_heatmap_enabled": "heatmap", "subzones_enabled": "subzones",
+    "room_reason_attribute": "room_reason", "roomplan_import_enabled": "plan_scan_import",
+    "wall_fully": "wall_fully", "hold_last_room_s": "room_hold",
+    "wall_floor_cycle_s": "wall_floor_cycle", "atlas_3d_director": "director",
+    "enhanced_security": "enhanced_security",
+    # 0.38.165's positioning settings, all off by default.
+    "positioning_pick_better": "pick_better", "positioning_unsure": "unsure",
+    "positioning_sensor_fusion": "fusion",
+}
 # Small enumerations reported by value (each from a fixed vocabulary in
 # ws_settings; anything unexpected is dropped by assert_shareable's length rule).
-_FEATURE_ENUMS: tuple[str, ...] = ("data_mode", "cpu_mode", "lights_automorph_style")
+_FEATURE_ENUMS: tuple[str, ...] = ("data_mode", "cpu_mode", "lights_automorph_style", "theme_palette")
+# Quiet mode's share of objects hidden (env.quiet_hidden, only when it is on).
+QUIET_HIDDEN_BUCKETS: tuple[str, ...] = ("lt25", "25_50", "50_75", "gt75")
+
+
+def _num_or(v: Any, default: float) -> float:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+
+
+# What each Overview screen is set to (Garry, 2026-10-22: "show what each
+# screen uses if they vary, ... doesn't eat up too much room"): per screen, a
+# list of words from OVERVIEW_SET, ONLY for settings changed from
+# settings_store's default, and no key at all for a screen on its defaults,
+# so most houses send nothing. Never the numbers behind a word. The 3D list
+# only while the 3D house is on. Switches the report already sends on their
+# own (walls, outdoor, pins, Showcase, live colours, the director...) are not
+# repeated. Which screen the Overview actually shows is counted from the
+# screen itself (OVERVIEW_EVENTS).
+OVERVIEW_SET: dict[str, tuple[str, ...]] = {
+    # The floor gap, offset and focus are shared with the Atlas's floor
+    # stack; listed once, here.
+    "ov_house": ("gap_tight", "gap_wide", "gap_custom", "offset", "one_floor", "trails"),
+    "ov_atlas": ("zoom_lt1", "zoom_1_2", "zoom_gt2", "classic", "no_emergency", "no_weather",
+                 "weather_lt1", "weather_gt1"),
+    "ov_3d": ("q_low", "q_high", "people", "tags", "library", "no_weather", "look_own", "look_studio"),
+}
+
+
+def _overview_features(settings: dict[str, Any]) -> dict[str, Any]:
+    """features' per-screen lists (see OVERVIEW_SET); {} on defaults."""
+    g = settings.get
+    gap = _num_or(g("overview_iso_floor_gap"), 150)
+    zoom = _num_or(g("overview_iso_zoom"), 1.0)
+    house = []
+    if gap != 150:
+        house.append("gap_tight" if gap < 120 else "gap_wide" if gap > 180 else "gap_custom")
+    if _num_or(g("overview_iso_horiz_gap"), 0) != 0:
+        house.append("offset")
+    if _num_or(g("overview_iso_focus"), 0) != 0:   # 0 = All floors
+        house.append("one_floor")
+    if g("overview_show_trails") is True:
+        house.append("trails")
+    atlas = []
+    if zoom != 1.0:
+        atlas.append("zoom_lt1" if zoom < 1.0 else "zoom_1_2" if zoom <= 2.0 else "zoom_gt2")
+    if g("atlas_layout_v2") is False:
+        atlas.append("classic")
+    if g("atlas_emergency_button") is False:
+        atlas.append("no_emergency")
+    if g("atlas_weather_enabled") is False:
+        atlas.append("no_weather")
+    else:
+        ws = _num_or(g("atlas_weather_strength"), 1.0)
+        if ws != 1.0:
+            atlas.append("weather_lt1" if ws < 1.0 else "weather_gt1")
+    d3 = []
+    if g("atlas_3d_enabled") is True:
+        q = g("atlas_3d_quality")
+        if q in ("low", "high"):
+            d3.append("q_" + q)
+        d3 += [w for w, k in (("people", "atlas_3d_people"), ("tags", "atlas_3d_tags"),
+                              ("library", "atlas_3d_library")) if g(k) is True]
+        if g("atlas_3d_weather") is False:
+            d3.append("no_weather")
+        if g("atlas_3d_look") == "own":
+            d3.append("look_own")
+        elif g("atlas_3d_look") == "studio":
+            d3.append("look_studio")
+    return {k: v for k, v in (("ov_house", house), ("ov_atlas", atlas), ("ov_3d", d3)) if v}
+
+
+def _quiet_hidden(obj_list: list[Any], followed: Any) -> str | None:
+    """Share of the snapshot's objects quiet mode hides (not labelled,
+    identified or followed), bucketed; None with no objects."""
+    objs = [o for o in obj_list if isinstance(o, dict)]
+    if not objs:
+        return None
+    fol = {str(a).upper() for a in (followed or []) if a}
+    hidden = sum(1 for o in objs if not o.get("user_label") and not o.get("identified")
+                 and str(o.get("address") or o.get("key") or "").upper() not in fol)
+    share = hidden / len(objs)
+    return "lt25" if share < 0.25 else "25_50" if share < 0.5 else "50_75" if share < 0.75 else "gt75"
 
 # Saved Showcase "look" presets (Mapping -> Lights) — Garry: "add presets and
 # their components into the opt-in records" so popular combinations across
@@ -591,6 +772,11 @@ PERF_METRICS: dict[str, tuple[str, tuple[str, ...]]] = {
     "pos_unknown_pc": ("pos_unk", ("p50", "p95")),
     "pos_heard_n": ("pos_heard", ("p50",)),
     "pos_room_changes": ("pos_chg", ("per_h",)),
+    # 0.38.165, each only while its setting is on: the share of the house's
+    # objects marked unsure per poll (positioning_unsure), and polls where
+    # motion sensors / usual moves changed a room (positioning_sensor_fusion).
+    "pos_unsure_pc": ("pos_unsure", ("p50", "p95")),
+    "fusion_changes": ("fusion_chg", ("per_h",)),
     # Occupancy estimates: Unknown phones counted, and confidence (0 low,
     # 1 medium, 2 high) and estimates per hour — phones through a wall.
     "occ_unknown_n": ("occ_unk", ("p50", "max")),
@@ -649,8 +835,19 @@ RUNS_KEYS: tuple[str, ...] = ("starts", "unclean", "rss_mb", "mem_avail_pc", "sw
 _TOP_KEYS: frozenset[str] = frozenset({
     "schema", "install_id", "day", "version", "edition", "tier", "ha_version",
     "python", "env", "features", "usage", "health", "errors", "presets",
-    "country", "language",
+    "country", "language", "licence_group",
 })
+# One licence's homes, together: a code made from the key, never the key.
+_GROUP_RE = re.compile(r"[0-9a-f]{16}")
+
+
+def licence_group(key: str) -> str | None:
+    """The licence's group code for the report (None without a key)."""
+    k = str(key or "").strip().upper()
+    if not k:
+        return None
+    import hashlib  # noqa: PLC0415
+    return hashlib.sha256(("padspan-licence-group|" + k).encode()).hexdigest()[:16]
 # HA's configured country (ISO 3166 alpha-2) and language (a short BCP 47
 # tag: "en", "en-GB", "zh-Hant", "es-419"). Anything else is left out.
 _COUNTRY_RE = re.compile(r"[A-Z]{2}")
@@ -678,7 +875,7 @@ def enabled(hass: HomeAssistant) -> bool:
 def event_allowed(name: str) -> bool:
     return (name in EVENTS or name in TAB_EVENTS or name in UI_ERRORS or name in OFFER_EVENTS
             or name in WEATHER_EVENTS or name in HOUSE3D_EVENTS or name in PHOTO_EVENTS
-            or name in CLIENT_EVENTS or name in SCREEN_EVENTS)
+            or name in CLIENT_EVENTS or name in SCREEN_EVENTS or name in OVERVIEW_EVENTS)
 
 
 def bump(hass: HomeAssistant, event: str, n: int = 1) -> bool:
@@ -695,11 +892,79 @@ def bump(hass: HomeAssistant, event: str, n: int = 1) -> bool:
     return True
 
 
+_DATA_SCREENS = "telemetry_screens"
+_DATA_SCREENS_TAKEN = "telemetry_screens_taken"   # the last window's, until its report is sent
+# Each screen's own words (Garry, 2026-10-22: "first 5 screens in a house"):
+# what its Overview drew, its kind of panel window, its resolution and kind
+# of device. Kept per screen id for the window; the report gets the lists
+# only (env.screens), never an id, and only from a house with two or more.
+_DATA_SCREEN_WORDS = "telemetry_screen_words"
+_DATA_SCREEN_WORDS_TAKEN = "telemetry_screen_words_taken"
+SCREENS_LISTED = 5
+_SCREEN_WORDS_MAX = 12
+
+
+def screen_word(event: str) -> str | None:
+    """The word an event gives its screen's list, or None."""
+    if event in OVERVIEW_EVENTS:
+        return event.split(":", 1)[1]
+    if event in CLIENT_EVENTS and event.startswith(("client_screen:res_", "client_screen:kind_")):
+        return event.split(":", 1)[1]
+    if event in SCREEN_EVENTS and event.startswith("wall_screen:"):
+        _, panel, kind = event.split(":")
+        return f"{'atlaspage' if panel == 'atlas' else panel}_{kind}"
+    return None
+
+
+SCREEN_WORDS: frozenset[str] = frozenset(
+    w for w in (screen_word(e) for e in OVERVIEW_EVENTS | CLIENT_EVENTS | SCREEN_EVENTS) if w)
+
+
+def note_screen_word(hass: HomeAssistant, screen: str, event: str) -> None:
+    """Add `event`'s word to this screen's list (the first five screens)."""
+    w = screen_word(event)
+    if not w or not isinstance(screen, str) or not re.fullmatch(r"[0-9a-f]{16}", screen):
+        return
+    lists: dict[str, list[str]] = hass.data.setdefault(DOMAIN, {}).setdefault(_DATA_SCREEN_WORDS, {})
+    if screen not in lists:
+        if len(lists) >= SCREENS_LISTED:
+            return
+        lists[screen] = []
+    if w not in lists[screen] and len(lists[screen]) < _SCREEN_WORDS_MAX:
+        lists[screen].append(w)
+
+
+def _screens_listed(lists: Any) -> list[list[str]] | None:
+    """env.screens: each screen's words, sorted; None under two screens."""
+    if not isinstance(lists, dict) or len(lists) < 2:
+        return None
+    return sorted(sorted(v) for v in lists.values())
+
+
+def note_screen(hass: HomeAssistant, screen: str, event: str = "client_screen_seen") -> bool:
+    """Whether this screen (a browser's random id) is new for `event` in
+    this report's window: client_screen_seen and each client_screen:* word
+    count a screen once per report. Only the counts leave the box; the ids
+    are forgotten with the window."""
+    if not isinstance(screen, str) or not re.fullmatch(r"[0-9a-f]{16}", screen):
+        return False
+    seen: set[str] = hass.data.setdefault(DOMAIN, {}).setdefault(_DATA_SCREENS, set())
+    key = f"{event}|{screen}"
+    if key in seen or len(seen) >= 2000:
+        return False
+    seen.add(key)
+    return True
+
+
 def _take_counters(hass: HomeAssistant) -> dict[str, int]:
     """The counters since the last report — and reset them."""
     dom = hass.data.setdefault(DOMAIN, {})
     out = dict(dom.get(_DATA_COUNTERS) or {})
     dom[_DATA_COUNTERS] = {}
+    dom[_DATA_SCREENS_TAKEN] = dom.get(_DATA_SCREENS) or set()
+    dom[_DATA_SCREENS] = set()
+    dom[_DATA_SCREEN_WORDS_TAKEN] = dom.get(_DATA_SCREEN_WORDS) or {}
+    dom[_DATA_SCREEN_WORDS] = {}
     return out
 
 
@@ -743,6 +1008,17 @@ def _give_back_windows(hass: HomeAssistant, taken: tuple[dict[str, int], dict[st
     counters = hass.data.setdefault(DOMAIN, {}).setdefault(_DATA_COUNTERS, {})
     for k, v in usage.items():
         counters[k] = int(counters.get(k, 0)) + int(v)
+    # The screens it counted go back with their counts, so they aren't counted again.
+    dom = hass.data[DOMAIN]
+    dom.setdefault(_DATA_SCREENS, set()).update(dom.pop(_DATA_SCREENS_TAKEN, None) or set())
+    # The screens' lists too: the taken ones first, then any new, five at most.
+    merged = dict(dom.pop(_DATA_SCREEN_WORDS_TAKEN, None) or {})
+    for sid, words in (dom.get(_DATA_SCREEN_WORDS) or {}).items():
+        if sid in merged:
+            merged[sid] = (merged[sid] + [w for w in words if w not in merged[sid]])[:_SCREEN_WORDS_MAX]
+        elif len(merged) < SCREENS_LISTED:
+            merged[sid] = words
+    dom[_DATA_SCREEN_WORDS] = merged
     try:
         from .ws_common import _log_handler  # noqa: PLC0415
         if _log_handler is not None:
@@ -1074,6 +1350,11 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         return False
 
     floors_with_height = sum(1 for f in mdl_floors if _explicit(f))
+    # Rooms given their own height (room_meta height_m, Live Aboard's tall
+    # rooms): whether anyone uses it. A count, never which rooms.
+    _rm = mdl.get("room_meta") if isinstance(mdl.get("room_meta"), dict) else {}
+    rooms_with_height = sum(1 for v in _rm.values() if isinstance(v, dict) and isinstance(v.get("height_m"), (int, float))
+                            and not isinstance(v.get("height_m"), bool))
     _z_vals = [float(v["z_m"]) for v in (fab.get("scanner_positions_m") or {}).values()
                if isinstance(v, dict) and isinstance(v.get("z_m"), (int, float))
                and not isinstance(v.get("z_m"), bool)]
@@ -1286,6 +1567,7 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         "calibration_auto_points": cal_auto,
         "calibration_no_floor": cal_no_floor,
         "floors_with_height": floors_with_height,
+        "rooms_with_height": rooms_with_height,
         "scanners_with_z": len(_z_vals),
         "irks": _len(settings.get("irk_devices") or []),
         "followed": _len(settings.get("followed_addrs") or []),
@@ -1306,7 +1588,27 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         env["hw"] = _hw_payload(hass)
     except Exception:
         pass
+    # Quiet mode on only (a panel filter the backend never applies): how much
+    # of the house it hides. A quiet-off report is exactly what it was.
+    if settings.get("quiet_mode") is True:
+        _qh = _quiet_hidden(obj_list, settings.get("followed_addrs"))
+        if _qh:
+            env["quiet_hidden"] = _qh
+    # Held-out accuracy (heldout.py), only where calibration gave one: each
+    # method's rooms-right and median error as bucket words, and which did
+    # better. The last result the coordinator has; never computed here.
+    try:
+        from .heldout import report_buckets  # noqa: PLC0415
+        _ho = report_buckets(getattr(dom.get("presence_coordinator"), "_heldout", None))
+        if _ho:
+            env["heldout"] = _ho
+    except Exception:
+        pass
     features = {k: bool(settings.get(k)) for k in _FEATURE_FLAGS}
+    features.update(_overview_features(settings))
+    for k, word in _FEATURE_ON_ONLY.items():
+        if settings.get(k):
+            features[word] = True
     for k in _FEATURE_ENUMS:
         v = settings.get(k)
         if isinstance(v, str) and 0 < len(v) <= 16:
@@ -1456,6 +1758,18 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
     except Exception:
         pass
     usage = _take_counters(hass) if consume else dict(dom.get(_DATA_COUNTERS) or {})
+    _drops = usage.pop("proxy_rate_drop", 0)
+    if isinstance(_drops, int) and _drops > 0:
+        usage[f"proxy_rate_drops:{_proxy_drop_bucket(_drops)}"] = 1
+    try:
+        from .onboarding import report_events as _onb_events  # noqa: PLC0415
+        for _ev in _onb_events(settings):
+            usage[_ev] = 1
+    except Exception as err:
+        _LOGGER.debug("Telemetry: onboarding left out: %s", err)
+    _screens = _screens_listed(dom.get(_DATA_SCREEN_WORDS_TAKEN if consume else _DATA_SCREEN_WORDS))
+    if _screens:
+        env["screens"] = _screens
     # WARNING+ log lines by module since the last report — the "what broke"
     # signal for the parts of the code the developer cannot exercise.
     errors: dict[str, int] = {}
@@ -1491,6 +1805,12 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         payload["country"] = country.strip().upper()
     if isinstance(language, str) and _LANGUAGE_RE.fullmatch(language.strip()):
         payload["language"] = language.strip()
+    # Only from a key on more than two homes (the ones that need the report):
+    # a house with one or two sends exactly what it always did.
+    _sd = (lambda s: s.data if s else {})(hass.data.get(DOMAIN, {}).get(DATA_SETTINGS))
+    _grp = licence_group(str(_sd.get("forensics_license_key") or ""))
+    if _grp and int(_sd.get("license_homes_used") or 0) > 2:
+        payload["licence_group"] = _grp
     # The cap refuses the WHOLE report, and a refused one keeps its counters,
     # so the next is no smaller: one busy day silenced an install until HA
     # restarted. The presets are a courtesy sample (popular_presets.py) — on
@@ -1542,6 +1862,10 @@ def assert_shareable(payload: dict[str, Any]) -> None:
                 raise ValueError("country is not a two-letter code")
             if path == ".language" and not _LANGUAGE_RE.fullmatch(node):
                 raise ValueError("language is not a language tag")
+            if path == ".licence_group":
+                if not _GROUP_RE.fullmatch(node):
+                    raise ValueError("licence_group is not a group code")
+                return
             # Most specific first, so the message names the real shape (a
             # UUID's tail is also twelve hex digits).
             for name, rx in (("UUID", _UUID_RE), ("32-hex", _HEX32_RE), ("licence key", _KEY_RE),
@@ -1576,6 +1900,26 @@ def _check_load_sections(payload: dict[str, Any]) -> None:
             raise ValueError(f"not a count in {path}")
 
     env = payload.get("env")
+    if isinstance(env, dict) and "quiet_hidden" in env and env["quiet_hidden"] not in QUIET_HIDDEN_BUCKETS:
+        raise ValueError("env.quiet_hidden not in the vocabulary")
+    if isinstance(env, dict) and "heldout" in env:
+        from .heldout import BETTER_WORDS, MEDIAN_BUCKETS, ROOM_BUCKETS  # noqa: PLC0415
+        ho = env["heldout"]
+        words = {"knn_room": ROOM_BUCKETS, "sp_room": ROOM_BUCKETS, "knn_med": MEDIAN_BUCKETS,
+                 "sp_med": MEDIAN_BUCKETS, "better": BETTER_WORDS}
+        if not isinstance(ho, dict) or not all(k in words and v in words[k] for k, v in ho.items()):
+            raise ValueError("env.heldout not in the vocabulary")
+    if isinstance(env, dict) and "screens" in env:
+        scr = env["screens"]
+        if (not isinstance(scr, list) or len(scr) > SCREENS_LISTED
+                or not all(isinstance(s, list) and len(s) <= _SCREEN_WORDS_MAX
+                           and all(w in SCREEN_WORDS for w in s) for s in scr)):
+            raise ValueError("env.screens not lists of screen words")
+    feats = payload.get("features")
+    if isinstance(feats, dict):
+        for k, words in OVERVIEW_SET.items():
+            if k in feats and not (isinstance(feats[k], list) and all(w in words for w in feats[k])):
+                raise ValueError(f"features.{k} not in the vocabulary")
     hw = env.get("hw") if isinstance(env, dict) else None
     if hw is not None:
         if not isinstance(hw, dict):
@@ -1733,6 +2077,12 @@ async def send_now(hass: HomeAssistant, *, force: bool = False) -> dict[str, Any
             await st.async_set(telemetry_last_day=_today())
         except Exception:
             pass
+    # A new install's first steps went: never again (onboarding.py).
+    try:
+        from .onboarding import async_mark_reported  # noqa: PLC0415
+        await async_mark_reported(hass, [k for k in payload.get("usage") or {} if k in ONBOARDING_EVENTS])
+    except Exception as err:
+        _LOGGER.debug("Telemetry: onboarding not marked sent: %s", err)
     # The reply may carry a free-year Pro invite (pro_invite.py). Never fatal.
     try:
         from .pro_invite import store_from_reply  # noqa: PLC0415
@@ -1746,6 +2096,8 @@ def reset_windows(hass: HomeAssistant) -> None:
     """Start the usage and error windows now — called at opt-in, so the first
     report carries nothing from before the person said yes."""
     hass.data.setdefault(DOMAIN, {})[_DATA_COUNTERS] = {}
+    hass.data[DOMAIN][_DATA_SCREENS] = set()
+    hass.data[DOMAIN][_DATA_SCREEN_WORDS] = {}
     try:
         from .ws_common import _log_handler  # noqa: PLC0415
         if _log_handler is not None:

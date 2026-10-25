@@ -42,6 +42,10 @@ const { hasScale: _wizHasScale, hasRooms: _wizHasRooms, hasReceivers: _wizHasRec
 // see its own header for why this isn't a duplicate of anything else here.
 const { whatIfDelta } =
   await import(`./whatif_placement.js${new URL(import.meta.url).search}`);
+// "Import from a robot vacuum" beside the .sh3d import (vacuum_import.js).
+// Optional: a block that fails to load must not blank the Mapping tab.
+const VACUUM = await import(`./vacuum_import.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: vacuum_import failed to load", err); return null; });
 // The 90-day trial card, shared by every paid wall (trial_offer.js).
 // Optional: a card that fails to load must not blank the Mapping tab.
 const { trialOfferFromCtx } = await import(`./trial_offer.js${new URL(import.meta.url).search}`)
@@ -121,6 +125,12 @@ export function render(ctx){
   if(isBasic && tab !== "library" && tab !== "upload"){
     ctx.state.mapsTab = "library";
   }
+  // Only an administrator can upload (the backend refuses anyone else).
+  const isAdmin = ctx.hass?.user?.is_admin !== false;
+  if(!isAdmin){
+    tabDefs.splice(tabDefs.findIndex(([id]) => id === "upload"), 1);
+    if(ctx.state.mapsTab === "upload") ctx.state.mapsTab = "library";
+  }
   const activeTab = ctx.state.mapsTab || "library";
 
   const tabs = el("div",{class:"tabs"}, tabDefs.map(([id,label])=>_tabBtn(id,label,activeTab,setTab)));
@@ -144,6 +154,7 @@ export function render(ctx){
     ]),
     tabs,
   ]);
+  if(!isAdmin) header.appendChild(el("div",{class:"muted",style:"font-size:12px;margin-top:8px"},"Only an administrator can add or change floor plans."));
 
   const body = el("div",{},[
     activeTab==="library" ? _library(ctx, maps, activeId, helpBtn, isBasic) :
@@ -1120,7 +1131,7 @@ function _upload(ctx, helpBtn, isBasic){
       ctx.state.mapsTab = "edit";
       ctx.actions.renderRooms();
     }catch(e){
-      status.textContent = "Upload failed: " + String(e);
+      status.textContent = "Upload failed: " + (e?.message || e?.code || String(e));
     }
   }}, "Upload & Convert");
 
@@ -1228,6 +1239,23 @@ function _loadImage(url){
     img.onerror = (e)=>reject(new Error("Image decode failed"));
     img.src = url;
   });
+}
+
+// A backup's picture that is not a PNG (JPEG, WebP...), redrawn as one at
+// the map's stored size so the store accepts it and every fraction still fits.
+async function _backupImageToPng(b64, mime, width, height){
+  const bin = atob(b64), bytes = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], {type: mime || "image/jpeg"}));
+  try{
+    const img = await _loadImage(url);
+    const canvas = document.createElement("canvas");
+    canvas.width = width || img.naturalWidth; canvas.height = height || img.naturalHeight;
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise(r=>canvas.toBlob(r,"image/png"));
+    if(!blob) throw new Error("PNG encode failed");
+    return _arrayBufferToBase64(await blob.arrayBuffer());
+  }finally{ URL.revokeObjectURL(url); }
 }
 
 // Like _preparePng but loads from a URL (for trim/bake operations on
@@ -1669,7 +1697,10 @@ function _edit(ctx, map, allMaps){
 
   const img = new Image();
   img.className = "mapimg";
-  if(url) img.src = url;
+  if(url && !map.image?.missing) img.src = url;
+  // No picture (restored without one): the stage keeps the map's own shape,
+  // so its rooms and pins are drawn where they belong.
+  else if(map.image?.missing && map.image.width > 0 && map.image.height > 0) stage.style.aspectRatio = `${map.image.width} / ${map.image.height}`;
 
   const overlay = document.createElement("div");
   overlay.className = "mapoverlay";
@@ -1733,6 +1764,34 @@ function _edit(ctx, map, allMaps){
       await ctx.actions.callWS({ type: "padspan_bright/fabric_rf_barrier_remove", barrier_id: id });
       await ctx.actions.modelRefresh();
     } catch (e) { ctx.toast("Could not remove wall: " + (e.message || e), true); }
+  };
+
+  // ── Sub-zones (subzones.py): named areas inside a room, in metres ──────────
+  // Only with settings.subzones_enabled (off: no button, nothing drawn). Drawn
+  // here like a wall, through this map's metre transform, and kept in their
+  // own store, never in the rooms'. Its own draft (_szDrawing), so the Rooms
+  // and Walls tools never see a half-drawn sub-zone.
+  const _szOn = () => ctx.state.settings?.subzones_enabled === true;
+  const _szHere = () => (ctx.state.maps._subzones || []).filter(z => String(z.floor_id) === _wallFloor());
+  const _szSet = (r) => { ctx.state.maps._subzones = (r && r.zones) || []; renderAll(); renderTools(); };
+  const _szLoad = async () => {
+    try { _szSet(await ctx.actions.callWS({ type: "padspan_bright/subzones_list" })); }
+    catch (e) { _szSet(null); }
+  };
+  const _szAdd = async (name, fracPts) => {
+    const tf = _wallTx();
+    if (!tf) { ctx.toast("Measure this map first (Measure tool) — sub-zones are stored in metres.", true); return; }
+    const points_m = fracPts.map(p => mapFracToMetres(tf, clamp01(p[0]), clamp01(p[1])))
+      .map(q => [Math.round(q[0] * 1000) / 1000, Math.round(q[1] * 1000) / 1000]);
+    try {
+      _szSet(await ctx.actions.callWS({ type: "padspan_bright/subzone_add",
+        zone: { name, floor_id: _wallFloor(), type: "poly", points_m } }));
+      ctx.toast(`Sub-zone "${name}" added`);
+    } catch (e) { ctx.toast("Could not add sub-zone: " + (e.message || e), true); }
+  };
+  const _szRemove = async (id) => {
+    try { _szSet(await ctx.actions.callWS({ type: "padspan_bright/subzone_remove", zone_id: id })); }
+    catch (e) { ctx.toast("Could not remove sub-zone: " + (e.message || e), true); }
   };
 
   // ── Door/window barrier project, step 3: mark a door/window on a wall ──────
@@ -1804,12 +1863,13 @@ function _edit(ctx, map, allMaps){
 
   // --- Right panel (tools) ---
   const right = el("div",{class:"card", style:"margin-top:10px"},[]);
-  const _modeHelp = {"receivers":"Double-click map to place radio; drag to reposition","rooms":"Click map to add points; double-click to finish","barriers":"Click to draw wall segments; double-click to finish","measure":"Click two points you know the real distance between"};
+  const _modeHelp = {"receivers":"Double-click map to place radio; drag to reposition","rooms":"Click map to add points; double-click to finish","barriers":"Click to draw wall segments; double-click to finish","measure":"Click two points you know the real distance between","subzones":"Click points around the bed, couch or desk; double-click to finish"};
   const modeRow = el("div",{style:"display:flex;gap:8px;flex-wrap:wrap;align-items:center"},[
     el("button",{class:"btn inline"+(ctx.state.maps._mode==="receivers"?" primary":""), onclick:()=>{ ctx.state.maps._mode="receivers"; ctx.state.maps._drawing=null; renderAll(); renderTools(); }}, "Radios"),
     el("button",{class:"btn inline"+(ctx.state.maps._mode==="rooms"?" primary":""), onclick:()=>{ ctx.state.maps._mode="rooms"; ctx.state.maps._selectedRxId=null; renderAll(); renderTools(); }}, "Rooms"),
     el("button",{class:"btn inline"+(ctx.state.maps._mode==="barriers"?" primary":""), style:"background:#1a0a0a;border-color:#7f1d1d;color:#fca5a5", onclick:()=>{ ctx.state.maps._mode="barriers"; ctx.state.maps._selectedRxId=null; ctx.state.maps._drawing=null; renderAll(); renderTools(); }}, "RF Barriers"),
     el("button",{class:"btn inline"+(ctx.state.maps._mode==="measure"?" primary":""), style:"background:#0a1a2a;border-color:#1e4976;color:#7dd3fc", onclick:()=>{ ctx.state.maps._mode="measure"; ctx.state.maps._selectedRxId=null; ctx.state.maps._drawing=null; ctx.state.maps._measurePts=[]; renderAll(); renderTools(); }}, "\ud83d\udccf Measure"),
+    ...(_szOn() ? [el("button",{class:"btn inline"+(ctx.state.maps._mode==="subzones"?" primary":""), onclick:()=>{ ctx.state.maps._mode="subzones"; ctx.state.maps._selectedRxId=null; ctx.state.maps._drawing=null; ctx.state.maps._szDrawing=null; _szLoad(); }}, "Sub-zones")] : []),
     el("span",{class:"muted", style:"font-size:12px"}, _modeHelp[ctx.state.maps._mode] || ""),
     helpBtn("maps_edit"),
   ]);
@@ -2019,6 +2079,49 @@ function _edit(ctx, map, allMaps){
       ln.setAttribute("stroke-width", _isBarrierDraw ? "0.008" : "0.006");
       if(_isBarrierDraw) ln.setAttribute("stroke-dasharray","0.006 0.018");
       svg.appendChild(ln);
+    }
+
+    // Sub-zones on this floor, and the one being drawn (only in their tool)
+    if(ctx.state.maps._mode==="subzones" && _szOn()){
+      const tf = _wallTx();
+      for(const z of (tf ? _szHere() : [])){
+        const ring = z.type === "circle"
+          ? Array.from({length: 32}, (_, i) => [Number(z.cx_m) + Number(z.r_m) * Math.cos(i * Math.PI / 16), Number(z.cy_m) + Number(z.r_m) * Math.sin(i * Math.PI / 16)])
+          : (z.points_m || []);
+        const pts = ring.map(p => metresToMapFrac(tf, Number(p[0]), Number(p[1]))).filter(Boolean);
+        if(pts.length < 3) continue;
+        const pg = document.createElementNS("http://www.w3.org/2000/svg","polygon");
+        pg.setAttribute("points", pts.map(p=>`${p[0]},${p[1]}`).join(" "));
+        pg.setAttribute("fill", (z.people || []).length ? "rgba(94,234,212,0.28)" : "rgba(94,234,212,0.10)");
+        pg.setAttribute("stroke","#5eead4");
+        pg.setAttribute("stroke-width","0.004");
+        pg.setAttribute("stroke-dasharray","0.010 0.006");
+        pg.style.pointerEvents = "none";
+        svg.appendChild(pg);
+        const lab = document.createElementNS("http://www.w3.org/2000/svg","text");
+        lab.setAttribute("x", pts.reduce((a,p)=>a+p[0],0)/pts.length);
+        lab.setAttribute("y", pts.reduce((a,p)=>a+p[1],0)/pts.length);
+        lab.setAttribute("font-size","0.025");
+        lab.setAttribute("text-anchor","middle");
+        lab.setAttribute("dominant-baseline","middle");
+        lab.setAttribute("fill","#5eead4");
+        lab.setAttribute("stroke","#0b1a12");
+        lab.setAttribute("stroke-width","0.006");
+        lab.setAttribute("paint-order","stroke fill");
+        lab.style.pointerEvents = "none";
+        lab.textContent = z.name;
+        svg.appendChild(lab);
+      }
+      const dpts = ctx.state.maps._szDrawing || [];
+      if(dpts.length){
+        const ln = document.createElementNS("http://www.w3.org/2000/svg","polyline");
+        ln.setAttribute("points", dpts.map(p=>`${clamp01(p[0])},${clamp01(p[1])}`).join(" "));
+        ln.setAttribute("fill","none");
+        ln.setAttribute("stroke","#5eead4");
+        ln.setAttribute("stroke-width","0.005");
+        ln.style.pointerEvents = "none";
+        svg.appendChild(ln);
+      }
     }
 
     // Markers
@@ -2263,6 +2366,23 @@ function _edit(ctx, map, allMaps){
       } else {
         right.appendChild(el("div",{class:"muted", style:"margin-top:4px;font-size:11px"},
           snap2 ? "No live BLE radios detected. Enable Bluetooth proxy in HA." : "Switch to Live mode to see your BLE scanners."));
+      }
+    } else if(ctx.state.maps._mode==="subzones" && _szOn()){
+      right.appendChild(el("div",{class:"muted", style:"margin-top:10px;font-size:12px"},
+        "Sub-zones: a named area inside a room. Each one gets binary_sensor.padspan_<name>_occupied and sensor.padspan_<name>_who."));
+      const szName = el("input",{type:"text", value: ctx.state.maps._szName || "", placeholder:"Name for the next one (e.g. Bed)"});
+      szName.addEventListener("input", ()=>{ ctx.state.maps._szName = szName.value; });
+      right.appendChild(el("div",{style:"margin-top:6px"}, [szName]));
+      if((ctx.state.maps._szDrawing || []).length){
+        right.appendChild(el("button",{class:"btn tiny", style:"margin-top:6px", onclick:()=>{ ctx.state.maps._szDrawing=null; renderAll(); renderTools(); }}, "Cancel drawing"));
+      }
+      const szList = _szHere();
+      if(!szList.length) right.appendChild(el("div",{class:"muted", style:"margin-top:6px;font-size:11px"}, "No sub-zones on this floor yet."));
+      for(const z of szList){
+        right.appendChild(el("div",{style:"display:flex;gap:8px;align-items:center;margin-top:6px;font-size:12px"},[
+          el("div",{style:"flex:1"}, `${z.name}${z.room ? " · " + z.room : ""} — ${(z.people || []).length ? z.people.join(", ") : "nobody"}`),
+          el("button",{class:"btn tiny", onclick:()=>{ if(confirm(`Delete sub-zone "${z.name}" and its two sensors?`)) _szRemove(z.id); }}, "Delete"),
+        ]));
       }
     } else if(ctx.state.maps._mode==="barriers"){
       right.appendChild(el("div",{class:"muted", style:"margin-top:10px;font-size:12px"}, "RF Barrier tools"));
@@ -2869,6 +2989,18 @@ function _edit(ctx, map, allMaps){
       ctx.state.maps._drawing = null;
       renderAll(); refreshList(); renderTools();
     }
+    // sub-zones mode: dblclick finishes the sub-zone — into its own store, in metres
+    if(ctx.state.maps._mode==="subzones" && (ctx.state.maps._szDrawing || []).length){
+      const pts = ctx.state.maps._szDrawing.slice();
+      ctx.state.maps._szDrawing = null;
+      if(pts.length >= 3){
+        const name = String(ctx.state.maps._szName || "").trim() || `Sub-zone ${_szHere().length + 1}`;
+        ctx.state.maps._szName = "";
+        _szAdd(name, pts);
+      }
+      renderAll(); renderTools();
+      return;
+    }
     // barriers mode: dblclick finishes the wall — into the fabric, in metres
     if(ctx.state.maps._mode==="barriers" && ctx.state.maps._drawing){
       const d = ctx.state.maps._drawing;
@@ -2928,6 +3060,13 @@ function _edit(ctx, map, allMaps){
           renderTools();
         }
       }
+      return;
+    }
+    if(ctx.state.maps._mode==="subzones"){
+      if(!_szOn()) return;
+      const rect = overlay.getBoundingClientRect();
+      (ctx.state.maps._szDrawing ||= []).push([clamp01((ev.clientX - rect.left) / rect.width), clamp01((ev.clientY - rect.top) / rect.height)]);
+      renderAll(); renderTools();
       return;
     }
     if(ctx.state.maps._mode!=="rooms" && ctx.state.maps._mode!=="barriers") return;
@@ -3045,7 +3184,7 @@ function _edit(ctx, map, allMaps){
       trimPanel.style.display="none";
       ctx.actions.renderRooms();
     }catch(e){
-      trimStatus.textContent="Failed: "+String(e);
+      trimStatus.textContent="Failed: "+(e?.message || e?.code || String(e));
     }
   }}, "Apply Trim");
 
@@ -3065,7 +3204,7 @@ function _edit(ctx, map, allMaps){
   }}, "Trim Image");
 
   // Insert Trim button into the existing title row buttons (direct reference — no fragile querySelector)
-  titleBtns.insertBefore(trimToggleBtn, titleBtns.firstChild);
+  if (ctx.hass?.user?.is_admin !== false) titleBtns.insertBefore(trimToggleBtn, titleBtns.firstChild);
 
   // ── Rotate Image Panel ─────────────────────────────────────────────────
   // Bakes rotation directly into the image file (not a CSS transform) so all
@@ -3079,7 +3218,7 @@ function _edit(ctx, map, allMaps){
   const _canRotate = !_hasStackTieIns;
 
   const rotatePanel = el("div",{style:"display:none;margin-top:10px"});
-  if(_canRotate && url){
+  if(_canRotate && url && ctx.hass?.user?.is_admin !== false){
     let _rotAngle = 0;
     const rotStatus = el("div",{class:"mono",style:"font-size:12px;margin-top:6px"}, "0°");
 
@@ -3208,6 +3347,38 @@ function _edit(ctx, map, allMaps){
   }
 
   card.appendChild(title);
+  // A map restored from a backup that had no picture (maps_store
+  // allow_no_image): its rooms, pins and calibration are all here, only the
+  // picture is not. The new one is drawn at the stored size, so every
+  // fraction on the map keeps pointing at the same spot.
+  if(map.image?.missing){
+    const picStatus = el("div",{class:"muted",style:"font-size:12px"});
+    const picInput = document.createElement("input");
+    picInput.type = "file"; picInput.accept = "image/*"; picInput.style.display = "none";
+    picInput.addEventListener("change", async ()=>{
+      const f = picInput.files?.[0]; if(!f) return;
+      const W = map.image.width || 800, H = map.image.height || 600;
+      const objUrl = URL.createObjectURL(f);
+      try{
+        const im = await _loadImage(objUrl);
+        const nw = im.naturalWidth || im.width, nh = im.naturalHeight || im.height;
+        if(Math.abs((nw/nh) - (W/H)) > 0.02*(W/H)
+           && !confirm(`This picture's shape (${nw}×${nh}) is not the map's (${W}×${H}). Rooms and pins are placed on the map's shape, so it will be stretched to fit. Use it anyway?`)) return;
+        const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+        cv.getContext("2d").drawImage(im, 0, 0, W, H);
+        const blob = await new Promise(r=>cv.toBlob(r,"image/png"));
+        picStatus.textContent = "Uploading picture…";
+        await ctx.actions.mapsReplaceImage({ map_id: map.id, png_base64: _arrayBufferToBase64(await blob.arrayBuffer()), width: W, height: H });
+        ctx.toast("Picture uploaded");
+      }catch(e){ picStatus.textContent = "Upload failed: " + (e.message || e); }
+      finally{ URL.revokeObjectURL(objUrl); }
+    });
+    card.appendChild(el("div",{style:"display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0;padding:8px 10px;border:1px solid #d97706;border-radius:8px"},[
+      el("div",{style:"font-size:13px"},"No picture: this map was restored from a backup that did not have one. Its rooms, pins and calibration are kept. Re-upload the same floor plan picture to see it again."),
+      el("button",{class:"btn inline", onclick:()=>picInput.click()},"Re-upload picture…"),
+      picStatus, picInput,
+    ]));
+  }
   card.appendChild(rotatePanel);
   card.appendChild(trimPanel);
   card.appendChild(stage);
@@ -3817,6 +3988,15 @@ function _export(ctx, active, maps_list){
     try{
       const allMaps = ctx.state.maps.list || [];
       const backupMaps = [];
+      // A signed link can be stale (a restart, 24 h): on a failed fetch the
+      // links are asked for afresh once, and the map tried again with its new
+      // one. Maps that still come without a picture are named at the end.
+      let freshUrls = null;
+      const noImage = [];
+      const fetchImage = async (url)=>{
+        if(!url) return null;
+        try{ const r = await fetch(url); return r.ok ? await r.blob() : null; }catch(e2){ return null; }
+      };
       for(let i=0;i<allMaps.length;i++){
         const m = allMaps[i];
         backupStatus.textContent = `Fetching ${i+1}/${allMaps.length}: ${m.name||m.id}…`;
@@ -3835,17 +4015,24 @@ function _export(ctx, active, maps_list){
         const _tx = (ctx.state.model?.map_transforms || {})[m.id];
         if (_tx) entry.map_transform = JSON.parse(JSON.stringify(_tx));
         if(m.image?.filename){
-          try{
-            const resp = await fetch(ctx.helpers.mapImageUrl(m));
-            if(resp.ok){
-              const blob = await resp.blob();
+          let blob = await fetchImage(ctx.helpers.mapImageUrl(m));
+          if(!blob){
+            if(!freshUrls){
+              try{ freshUrls = (await ctx.actions.callWS({ type: "padspan_bright/maps_image_urls" }))?.image_urls || {}; }
+              catch(e2){ freshUrls = {}; }
+            }
+            blob = await fetchImage(freshUrls[m.id]);
+          }
+          if(blob){
+            try{
               entry.png_base64 = await new Promise((res,rej)=>{
                 const fr = new FileReader();
                 fr.onload = ()=>res(fr.result.split(",")[1]);
                 fr.onerror = rej; fr.readAsDataURL(blob);
               });
-            }
-          }catch(e2){ /* skip image if unavailable */ }
+            }catch(e2){ blob = null; }
+          }
+          if(!blob) noImage.push(m.name || m.id);
         }
         backupMaps.push(entry);
       }
@@ -3853,6 +4040,11 @@ function _export(ctx, active, maps_list){
       const backup = { padspan_backup:"v1", exported_at:new Date().toISOString(), count:backupMaps.length, maps:backupMaps };
       _downloadBlob(new Blob([JSON.stringify(backup,null,2)],{type:"application/json"}), `maps_backup_${dateStr}.json`);
       backupStatus.textContent = `Backup downloaded (${backupMaps.length} map${backupMaps.length!==1?"s":""}) ✓`;
+      if(noImage.length){
+        const msg = `Exported without a picture (it could not be fetched): ${noImage.join(", ")}`;
+        backupStatus.textContent += ". " + msg;
+        ctx.toast(msg, true);
+      }
     }catch(e){ backupStatus.textContent = "Backup failed: "+String(e); }
     backupBtn.disabled = false;
   }}, "Backup All Maps (JSON)");
@@ -3889,20 +4081,31 @@ function _export(ctx, active, maps_list){
   restoreBtn.addEventListener("click", async()=>{
     if(!_restoreData?.length) return;
     if(!confirm(`Restore ${_restoreData.length} map(s) into your system?`)) return;
-    restoreBtn.disabled = true; let ok=0, fail=0;
+    restoreBtn.disabled = true; let ok=0, fail=0; const noPic = [];
     for(let i=0;i<_restoreData.length;i++){
       const bm = _restoreData[i];
       restoreStatus.textContent = `Restoring ${i+1}/${_restoreData.length}: ${bm.name}…`;
       try{
+        // The store takes PNG only. A JPEG or WebP picture is redrawn as a
+        // PNG here; a picture that is missing or will not decode is left out
+        // and the map comes back without one (allow_no_image), with all its
+        // data, rather than not at all.
+        let b64 = bm.png_base64 || "", why = b64 ? "" : "the backup has no picture for it";
+        if(b64 && !b64.startsWith("iVBORw0KGgo")){
+          try{ b64 = await _backupImageToPng(b64, bm.image?.mime, bm.image?.width, bm.image?.height); }
+          catch(e2){ b64 = ""; why = "its picture in the backup could not be read"; }
+        }
         const up = await ctx.actions.mapsUpload({
           name: bm.name||"Restored Map",
           filename: bm.image?.filename||"map.png",
           mime: bm.image?.mime||"image/png",
           width: bm.image?.width||800,
           height: bm.image?.height||600,
-          png_base64: bm.png_base64||"",
+          png_base64: b64,
           floor_id: bm.floor_id||"",
+          allow_no_image: !b64,
         });
+        if(!b64) noPic.push(`${bm.name||"Restored Map"} (${why})`);
         // The upload says which map it created. This used to find it by name
         // — first match wins — so a backup holding two maps of the same name,
         // or two unnamed ones (both of which become "Restored Map"), wrote the
@@ -3939,6 +4142,9 @@ function _export(ctx, active, maps_list){
       }catch(e){ fail++; console.error("Restore failed for",bm.name,e); }
     }
     restoreStatus.textContent = `Restored ${ok} map${ok!==1?"s":""}${fail?` (${fail} failed)`:""} ✓`;
+    if(noPic.length){
+      restoreStatus.textContent += `. Restored without a picture: ${noPic.join(", ")}. Open each in Edit to re-upload its picture.`;
+    }
     restoreBtn.disabled = false; _restoreData = null; restoreBtn.style.display = "none";
     await ctx.actions.mapsRefresh();
   });
@@ -4107,7 +4313,7 @@ const BRIGHT_PRO_MANUAL = [
         "body": "Marking your real interior walls keeps the map an accurate record of your home. This needs the scale set first — without it, there's nowhere to store a wall's real position.",
         "steps": [
           "In the Edit tab, click RF Barriers.",
-          "Pick the material that matches the real wall: Open (Loft), Brick, Concrete, Metal, or Custom. Open marks a spot with no real wall — a loft railing or open doorway you still want on the map. In Live Aboard an open edge over a hall that rises past it (a mezzanine or gallery, with the hall given its full height in Floor Heights) gets a railing; anywhere else it stays an open gap.",
+          "Pick the material that matches the real wall: Open (Loft), Brick, Concrete, Metal, or Custom. Open marks a spot with no real wall — a loft railing or open doorway you still want on the map. In Live Aboard an open edge over a hall that rises past it (a mezzanine or gallery, with the floor kept at its normal height in Floor Heights and the hall given its full height with Rises to in Rooms) gets a railing; anywhere else it stays an open gap.",
           "Click along the wall on the photo, one point per corner or bend.",
           "Click Undo point to remove the last point.",
           "Double-click, or click Finish, once you have at least two points."
@@ -4586,7 +4792,8 @@ function _floorHeights(ctx){
     el("div",{class:"muted",style:"font-size:12px;margin-top:2px"},
       "Floor-to-floor is finished floor to the next finished floor — ceiling plus slab. It sets the vertical gap 3D positioning uses between floors. "+
       "Base elevation is derived by stacking those heights, so leave it blank unless stacking is wrong: a split level or a mezzanine. "+
-      "For a mezzanine, give the hall under it its full height (floor to roof) and the mezzanine its real base elevation: Live Aboard draws it inside the hall, under the hall's roof."),
+      "For a room taller than its floor (a double-height living room, a hall under a mezzanine or a gallery), keep the floor's normal height here and give that room its full height (floor to roof) in Rooms: select it, then Rises to. "+
+      "Live Aboard draws only that room's walls up to it; a gallery or mezzanine above it gets a railing on its open edge, and a mezzanine gets its real base elevation here and sits under the room's roof."),
   ]);
   if(!floors.length){
     wrap.appendChild(el("div",{class:"muted",style:"font-size:12px;margin-top:8px"},"No floors defined in Home Assistant yet."));
@@ -5542,6 +5749,11 @@ function _stack(ctx, maps, helpBtn){
       bakeCb.checked = bake;
       bakeCb.style.cssText = "width:14px;height:14px;accent-color:#52b788;cursor:pointer";
       bakeCb.onchange = () => { bake = bakeCb.checked; };
+      // Baking writes a new picture: an administrator's to do.
+      if (ctx.hass?.user?.is_admin === false) {
+        bake = false; bakeCb.checked = false; bakeCb.disabled = true;
+        bakeLabel.title = "Only an administrator can add or change floor plans.";
+      }
       bakeLabel.appendChild(bakeCb);
       bakeLabel.appendChild(document.createTextNode("Bake"));
       toolbar.appendChild(bakeLabel);
@@ -5900,7 +6112,7 @@ function _stack(ctx, maps, helpBtn){
                     ctx.toast("Baked (" + pairs + " pairs, residual " + resPct + "%)");
                   }
                 })
-                .catch(e => ctx.toast("Bake upload failed: " + e, true));
+                .catch(e => ctx.toast("Bake upload failed: " + (e?.message || e?.code || String(e)), true));
             } catch (de) { ctx.toast("Bake draw failed: " + de, true); }
           };
           bakeImg.onerror = () => ctx.toast("Bake failed — image load error", true);
@@ -8741,7 +8953,8 @@ function _lightsTab(ctx, maps, active) {
   const typeOverrides = (ctx.state.settings?.light_type_overrides && typeof ctx.state.settings.light_type_overrides === "object")
     ? ctx.state.settings.light_type_overrides : {};
   const lights = gatherLights(ctx.hass?.states || {}, reg.areaMap, shapeOverrides, tier, reg.platformMap, typeOverrides, reg.pairMap, reg.manufacturerMap,
-    undefined, false, ctx.state._motionReconnects);
+    undefined, false, ctx.state._motionReconnects,
+    new Set((ctx.state.model?.rf_barriers_m || []).map(b => b.linked_entity_id).filter(Boolean)));
 
   // Preview-as-panel: the exact sidebar interaction model, in place, on the
   // same camera — so "what will the household see" is one toggle away
@@ -9330,6 +9543,11 @@ function _lightsTab(ctx, maps, active) {
     // Layer chips (which class is in front) — a view choice of this tab.
     classFilter: mapState._lightsClass || "all",
     onClassFilter: (cls) => { mapState._lightsClass = cls; ctx.actions.renderRooms(); },
+    // The heatmap layer chip (atlas_heatmap.js) — a view choice of this tab, off by default.
+    // PadSpan Pro's, and only once it's turned on in Settings.
+    heatmap: _heatPro(ctx) ? (mapState._lightsHeatmap || null) : null,
+    onHeatmap: !_heatPro(ctx) ? null
+      : (kind) => { mapState._lightsHeatmap = kind || null; ctx.actions.renderRooms(); },
     // The multi-selection and the placement queue light up their index rows.
     selectedEids: paid ? new Set([...selSet, ...(mapState._selLight ? [mapState._selLight.eid] : [])]) : null,
     placeQueue: paid && !preview ? new Set(queue) : null,
@@ -9557,6 +9775,7 @@ function _lightsTab(ctx, maps, active) {
     showcase: mapState._lightsShowcase === undefined
       ? !!ctx.state.settings?.lights_showcase
       : !!mapState._lightsShowcase,
+    liveColours: ctx.state.settings?.atlas_live_colours === true,
     fitRooms: mapState._lightsFitRooms === undefined
       ? !!ctx.state.settings?.lights_fit_rooms
       : !!mapState._lightsFitRooms,
@@ -9586,6 +9805,8 @@ function _lightsTab(ctx, maps, active) {
     },
     // Day lifts the ground and mutes the pools; from the sun HA tracks.
     ambient: sunAmbient(ctx.hass),
+    // Alert pulse (lights_map.js safetyAlerts), as on the sidebar: only when it is on.
+    ...(ctx.state.settings && ctx.state.settings.atlas_alert_pulse === true ? { alertPulse: true } : {}),
     // Outdoor weather, the same overlay the Atlas sidebar draws (its own
     // slot, so the two surfaces never share an element). Like the sidebar,
     // nothing until the settings have answered.
@@ -9614,6 +9835,9 @@ function _lightsTab(ctx, maps, active) {
         ? { read: () => ctx.actions.wsCall("padspan_bright/live_snapshot").then((r) => (r && r.snapshot) || null),
             everyMs: 1000 * (Number(ctx.state.settings.presence_poll_interval_s) || 5) }
         : { snapshot: () => ctx.state.live?.snapshot || null },
+      // Trails: Traceback's own history, with live data only (sample data has none).
+      trails: ctx.state.dataMode !== "live" ? null
+        : { read: (msg) => { const { type, ...rest } = msg || {}; return ctx.actions.wsCall(type, rest); } },
       callWS: (msg) => { const { type, ...rest } = msg || {}; return ctx.actions.wsCall(type, rest); },
       // The 3D compass's Save: fabric_bearing_deg alone, straight to the wire
       // like the Settings box (settingsSet would re-render everything).
@@ -10298,6 +10522,29 @@ function _geomCentroid(g) {
   }
   return [g.cx_m || 0, g.cy_m || 0];
 }
+// How far (x, y) is from a room_geometry_m entry's outline, in metres.
+function _geomOutlineDist(g, x, y) {
+  if (g && g.type === "circle") return Math.abs(Math.hypot(x - (g.cx_m || 0), y - (g.cy_m || 0)) - (g.r_m || 0));
+  const P = (g && g.points_m) || [];
+  let best = Infinity;
+  for (let i = 0; i < P.length; i++) {
+    const a = P[i], b = P[(i + 1) % P.length], dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy;
+    const t = L2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L2)) : 0;
+    best = Math.min(best, Math.hypot(x - a[0] - dx * t, y - a[1] - dy * t));
+  }
+  return best;
+}
+/** The walls a rigid room move carries (2026-10-23): every barrier of the
+ *  floor drawn on a moved room's outline (an Open (Loft) edge, a door), all
+ *  its corners within 0.15 m of it, but not one that also runs along a room
+ *  left in place (a wall the two share stays). [{ i, pts }]: its index in
+ *  the draft and its corners before the move. */
+function _barriersOnRooms(barDraft, moved, others) {
+  const on = (G, p, tol) => G.some(g => _geomOutlineDist(g, p[0], p[1]) <= tol);
+  return barDraft.map((b, i) => ({ b, i })).filter(({ b }) => (b.points_m || []).length >= 2
+      && b.points_m.every(p => on(moved, p, 0.15)) && !b.points_m.every(p => on(others, p, 0.4)))
+    .map(({ b, i }) => ({ i, pts: b.points_m.map(p => [p[0], p[1]]) }));
+}
 
 // BLE-vs-motion/occupancy fusion badge for one occupancy_estimate room entry
 // (gap #14, best-in-class roadmap). `r.agreement` is computed server-side
@@ -10503,9 +10750,9 @@ function _roomsTab(ctx, maps) {
     card.appendChild(addRow);
   }
 
-  // ── Import a floorplan file (gap #7, best-in-class roadmap; tier 1 of 3:
-  // Sweet Home 3D today, RoomPlan JSON and image room-detection are future
-  // tiers) ─────────────────────────────────────────────────────────────
+  // ── Import a floorplan file (gap #7, best-in-class roadmap; tiers 1-2 of
+  // 3: Sweet Home 3D, and RoomPlan JSON behind its setting; image
+  // room-detection is the future tier) ───────────────────────────────
   // Parses to a CANDIDATE layout for THIS floor — nothing is written until
   // the user reviews and commits it via the same mechanism "Map
   // placements"/"Blended" already use below (the truth selector further
@@ -10514,10 +10761,14 @@ function _roomsTab(ctx, maps) {
   // average against the fabric.
   {
     const importRow = el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px" });
+    // Apple RoomPlan JSON (roomplan_import.py) only while its setting is on;
+    // off, the picker and its button are exactly the .sh3d ones.
+    const roomplanOn = ctx.state.settings?.roomplan_import_enabled === true;
     const fileInput = document.createElement("input");
-    fileInput.type = "file"; fileInput.accept = ".sh3d"; fileInput.style.display = "none";
+    fileInput.type = "file"; fileInput.accept = roomplanOn ? ".sh3d,.json" : ".sh3d"; fileInput.style.display = "none";
     const importStatus = el("span", { class: "muted", style: "font-size:11px" }, "");
-    const importBtn = el("button", { class: "btn inline" }, "📐 Import floorplan (.sh3d)");
+    const importBtn = el("button", { class: "btn inline" },
+      roomplanOn ? "📐 Import floorplan (.sh3d, RoomPlan .json)" : "📐 Import floorplan (.sh3d)");
     importBtn.addEventListener("click", () => fileInput.click());
     fileInput.addEventListener("change", async () => {
       const file = fileInput.files && fileInput.files[0];
@@ -10531,7 +10782,9 @@ function _roomsTab(ctx, maps) {
           fr.onerror = rej; fr.readAsDataURL(file);
         });
         importStatus.textContent = "Parsing…";
-        const parsed = await ctx.actions.wsCall("padspan_bright/floorplan_import_sh3d", { sh3d_base64: b64 });
+        const parsed = roomplanOn && /\.json$/i.test(file.name || "")
+          ? await ctx.actions.wsCall("padspan_bright/floorplan_import_roomplan", { roomplan_base64: b64 })
+          : await ctx.actions.wsCall("padspan_bright/floorplan_import_sh3d", { sh3d_base64: b64 });
         if (!parsed.rooms.length) {
           ctx.toast("No usable rooms found in that file" + (parsed.warnings.length ? ": " + parsed.warnings[0] : ""), true);
           importStatus.textContent = "";
@@ -10554,6 +10807,11 @@ function _roomsTab(ctx, maps) {
     importRow.appendChild(el("span", { class: "muted", style: "font-size:11px" },
       "Rooms come in as a candidate for this floor — review and edit below before committing."));
     card.appendChild(importRow);
+    // The robot-vacuum import only while its setting is on, and only for an
+    // admin (every vacuum_* command is admin-only). A robot already linked
+    // and showing live keeps its controls, so it can still be turned off.
+    const vacuumOn = ctx.state.settings?.vacuum_import_enabled === true || !!ctx.state.live?.snapshot?.vacuum;
+    if (VACUUM && vacuumOn && ctx.hass?.user?.is_admin === true) card.appendChild(VACUUM.vacuumImportBlock(ctx, floorId));
 
     const importedRaw = mapState._roomsImportedRaw;
     if (importedRaw && importedRaw.levels.length > 1) {
@@ -10754,7 +11012,7 @@ function _roomsTab(ctx, maps) {
           importedRooms[name] = { type: "poly", points_m: r.points_m };
         });
         candidates.imported = {
-          label: "Imported (SH3D)", rooms: importedRooms,
+          label: raw.source === "roomplan" ? "Imported (RoomPlan)" : "Imported (SH3D)", rooms: importedRooms,
           stats: { rooms: Object.keys(importedRooms).length, clusters: _roomClusterCount(Object.entries(importedRooms)) },
         };
       }
@@ -10838,7 +11096,7 @@ function _roomsTab(ctx, maps) {
     const options = [["fabric", "Fabric (saved)", fabricStats]];
     if (candidates.transforms) options.push(["transforms", "Map placements", candidates.transforms.stats]);
     if (candidates.blended) options.push(["blended", "Blended", candidates.blended.stats]);
-    if (candidates.imported) options.push(["imported", "Imported (SH3D)", candidates.imported.stats]);
+    if (candidates.imported) options.push(["imported", candidates.imported.label, candidates.imported.stats]);
     for (const [key, label, stats] of options) {
       selRow.appendChild(el("button", {
         class: "btn inline" + (truth === key ? " primary" : ""),
@@ -11040,6 +11298,7 @@ function _roomsTab(ctx, maps) {
     const strokeW = Math.max(bbox.width, bbox.height) * 0.004;
     const shapeEls = {};   // room -> svg element (for imperative updates mid-drag)
     const handleEls = [];  // [{room, idx|"c"|"r", elDiv}]
+    const barSetters = []; // barrier index -> redraw its line (a room move carries its walls)
 
     // Pointer px → metre delta, valid under any pan-zoom scale because the
     // layer rect already includes the CSS transform.
@@ -11141,12 +11400,19 @@ function _roomsTab(ctx, maps) {
         // selection as-is when grouped or deselects when solo.
         const snap = {};
         for (const rn of sel) snap[rn] = JSON.parse(JSON.stringify(draft[rn]));
+        // The walls drawn on its outline go with it (saved with the rest).
+        const carried = _barriersOnRooms(barDraft, Object.values(snap),
+          Object.keys(draft).filter(rn => !sel.has(rn)).map(rn => draft[rn]));
         runDrag(ev, (dxm, dym) => {
           for (const rn of sel) {
             const s = snap[rn], d = draft[rn];
             if (s.type === "poly") d.points_m = s.points_m.map(p => [Math.round((p[0]+dxm)*1000)/1000, Math.round((p[1]+dym)*1000)/1000]);
             else { d.cx_m = Math.round((s.cx_m+dxm)*1000)/1000; d.cy_m = Math.round((s.cy_m+dym)*1000)/1000; }
             applyShape(rn);
+          }
+          for (const c of carried) {
+            barDraft[c.i].points_m = c.pts.map(p => [Math.round((p[0]+dxm)*1000)/1000, Math.round((p[1]+dym)*1000)/1000]);
+            if (barSetters[c.i]) barSetters[c.i]();
           }
         }, (e) => {
           if (e.shiftKey) mapState._roomsSel = [...sel].filter(rn => rn !== room);
@@ -11330,6 +11596,7 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to place`,
       const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
       const setPts = () => line.setAttribute("points", bar.points_m.map(q => `${q[0]},${q[1]}`).join(" "));
       setPts();
+      barSetters[bi] = setPts;
       line.setAttribute("fill", "none");
       line.setAttribute("stroke", _barMoved(bi) ? "#fbbf24" : "#94a3b8");
       line.setAttribute("stroke-width", String(strokeW * 2.2));
@@ -11487,6 +11754,29 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
       tools.appendChild(el("button", { class: "btn inline", onclick: () => { mapState._roomsSel = []; ctx.actions.renderRooms(); } }, "Deselect"));
       if (sel.size === 1 && !previewing) {
         const only = [...sel][0];
+        // The room's own height (Live Aboard): from its floor to the top of
+        // its space, for a room taller than its floor (a double-height living
+        // room, a hall under a mezzanine). Blank: the floor's (Floor Heights).
+        // Saved on its own, at once, like Delete: drawing only, never positioning.
+        const flRec = (ctx.state.model?.floors || []).find(f => String(f.id) === String(floorId));
+        const flH = Number(flRec?.floor_to_floor_m) || 2.8;
+        const curH = ctx.state.model?.room_meta?.[only]?.height_m;
+        const hIn = el("input", { type: "number", min: "1.5", max: "30", step: "0.1", value: curH != null ? String(curH) : "",
+          placeholder: `floor's, ${flH}`, title: "For a room taller than its floor (a double-height living room, a hall under a mezzanine): floor to roof for this room only. A height at or below the floor's is drawn as the floor's. Blank = the floor's height (Floor Heights).",
+          style: "width:84px;background:#0a150e;color:#e2e8f0;border:1px solid #2d5a3d;border-radius:4px;padding:3px 6px" });
+        tools.appendChild(el("label", { style: "display:flex;gap:6px;align-items:center;color:#94a3b8" }, ["Rises to (m)", hIn]));
+        tools.appendChild(el("button", { class: "btn inline", onclick: async () => {
+          const raw = String(hIn.value || "").trim(), v = raw === "" ? null : parseFloat(raw);
+          if (v !== null && !(isFinite(v) && v >= 1.5 && v <= 30)) { ctx.toast("Enter a height in metres (1.5 to 30), or leave it blank for the floor's", true); return; }
+          try {
+            await ctx.actions.wsCall("padspan_bright/room_height_set", { room: only, height_m: v });
+            ctx.toast(v === null ? `"${only}" is as high as its floor`
+              : v <= flH ? `"${only}" is set to ${v} m, no taller than its floor (${flH} m), so it is drawn at the floor's height. Rises to is for a room taller than its floor.`
+              : `"${only}" rises to ${v} m`);
+            await ctx.actions.modelRefresh();
+            ctx.actions.renderRooms();
+          } catch (err) { ctx.toast("Height not saved: " + (err.message || err), true); }
+        } }, "Set height"));
         tools.appendChild(el("button", {
           class: "btn inline", style: "color:#f87171;border-color:#f8717140",
           onclick: async () => {
@@ -11760,4 +12050,10 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
   }
 
   return card;
+}
+
+// The Atlas heatmap chip: PadSpan Pro, and turned on in Settings → UI Structure → Atlas.
+function _heatPro(ctx){
+  const s = (ctx && ctx.state && ctx.state.settings) || {};
+  return String(s.tier || "").toLowerCase() === "pro" && s.atlas_heatmap_enabled === true;
 }

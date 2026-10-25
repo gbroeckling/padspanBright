@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.157";
-const BUILD_ID = "20261020T174200Z";
+const APP_VERSION = "0.38.166";
+const BUILD_ID = "20261025T083043Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -29,6 +29,10 @@ const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable
   await import(`./views/lights_map.js${new URL(import.meta.url).search}`);
 const { keepSubscribed } =
   await import(`./views/push_subscription.js${new URL(import.meta.url).search}`);
+// Wall mode's numbers. Optional: if the file can't load, the Atlas page runs
+// as an ordinary page (no wall mode) rather than not at all.
+const WALLS = await import(`./views/wall_scale.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: wall_scale failed to load", err); return null; });
 // Hide HA / Show HA beside Refresh, shared with the panel's toolbar. Optional:
 // without it the button is simply not there.
 const HA_SIDEBAR = await import(`./ha_sidebar.js${new URL(import.meta.url).search}`)
@@ -84,6 +88,9 @@ function staleBuildAction(pageBuild, backendBuild, kiosk, reloadedFor){
   const newer = backendBuild > pageBuild;
   return { newer, reload: newer && !!kiosk && reloadedFor !== backendBuild };
 }
+// Wall mode (?kiosk=1, 2026-10-21): how big to draw is views/wall_scale.js,
+// shared with Settings → UI Structure → Wall screens.
+
 // A wall screen: ?kiosk=1, or a window that fills the screen (Chrome
 // --kiosk, a full-screen tablet), which nobody is there to press Reload on.
 // The same test trial_offer.js newTabOk makes, the other way round.
@@ -133,6 +140,7 @@ const LS_HIDDEN = "padspan_bright_lights_hidden";
 // per browser, because that is where the hands are.
 const LS_COACH = "padspan_bright_lights_coach_seen";
 const LS_CLASS = "padspan_bright_lights_class";
+const LS_HEAT = "padspan_bright_lights_heatmap";
 // "Not now" on the trial card — per browser, like the coach mark: this panel
 // is often a wall screen, and an offer nobody there can act on stays hidden.
 const LS_TRIAL_HIDDEN = "padspan_bright_lights_trial_hidden";
@@ -151,6 +159,7 @@ class PadSpanLightsApp extends HTMLElement {
       _hidden:     this._loadHidden(),
       // Layer chips: which device class is in front. Remembered per browser.
       _classFilter: (()=>{ try{ return localStorage.getItem(LS_CLASS)||"all"; }catch(_){ return "all"; } })(),
+      _heatmap: (()=>{ try{ return localStorage.getItem(LS_HEAT)||null; }catch(_){ return null; } })(),
       _coachSeen:   (()=>{ try{ return localStorage.getItem(LS_COACH)==="1"; }catch(_){ return false; } })(),
       _trialHidden: (()=>{ try{ return localStorage.getItem(LS_TRIAL_HIDDEN)==="1"; }catch(_){ return false; } })(),
     };
@@ -180,7 +189,7 @@ class PadSpanLightsApp extends HTMLElement {
     try{ localStorage.setItem(LS_HIDDEN, JSON.stringify(arr)); }catch(_){}
     // Also persist to HA backend so it survives across devices/reboots
     if(this._hass){
-      try{ this._hass.callWS({ type:"padspan_bright/settings_set", lights_hidden: arr }); }catch(_){}
+      try{ this._ws({ type:"padspan_bright/settings_set", lights_hidden: arr }); }catch(_){}
     }
   }
 
@@ -230,7 +239,7 @@ class PadSpanLightsApp extends HTMLElement {
     // either assigns, and the first timer would be orphaned beyond reach.
     if(this._pollTimer) clearInterval(this._pollTimer);
     this._pollTimer = setInterval(()=>this._poll(), 5000);
-    if(!this._screenTimer) this._screenTimer = setTimeout(()=>this._screenReport(), Math.max(0, 150000 - (Date.now() - _PAGE_START)));
+    if(!this._screenTimer && !this._embedded) this._screenTimer = setTimeout(()=>this._screenReport(), Math.max(0, 150000 - (Date.now() - _PAGE_START)));
   }
 
   // What kind of screen this is and how a self-reload went (screenKind,
@@ -241,8 +250,19 @@ class PadSpanLightsApp extends HTMLElement {
     _screenReported = true;
     let kiosk = false;
     try { kiosk = new URLSearchParams(location.search).get("kiosk") === "1"; } catch(_) {}
-    const send = (name)=>{ Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:name })).catch(()=>{}); };
-    send("wall_screen:atlas:" + screenKind(kiosk));
+    const send = (name, screen)=>{ Promise.resolve(this._ws({ type:"padspan_bright/telemetry_event", event:name, ...(screen || {}) })).catch(()=>{}); };
+    // With the screen id (read, never made): its word in the report's list of screens.
+    let sid = null;
+    try { sid = localStorage.getItem("padspan_screen_id"); } catch(_) {}
+    send("wall_screen:atlas:" + screenKind(kiosk), /^[0-9a-f]{16}$/.test(sid || "") ? { screen: sid } : null);
+    // Wall mode (_wallOn): the scale it runs at, and whether the screen is
+    // kept awake (Wake Lock needs HTTPS or localhost).
+    if(this.hasAttribute("data-wall")){
+      const s = this._wallUi || 1;
+      send("wall_ui:" + (s < 1.25 ? "1" : s < 1.75 ? "1.5" : s < 2.5 ? "2" : s < 3.5 ? "3" : s < 5 ? "4" : "6"));
+      send("wall_fit:" + (this._wallFit === "room" ? "room" : "auto"));
+      send("wall_awake:" + (this._wakeLock && !this._wakeLock.released ? "on" : "off"));
+    }
     if(_reloadNote) send("wall_reload:atlas:" + _reloadNote);
   }
 
@@ -257,10 +277,11 @@ class PadSpanLightsApp extends HTMLElement {
     const active = this.shadowRoot && this.shadowRoot.activeElement;
     if(active && /^(INPUT|SELECT)$/.test(active.tagName)) return;
     if(this._pointerDown) return;
-    // The build check, every 10 minutes (staleBuildAction above).
-    if(Date.now() - (this._versionTs || 0) > 600000){
+    // The build check, every 10 minutes (staleBuildAction above). Not as the
+    // panel's Overview (_embedded): the panel runs its own.
+    if(!this._embedded && Date.now() - (this._versionTs || 0) > 600000){
       this._versionTs = Date.now();
-      this._hass.callWS({ type:"padspan_bright/version" }).then(vi => {
+      this._ws({ type:"padspan_bright/version" }).then(vi => {
         const be = (vi && typeof vi.build_id === "string") ? vi.build_id : "";
         let reloadedFor = "";
         try { reloadedFor = sessionStorage.getItem("padspan_reloaded_for") || ""; } catch(_) {}
@@ -300,7 +321,7 @@ class PadSpanLightsApp extends HTMLElement {
 
   async _loadModel(){
     try{
-      const res = await this._hass.callWS({ type:"padspan_bright/model_get" });
+      const res = await this._ws({ type:"padspan_bright/model_get" });
       // Keep the WHOLE model payload. This panel used to copy four fields by
       // name, so when placed light positions moved into the model the sidebar
       // silently kept showing every light auto-clustered at its room centre
@@ -331,7 +352,7 @@ class PadSpanLightsApp extends HTMLElement {
     // reachable — otherwise a transient websocket error makes this panel
     // render maps the Mapping tab hides, for the whole session.
     try{
-      const res = await this._hass.callWS({ type:"padspan_bright/settings_get" });
+      const res = await this._ws({ type:"padspan_bright/settings_get" });
       s = res?.settings || {};
     }catch(e){}
     try{
@@ -376,6 +397,10 @@ class PadSpanLightsApp extends HTMLElement {
       // Settings → UI Structure → "Show the Test emergency lighting button".
       // A failed settings fetch keeps the last answer.
       if (s.atlas_emergency_button !== undefined) this.state._emergButtonHidden = s.atlas_emergency_button === false;
+      if (s.atlas_live_colours !== undefined) this.state._liveColours = s.atlas_live_colours === true;
+      if (s.atlas_heatmap_enabled !== undefined) this.state._heatmapOn = s.atlas_heatmap_enabled === true;
+      // Settings → UI Structure → Atlas → Alert pulse, normally off.
+      this.state._alertPulse = s.atlas_alert_pulse === true;
       // Outdoor weather (Settings → UI Structure → Atlas), field by field. A
       // failed fetch keeps the last answer; before any answer, no weather.
       if (s.atlas_weather_enabled !== undefined) {
@@ -393,7 +418,9 @@ class PadSpanLightsApp extends HTMLElement {
         this.state._house3d = { atlas_3d_enabled: s.atlas_3d_enabled, atlas_3d_quality: s.atlas_3d_quality,
           fabric_bearing_deg: s.fabric_bearing_deg, atlas_3d_weather: s.atlas_3d_weather, atlas_3d_showcase: s.atlas_3d_showcase, atlas_3d_look: s.atlas_3d_look,
           atlas_3d_people: s.atlas_3d_people, presence_poll_interval_s: s.presence_poll_interval_s, light_shapes: s.light_shapes,
-          atlas_3d_tags: s.atlas_3d_tags, atlas_3d_carries: s.atlas_3d_carries, atlas_3d_home_idle_s: s.atlas_3d_home_idle_s };
+          atlas_3d_tags: s.atlas_3d_tags, atlas_3d_carries: s.atlas_3d_carries, atlas_3d_home_idle_s: s.atlas_3d_home_idle_s,
+          atlas_3d_director_people: s.atlas_3d_director_people,
+          atlas_3d_director: s.atlas_3d_director };
       }
       this.state._wholeHousePresets = Array.isArray(s.whole_house_presets) ? s.whole_house_presets : [];
       // Layout v2 (Garry, 2026-09-21) is a house-wide trial toggle, set
@@ -402,6 +429,9 @@ class PadSpanLightsApp extends HTMLElement {
       // (host.displayMode below): edge-to-edge map, a slim rail, no
       // onLayoutV2 handed to the host, so no toggle button shows here.
       this.state._atlasLayoutV2 = !!s.atlas_layout_v2;
+      this.state._wall = { wall_screen_in: s.wall_screen_in, wall_distance_m: s.wall_distance_m, wall_text_arcmin: s.wall_text_arcmin,
+                           wall_night_dim: s.wall_night_dim, wall_pixel_shift: s.wall_pixel_shift,
+                           wall_floor_cycle_s: s.wall_floor_cycle_s, wall_fully: s.wall_fully };
       // Vacation Mode's own state — read here too now that the banner lives
       // in the shared Atlas card (both hosts), not panel.js's global chrome.
       this.state._vacationModeEnabled = !!s.vacation_mode_enabled;
@@ -455,7 +485,7 @@ class PadSpanLightsApp extends HTMLElement {
     // pre-tap state over what the action returned.
     const seq = this._emergSeq = (this._emergSeq || 0) + 1;
     let r = null;
-    try{ r = await this._hass.callWS({ type:"padspan_bright/emergency_status" }); }
+    try{ r = await this._ws({ type:"padspan_bright/emergency_status" }); }
     catch(_){ r = null; }
     if(seq !== this._emergSeq || this._emergBusy) return;
     this.state._emerg = r;
@@ -481,7 +511,7 @@ class PadSpanLightsApp extends HTMLElement {
     this._emergSeq = (this._emergSeq || 0) + 1;
     this._render();                                  // the busy state on the button
     try{
-      const r = await this._hass.callWS(msg);
+      const r = await this._ws(msg);
       this._emergApply(r);
       const name = {};
       for(const m of (r && r.members) || []) name[m.entity_id] = m.name || m.entity_id;
@@ -689,7 +719,7 @@ class PadSpanLightsApp extends HTMLElement {
           ...(m.entity_id.startsWith("light.") && !dead ? [el("button",{style: act + ";padding:6px 0;width:38px", title:"Brightness, colour and effects",
             onclick:()=>{
               // Adjusting a light during a test counts as setting it by hand.
-              if(active) this._hass.callWS({ type:"padspan_bright/emergency_member", entity_id:m.entity_id })
+              if(active) this._ws({ type:"padspan_bright/emergency_member", entity_id:m.entity_id })
                 .then(r=>{ this._emergApply(r); }).catch(()=>{});
               close();
               this._openWledDetail(m.entity_id);
@@ -713,7 +743,7 @@ class PadSpanLightsApp extends HTMLElement {
       // message omits it, and echoing "live" here would make Save view flip
       // a sample-mode install to live as a hidden side effect (same reason
       // panel.js's settingsSet omits it).
-      await this._hass.callWS({
+      await this._ws({
         type:                    "padspan_bright/settings_set",
         overview_iso_floor_gap:  this._view.floorGap,
         overview_iso_horiz_gap:  this._view.horizGap,
@@ -734,7 +764,7 @@ class PadSpanLightsApp extends HTMLElement {
   // The revert shake: a short wobble on the marker whose tap failed.
   _shake(eid){
     requestAnimationFrame(()=>{
-      const g=this.shadowRoot && this.shadowRoot.querySelector(`.lhex[data-eid="${String(eid).replace(/"/g,'\\"')}"]`);
+      const g=this.shadowRoot && this.shadowRoot.querySelector(`.lhex[data-eid="${CSS.escape(String(eid))}"]`);
       if(!g) return;
       g.classList.add("lv-shake");
       setTimeout(()=>g.classList.remove("lv-shake"), 500);
@@ -787,7 +817,7 @@ class PadSpanLightsApp extends HTMLElement {
       doorInvertByEid: doorInvertOf(this.state.model),
       floodLatches: this.state._floodLatches || {},
       onFloodReset: (eid)=>{
-        this._hass.callWS({ type: "padspan_bright/flood_reset", entity_id: eid })
+        this._ws({ type: "padspan_bright/flood_reset", entity_id: eid })
           .then(()=>this._render())
           .catch((e)=>this._toast("Could not reset: " + String(e), true));
       },
@@ -807,6 +837,7 @@ class PadSpanLightsApp extends HTMLElement {
   }
 
   _buildUI(){
+    this._wallOn();
     const root=el("div",{});
 
     // ── Header ────────────────────────────────────────────────────────────────
@@ -826,7 +857,7 @@ class PadSpanLightsApp extends HTMLElement {
       ...(HA_SIDEBAR ? [this._haBtn = el("button",{class:"lv-act",id:"haSide","aria-pressed":String(HA_SIDEBAR.haHidden(this._hass)),
         title:"Hide or show Home Assistant's sidebar, on this browser only",onclick:()=>{
           const word = HA_SIDEBAR.toggleHaSidebar(this, this._hass);
-          if(this.state._telemetryOn && this._hass) Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:word })).catch(()=>{});
+          if(this.state._telemetryOn && this._hass) Promise.resolve(this._ws({ type:"padspan_bright/telemetry_event", event:word })).catch(()=>{});
         }}, HA_SIDEBAR.haLabel(this._hass))] : []),
       el("button",{class:"lv-act",onclick:()=>{
         this._regStore.reg=null; this._boot().then(()=>this._render());
@@ -855,7 +886,8 @@ class PadSpanLightsApp extends HTMLElement {
     // Which WLED lights PadSpan runs (exact look): taps, the room sheet and
     // Whole House Presets route them through padspan_bright/wled_power.
     ensureExactDevices(this._hass, ()=>this._render());
-    const lights = gatherLights(this._hass?.states||{}, reg.areaMap, this.state._shapeOverrides, this.state._tier, reg.platformMap, this.state._typeOverrides, reg.pairMap, reg.manufacturerMap, undefined, false, this.state._motionReconnects);
+    const lights = gatherLights(this._hass?.states||{}, reg.areaMap, this.state._shapeOverrides, this.state._tier, reg.platformMap, this.state._typeOverrides, reg.pairMap, reg.manufacturerMap, undefined, false, this.state._motionReconnects,
+      new Set((this.state.model?.rf_barriers_m || []).map(b => b.linked_entity_id).filter(Boolean)));
 
     if(!lights.length){
       root.appendChild(el("div",{class:"muted",style:"padding:8px"},"No light entities found."));
@@ -895,7 +927,13 @@ class PadSpanLightsApp extends HTMLElement {
       // builder's own proTier, not the bright-or-pro `paid` above.
       layoutV2: String(this.state._tier||"").toLowerCase()==="pro" && !!this.state._atlasLayoutV2,
       displayMode: true,
+      // Wall mode (?kiosk=1, _wallOn): the whole house fits the screen.
+      wall: this.hasAttribute("data-wall"),
+      // The drawing already grows with the screen (a 4K wall draws it twice a
+      // 1080p one); room names take the rest of the wall's scale.
+      wallLabel: ()=>Math.max(1, (this._wallUi || 1) / (this._wallPx || 1)),
       showcase: !!this.state._showcase,
+      liveColours: !!this.state._liveColours,
       showcaseTheme: this.state._showcaseTheme || "classic",
       fitRooms: !!this.state._fitRooms,
       isolux: !!this.state._isolux,
@@ -926,7 +964,7 @@ class PadSpanLightsApp extends HTMLElement {
         const cap = captureWholeHouse(lights, this._hass?.states || {});
         const rest = (this.state._wholeHousePresets || []).filter((p) => p.name !== name);
         const preset = { name, created_at: Date.now() / 1000, entities: cap.entities };
-        try { await this._hass.callWS({ type: "padspan_bright/settings_set", whole_house_presets: [...rest, preset] }); }
+        try { await this._ws({ type: "padspan_bright/settings_set", whole_house_presets: [...rest, preset] }); }
         catch (e) { return null; }
         this.state._wholeHousePresets = [...rest, preset];
         this._render();
@@ -939,7 +977,7 @@ class PadSpanLightsApp extends HTMLElement {
       },
       onWholeHouseDelete: async (name) => {
         const rest = (this.state._wholeHousePresets || []).filter((p) => p.name !== name);
-        try { await this._hass.callWS({ type: "padspan_bright/settings_set", whole_house_presets: rest }); }
+        try { await this._ws({ type: "padspan_bright/settings_set", whole_house_presets: rest }); }
         catch (e) { return; }
         this.state._wholeHousePresets = rest;
         this._render();
@@ -953,7 +991,7 @@ class PadSpanLightsApp extends HTMLElement {
       // renderer rather than panel.js's global chrome).
       onVacationModeEnable: async () => {
         if (!this._hass) return false;
-        try { await this._hass.callWS({ type: "padspan_bright/settings_set", vacation_mode_enabled: true }); }
+        try { await this._ws({ type: "padspan_bright/settings_set", vacation_mode_enabled: true }); }
         catch (e) { return false; }
         this.state._vacationModeEnabled = true;
         this._render();
@@ -963,7 +1001,7 @@ class PadSpanLightsApp extends HTMLElement {
       vacationModeIntensity: this.state._vacationModeIntensity || 100,
       onVacationModeDisable: async () => {
         if (!this._hass) return false;
-        try { await this._hass.callWS({ type: "padspan_bright/settings_set", vacation_mode_enabled: false }); }
+        try { await this._ws({ type: "padspan_bright/settings_set", vacation_mode_enabled: false }); }
         catch (e) { this._toast("Could not disable Vacation Mode: " + String(e), true); return false; }
         this.state._vacationModeEnabled = false;
         this._render();
@@ -971,7 +1009,7 @@ class PadSpanLightsApp extends HTMLElement {
       },
       onVacationModeIntensity: async (pct) => {
         this.state._vacationModeIntensity = pct;
-        try { await this._hass.callWS({ type: "padspan_bright/settings_set", vacation_mode_intensity: pct }); }
+        try { await this._ws({ type: "padspan_bright/settings_set", vacation_mode_intensity: pct }); }
         catch (e) { this._toast("Could not change the intensity: " + String(e), true); }
       },
       onApplyPreset: async (values) => {
@@ -996,13 +1034,15 @@ class PadSpanLightsApp extends HTMLElement {
         if (values.overview_iso_horiz_gap !== undefined) this._view.horizGap = values.overview_iso_horiz_gap;
         if (values.overview_iso_focus !== undefined) this._view.focusIdx = values.overview_iso_focus ?? 0;
         if (values.overview_iso_zoom !== undefined) this._view.zoom = values.overview_iso_zoom;
-        try { await this._hass.callWS({ type: "padspan_bright/settings_set", ...values }); }
+        try { await this._ws({ type: "padspan_bright/settings_set", ...values }); }
         catch (e) { this._toast("Could not apply the preset: " + String(e), true); }
         this._render();
       },
       // Same read-only reflection as the modes above — no onHideDeviceCodes,
       // this panel never edits it, only displays what Mapping -> Lights set.
       hideDeviceCodes: !!this.state._hideDeviceCodes,
+      // Alert pulse (lights_map.js safetyAlerts): only when it is on.
+      ...(this.state._alertPulse ? { alertPulse: true } : {}),
       ambient: sunAmbient(this._hass),
       // Rain or snow outside the floor plates, from the states this panel
       // already holds — nothing extra is asked of Home Assistant.
@@ -1013,7 +1053,7 @@ class PadSpanLightsApp extends HTMLElement {
         // while the report is on (the trial card's rule).
         telemetry: (name)=>{
           if(!this.state._telemetryOn || !this._hass) return;
-          Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:String(name) })).catch(()=>{});
+          Promise.resolve(this._ws({ type:"padspan_bright/telemetry_event", event:String(name) })).catch(()=>{});
         },
       } : null,
       // This screen is the house map (views/atlas_screen.js): zoomed in, the
@@ -1032,10 +1072,12 @@ class PadSpanLightsApp extends HTMLElement {
         mapOnly: true,
         // The sun's position (sun.sun) and the place (hass.config): no new calls.
         states: this._hass?.states || {}, config: this._hass?.config || null,
+        // The director (live_aboard_director.js): the states as they are now.
+        liveStates: ()=>this._hass?.states || {},
         // The 3D compass's Save: the GPS Bridge's own bearing,
         // fabric_bearing_deg, written alone and kept here at once.
         saveNorth: async (b)=>{
-          const r = await this._hass.callWS({ type:"padspan_bright/settings_set", fabric_bearing_deg: b });
+          const r = await this._ws({ type:"padspan_bright/settings_set", fabric_bearing_deg: b });
           const v = Number(r && r.settings && r.settings.fabric_bearing_deg);
           this.state._house3d = { ...(this.state._house3d || {}), fabric_bearing_deg: Number.isFinite(v) ? v : b };
           return true;
@@ -1046,7 +1088,7 @@ class PadSpanLightsApp extends HTMLElement {
         // administrator's, as in Settings, saved alone and drawn at once.
         admin: !!this._hass?.user?.is_admin,
         saveSetting: async (key, v)=>{
-          await this._hass.callWS({ type:"padspan_bright/settings_set", [key]: v });
+          await this._ws({ type:"padspan_bright/settings_set", [key]: v });
           this.state._house3d = { ...(this.state._house3d || {}), [key]: v };
           this._render();
           return true;
@@ -1060,6 +1102,9 @@ class PadSpanLightsApp extends HTMLElement {
         // is on and the view shows, never more often than Overview polls.
         people: { read: ()=>this._hass.callWS({ type:"padspan_bright/live_snapshot" }).then(r=>(r && r.snapshot) || null),
           everyMs: 1000 * (Number(this.state._house3d.presence_poll_interval_s) || 5) },
+        // Trails: Traceback's own history (padspan_bright/traceback_get), read
+        // by the view only while a screen has them on.
+        trails: { read: (msg)=>this._hass.callWS(msg) },
         emergency: this.state._emerg && this.state._emerg.test && this.state._emerg.test.active
           ? (this.state._emerg.members || []).map(m => m && m.entity_id).filter(Boolean) : null,
         // The 3D file (doors and windows drawn in 3D, heights): read when
@@ -1067,7 +1112,7 @@ class PadSpanLightsApp extends HTMLElement {
         load: ()=>this._hass.callWS({ type:"padspan_bright/house3d_get" }),
         telemetry: (name)=>{
           if(!this.state._telemetryOn || !this._hass) return;
-          Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:String(name) })).catch(()=>{});
+          Promise.resolve(this._ws({ type:"padspan_bright/telemetry_event", event:String(name) })).catch(()=>{});
         },
       } : null,
       // Same filter as the builder, from the same rule, over the same
@@ -1090,7 +1135,7 @@ class PadSpanLightsApp extends HTMLElement {
       doorInvertByEid: doorInvertOf(this.state.model),
       view: this._view,
       saveView: ()=>this._saveSettings(),
-      callWS: (msg)=>this._hass.callWS(msg),
+      callWS: (msg)=>this._ws(msg),
       toast: (m,isErr)=>this._toast(m,isErr),
       // The use surface — wireUseSurface (shared). The renderer is asked for the
       // use-mode ergonomics: the code as its own tap target (codeChip), a
@@ -1105,6 +1150,17 @@ class PadSpanLightsApp extends HTMLElement {
       onClassFilter: (cls)=>{
         this.state._classFilter=cls;
         try{ localStorage.setItem(LS_CLASS, cls); }catch(_){}
+        this._render();
+      },
+      // The heatmap layer chip (atlas_heatmap.js): off by default, this
+      // browser remembers the last kind like the class filter above.
+      // Only once it's turned on in Settings: until then no chip at all.
+      // PadSpan Pro's (Garry, 2026-10-22), and only once it's turned on in
+      // Settings: below Pro, or off, no chip at all.
+      heatmap: this._heatmapPro() ? this.state._heatmap : null,
+      onHeatmap: !this._heatmapPro() ? null : (kind)=>{
+        this.state._heatmap=kind||null;
+        try{ if(kind) localStorage.setItem(LS_HEAT, kind); else localStorage.removeItem(LS_HEAT); }catch(_){}
         this._render();
       },
       onHexesBuilt: (isoDiv)=>{
@@ -1170,7 +1226,7 @@ class PadSpanLightsApp extends HTMLElement {
         const next = { ...this.state._typeOverrides };
         if (!kind || kind === "auto") delete next[eid]; else next[eid] = kind;
         this.state._typeOverrides = next;
-        try { await this._hass.callWS({ type: "padspan_bright/settings_set", light_type_overrides: next }); }
+        try { await this._ws({ type: "padspan_bright/settings_set", light_type_overrides: next }); }
         catch (e) { this._toast("Could not save the type override: " + String(e), true); }
         this._render();
       } : null,
@@ -1186,7 +1242,7 @@ class PadSpanLightsApp extends HTMLElement {
       onTableHealthFilter: (on)=>{ this.state._tableHealthFilter=on; this._render(); },
       floodLatches: this.state._floodLatches || {},
       onFloodReset: (eid)=>{
-        this._hass.callWS({ type: "padspan_bright/flood_reset", entity_id: eid })
+        this._ws({ type: "padspan_bright/flood_reset", entity_id: eid })
           .then(()=>this._render())
           .catch((e)=>this._toast("Could not reset: " + String(e), true));
       },
@@ -1221,10 +1277,10 @@ class PadSpanLightsApp extends HTMLElement {
       el,
       settings: this.state._trialSettings,
       isAdmin: this._isAdmin(),
-      callWS: (type, data)=>this._hass.callWS({ type, ...(data||{}) }),
+      callWS: (type, data)=>this._ws({ type, ...(data||{}) }),
       telemetry: (name)=>{
         if(!this.state._telemetryOn) return;
-        this._hass.callWS({ type:"padspan_bright/telemetry_event", event:String(name) }).catch(()=>{});
+        this._ws({ type:"padspan_bright/telemetry_event", event:String(name) }).catch(()=>{});
       },
       toast: (m,e)=>this._toast(m,e),
       rerender: ()=>this._render(),
@@ -1240,7 +1296,23 @@ class PadSpanLightsApp extends HTMLElement {
     });
   }
 
+  // Every PadSpan command this page sends goes through here. Enhanced
+  // security is on and this person is not an admin
+  // (ws_common.require_admin_if_enhanced): say so plainly, the way panel.js
+  // does, and keep that message up over the caller's own "could not" toast.
+  // Anything else is passed on untouched.
+  _ws(msg){
+    return Promise.resolve(this._hass.callWS(msg)).catch(err => {
+      if(err && err.code === "admin_only"){
+        this._toast(err.message || "Only an admin can change this while Enhanced security is on");
+        this._adminOnlyToastUntil = Date.now() + 4500;
+      }
+      throw err;
+    });
+  }
+
   _toast(msg, isError=false, durationMs=null){
+    if(isError && this._adminOnlyToastUntil && Date.now() < this._adminOnlyToastUntil) return;
     const t=document.createElement("div");
     t.textContent=msg;
     t.style.cssText=`position:fixed;bottom:24px;left:50%;transform:translateX(-50%);`+
@@ -1281,7 +1353,7 @@ class PadSpanLightsApp extends HTMLElement {
         try{
           if(!UI_ERROR || !this._hass) return;
           UI_ERROR.reportUiError(ev, "atlas", (name)=>{
-            Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:name })).catch(()=>{});
+            Promise.resolve(this._ws({ type:"padspan_bright/telemetry_event", event:name })).catch(()=>{});
           });
         }catch(_e){ /* the error reporter must never be the error */ }
       };
@@ -1298,17 +1370,37 @@ class PadSpanLightsApp extends HTMLElement {
         this._clientPerf = m.startClientPerf({
           root: this.shadowRoot, viewClass: ()=>"atlas",
           enabled: ()=>!!this.state._telemetryOn && !!this._hass,
-          send: (name)=>{ Promise.resolve(this._hass.callWS({ type:"padspan_bright/telemetry_event", event:name })).catch(()=>{}); },
+          send: (name, extra)=>{
+            const screen = extra && typeof extra.screen === "string" ? { screen: extra.screen } : {};
+            Promise.resolve(this._ws({ type:"padspan_bright/telemetry_event", event:name, ...screen })).catch(()=>{});
+          },
         });
       }).catch(()=>{ this._clientPerfLoading = null; });
     }
     this.style.display="block";
+    this._wallOn();
     this.shadowRoot.innerHTML=`
       <link rel="stylesheet" href="/padspan_bright_static/padspan-bright/styles.css?v=${APP_VERSION}&b=${BUILD_ID}">
       <style>
         :host{display:block;min-height:100vh;background:#0a150e;color:#e2e8f0;accent-color:#52b788;
               font-family:Inter,system-ui,Arial,sans-serif;box-sizing:border-box}
         #content{padding:16px}
+        /* Wall mode (?kiosk=1): no header, the map card the whole screen,
+           its controls scaled by --wall-ui (lv- rules in styles.css). */
+        :host([data-wall]){overflow:clip}
+        :host([data-wall]) #content{padding:0}
+        :host([data-wall]) .lv-hero, :host([data-wall]) .lv-coach{display:none}
+        /* The wall is the map: the lights' table under it stays on the desk's
+           Atlas (a wall could scroll down to it, with a scrollbar on show). */
+        :host([data-wall]) .lv-tablecard.lv-index{display:none}
+        /* Nobody at the wall: the controls floating over the map and the 3D
+           house fade away (they come back with a touch, a mouse or a key),
+           so a big wall shows the house, not its buttons. */
+        :host([data-wall]) .la3d-bar, :host([data-wall]) .la3d-compass, :host([data-wall]) .la3d-hud,
+        :host([data-wall]) .lv-alone-anchor > button{transition:opacity .6s ease}
+        :host([data-wall]:not([data-wall-active])) .la3d-bar, :host([data-wall]:not([data-wall-active])) .la3d-compass,
+        :host([data-wall]:not([data-wall-active])) .la3d-hud,
+        :host([data-wall]:not([data-wall-active])) .lv-alone-anchor > button{opacity:0;pointer-events:none}
       </style>
       <div id="content"></div>
     `;
@@ -1322,8 +1414,228 @@ class PadSpanLightsApp extends HTMLElement {
     }
   }
 
+  // Wall mode: ?kiosk=1 on the sidebar Atlas (not the Atlas shown as the
+  // panel's Overview, which lives inside the panel's own page), with the new
+  // layout's rail (PadSpan Pro): the fitted map is that layout's. A classic
+  // layout on ?kiosk=1 stays exactly as it was. Asked again at every build,
+  // since the tier and layout arrive with the settings.
+  _wallOn(){
+    let kiosk = false;
+    try { kiosk = new URLSearchParams(location.search).get("kiosk") === "1"; } catch(_) {}
+    const v2 = String(this.state?._tier || "").toLowerCase() === "pro" && !!this.state?._atlasLayoutV2;
+    if(!kiosk || this._embedded || !v2 || !WALLS){
+      // Also when a wall stops being one without a reload (the layout or
+      // the tier changed elsewhere): nothing of the wall is left behind.
+      this.removeAttribute("data-wall");
+      this._wallOff();
+      this._wallNight(); this._wallShift(); this._wallCycle();
+      return;
+    }
+    this.setAttribute("data-wall", "");
+    const size = ()=>{
+      const p = WALLS.wallParams(location.search, this.state?._wall);
+      const s = WALLS.wallScale(window.innerWidth, window.innerHeight, { ...p, dpr: window.devicePixelRatio || 1 });
+      this.style.setProperty("--wall-ui", String(s));
+      // How much bigger the drawing itself is than on 1080p: the rain goes with it.
+      this._wallPx = Math.max(1, Math.min(window.innerWidth / 1920, window.innerHeight / 1080));
+      this.style.setProperty("--wall-px", String(Math.round(this._wallPx * 100) / 100));
+      // The buttons stop at finger size (wall_scale.js controlScale).
+      this.style.setProperty("--wall-ctl", String(WALLS.controlScale(s, p.inches, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1)));
+      this._wallUi = s;
+      this._wallFit = p.inches > 0 ? "room" : "auto";
+    };
+    size();
+    this._wallNight();
+    this._wallShift();
+    this._wallCycle();
+    // Someone at the wall: its floating controls show for 30 s after the
+    // last touch, mouse move or key, then fade (the CSS above).
+    if(!this._wallWake){
+      const wake = ()=>{
+        this.setAttribute("data-wall-active", "");
+        clearTimeout(this._wallIdleTimer);
+        this._wallIdleTimer = setTimeout(()=>this.removeAttribute("data-wall-active"), 30000);
+      };
+      this._wallWake = wake;
+      for(const ev of ["pointerdown", "pointermove", "keydown", "wheel"]) window.addEventListener(ev, wake, { passive: true });
+      // The first touch on a faded wall brings the controls back, and where
+      // it lands on one of them (hidden, so it would reach whatever is under
+      // it: a light, the 3D house) it does nothing else. Anywhere else (the
+      // rail, a light, the map, all still showing) it works as a tap. A mouse
+      // has already woken it by moving.
+      const FADED = ".la3d-bar, .la3d-compass, .la3d-hud, .lv-alone-anchor > button";
+      const onFaded = (x, y)=>[...(this.shadowRoot ? this.shadowRoot.querySelectorAll(FADED) : [])].some(el=>{
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && x >= r.left - 8 && x <= r.right + 8 && y >= r.top - 8 && y <= r.bottom + 8;
+      });
+      this._wallTap = (e)=>{
+        if(e.type === "pointerdown"){
+          if(this.hasAttribute("data-wall-active")) return;
+          wake();
+          if(!onFaded(e.clientX, e.clientY)) return;
+          e.stopPropagation(); e.preventDefault();
+          this._wallTapAt = Date.now();
+        } else if(Date.now() - (this._wallTapAt || 0) < 800){
+          e.stopPropagation(); e.preventDefault();
+        }
+      };
+      window.addEventListener("pointerdown", this._wallTap, true);
+      window.addEventListener("click", this._wallTap, true);
+      wake();
+    }
+    if(!this._wallResize){ this._wallResize = size; window.addEventListener("resize", size); }
+    // Keep the screen on (Wake Lock): a wall nobody touches must not go to
+    // sleep. Only on HTTPS or localhost; elsewhere the browser's own setting
+    // decides, as before. Asked again when the page is shown again.
+    const ask = ()=>{
+      if(!navigator.wakeLock || document.visibilityState !== "visible" || (this._wakeLock && !this._wakeLock.released)) return;
+      navigator.wakeLock.request("screen").then(l=>{ this._wakeLock = l; }).catch(()=>{});
+    };
+    ask();
+    if(!this._wakeVis){ this._wakeVis = ask; document.addEventListener("visibilitychange", ask); }
+  }
+
+  // Night dimming on a wall: after sunset the whole picture is that much
+  // darker (an overlay: cheaper than a filter over a 3D view). Asked at every
+  // build, so it follows the sun with the poll.
+  _wallNight(){
+    const r = this.shadowRoot;
+    if(!r) return;
+    const p = this.hasAttribute("data-wall") ? WALLS.wallParams(location.search, this.state?._wall) : null;
+    const dim = p ? p.dim : 0;
+    const night = this._hass?.states?.["sun.sun"]?.state === "below_horizon";
+    let d = r.querySelector("#wallDim");
+    // Inside Fully Kiosk, with "Use Fully Kiosk" on: the screen itself is
+    // turned down (its backlight, darker than any overlay), and its motion
+    // detection turns a sleeping screen back on.
+    const fully = p && p.fully ? this._fully() : null;
+    this._wallFullyMotion(fully);
+    if(fully){
+      if(d) d.remove();
+      try {
+        if(dim > 0 && night){
+          if(this._fullyDay == null) this._fullyDay = Number(fully.getScreenBrightness());
+          const want = WALLS.fullyBrightness(this._fullyDay, dim);
+          if(want !== this._fullyAt){ fully.setScreenBrightness(want); this._fullyAt = want; }
+        } else this._fullyRestore();
+      } catch(_) {}
+      return;
+    }
+    this._fullyRestore();
+    if(!(dim > 0 && night)){ if(d) d.remove(); return; }
+    if(!d){
+      d = document.createElement("div"); d.id = "wallDim";
+      d.style.cssText = "position:fixed;left:0;top:0;right:0;bottom:0;background:#000;pointer-events:none;z-index:2147483000;transition:opacity 4s";
+      r.appendChild(d);
+    }
+    d.style.opacity = String(dim);
+  }
+  // Fully Kiosk Browser's JavaScript interface, when this page runs in it
+  // (and its "Enable JavaScript Interface" is on); null anywhere else.
+  _fully(){
+    const f = typeof window !== "undefined" ? window.fully : null;
+    return f && typeof f.setScreenBrightness === "function" && typeof f.getScreenBrightness === "function" ? f : null;
+  }
+  // The day's brightness back, after a night turned Fully's screen down.
+  _fullyRestore(){
+    if(this._fullyDay == null) return;
+    const f = this._fully();
+    try { if(f) f.setScreenBrightness(this._fullyDay > 0 ? Math.round(this._fullyDay) : -1); } catch(_) {}
+    this._fullyDay = null; this._fullyAt = null;
+  }
+  // Fully's motion detection (its camera; on in Fully's own settings): motion
+  // in front of a wall whose screen is off turns it back on. Fully keeps a
+  // binding for the page's life, so it is made once and asks this hook.
+  _wallFullyMotion(fully){
+    if(!fully || typeof fully.bind !== "function"){
+      if(window.__padspanWallMotion === this._motionHook) window.__padspanWallMotion = null;
+      return;
+    }
+    if(!this._motionHook){
+      this._motionHook = ()=>{
+        const f = this._fully();
+        try { if(f && typeof f.getScreenOn === "function" && !f.getScreenOn()) f.turnScreenOn(); } catch(_) {}
+      };
+    }
+    window.__padspanWallMotion = this._motionHook;
+    if(!window.__padspanWallMotionBound){
+      try { fully.bind("onMotion", "window.__padspanWallMotion && window.__padspanWallMotion()"); window.__padspanWallMotionBound = true; } catch(_) {}
+    }
+  }
+  // A wall nobody is touching can show its floors in turn, every
+  // wall_floor_cycle_s seconds (off unless set): All, then each floor
+  // (lights_map.js view.wallStops). It waits while someone uses the wall
+  // (its controls are showing) and while the page is hidden.
+  _wallCycle(){
+    const s = this.hasAttribute("data-wall") ? WALLS.wallParams(location.search, this.state?._wall).cycle : 0;
+    if(s === this._cycleS) return;
+    if(this._cycleTimer){ clearInterval(this._cycleTimer); this._cycleTimer = null; }
+    this._cycleS = s;
+    if(!s) return;
+    this._cycleTimer = setInterval(()=>{
+      if(this.hasAttribute("data-wall-active") || document.visibilityState === "hidden") return;
+      const next = WALLS.nextFloorStop(this._view.wallStops, this._view.focusIdx);
+      if(next == null || next === this._view.focusIdx) return;
+      this._view.focusIdx = next;
+      this._render();
+    }, s * 1000);
+  }
+  // Against burn-in on an OLED wall: the picture moves a couple of pixels
+  // round a small square, one step every three minutes, so no edge stays lit
+  // on the same pixels for hours. Off unless asked for.
+  _wallShift(){
+    const on = this.hasAttribute("data-wall") && WALLS.wallParams(location.search, this.state?._wall).shift;
+    // Everything the page draws: #content, and Live Aboard's full screen,
+    // which moves its view out to the top of the page (paintCover). The
+    // `translate` property, not transform: it adds to theirs.
+    const moveAll = (x, y)=>{
+      for(const el of (this.shadowRoot ? this.shadowRoot.children : [])){
+        if(el.tagName !== "STYLE" && el.id !== "wallDim") el.style.translate = x || y ? `${x}px ${y}px` : "";
+      }
+    };
+    if(!on){
+      if(this._shiftTimer){ clearInterval(this._shiftTimer); this._shiftTimer = null; moveAll(0, 0); }
+      return;
+    }
+    if(this._shiftTimer) return;
+    const orbit = [[0,0],[2,0],[2,2],[0,2],[-2,2],[-2,0],[-2,-2],[0,-2],[2,-2]];
+    let i = 0;
+    this._shiftTimer = setInterval(()=>{
+      i = (i + 1) % orbit.length;
+      moveAll(orbit[i][0], orbit[i][1]);
+    }, 180000);
+  }
+
+  // What a wall set up on the window and the host, undone.
+  // The heatmap chip: PadSpan Pro, and turned on in Settings → UI Structure → Atlas.
+  _heatmapPro(){
+    return String(this.state._tier || "").toLowerCase() === "pro" && !!this.state._heatmapOn;
+  }
+
+  _wallOff(){
+    if(this._wallResize){ window.removeEventListener("resize", this._wallResize); this._wallResize = null; }
+    if(this._wallWake){
+      for(const ev of ["pointerdown", "pointermove", "keydown", "wheel"]) window.removeEventListener(ev, this._wallWake);
+      window.removeEventListener("pointerdown", this._wallTap, true);
+      window.removeEventListener("click", this._wallTap, true);
+      this._wallWake = null; this._wallTap = null; clearTimeout(this._wallIdleTimer);
+    }
+    if(this._wakeVis){ document.removeEventListener("visibilitychange", this._wakeVis); this._wakeVis = null; }
+    if(this._wakeLock){ try { this._wakeLock.release(); } catch(_) {} this._wakeLock = null; }
+    this.style.removeProperty("--wall-ui");
+    this.style.removeProperty("--wall-ctl");
+    this.style.removeProperty("--wall-px");
+    this.removeAttribute("data-wall-active");
+    this._wallUi = 1;
+  }
+
   disconnectedCallback(){
     if(this._pollTimer){ clearInterval(this._pollTimer); this._pollTimer=null; }
+    if(this._shiftTimer){ clearInterval(this._shiftTimer); this._shiftTimer = null; }
+    if(this._cycleTimer){ clearInterval(this._cycleTimer); this._cycleTimer = null; this._cycleS = 0; }
+    this._fullyRestore();
+    if(window.__padspanWallMotion === this._motionHook) window.__padspanWallMotion = null;
+    this._wallOff();
     if(this._clientPerf){ this._clientPerf.stop(); this._clientPerf = null; }
     if(this._uiErrorHandler){
       window.removeEventListener("error", this._uiErrorHandler);

@@ -19,7 +19,7 @@
 // metres, and now that is the only thing it reads.
 
 const { WLED_BORDER, PARTITION_BORDER, MOTION_PULSE, DOOR_BORDER,
-        HUMIDITY_BORDER, FLOOD_BORDER, airQualityBadness, castsLight, classBorder, deviceClassOf } =
+        HUMIDITY_BORDER, FLOOD_BORDER, airQualityBadness, castsLight, classBorder, deviceClassOf, openingOpen, coverPercent } =
   await import(`./light_codes.js${new URL(import.meta.url).search}`);
 
 // Doors, shared with Live Aboard (door_types.js): which way an open door
@@ -27,6 +27,9 @@ const { WLED_BORDER, PARTITION_BORDER, MOTION_PULSE, DOOR_BORDER,
 // door's leaf swung open the way Live Aboard shows it. Optional: missing, an
 // open door is the clear gap it always was.
 const DOORS = await import(`./door_types.js${new URL(import.meta.url).search}`).catch(() => null);
+// The temperature / humidity / CO2 heatmap (atlas_heatmap.js). Optional the
+// same way: missing, the Atlas simply has no heatmap.
+const HEATMAP = await import(`./atlas_heatmap.js${new URL(import.meta.url).search}`).catch(() => null);
 
 function escSVG(s){ return String(s??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
 
@@ -49,6 +52,10 @@ export const FLOOD_ACTIVE_WINDOW_S = 2 * 24 * 60 * 60;
 export function barrierNoReading(st){
   return !st || st.state === "unknown" || st.state === "unavailable";
 }
+
+// The Alert pulse's ring (an opening left open, or open in the rain): amber,
+// below the leak ring's red.
+const ALERT_AMBER = "#f59e0b";
 
 export function floodLatchActive(triggeredAtS, nowMs){
   if(!Number.isFinite(triggeredAtS) || !Number.isFinite(nowMs)) return false;
@@ -2642,6 +2649,9 @@ function beaconLookSVG(bx, by, look){
 export const LAYER_PAL = ["#52b788","#f59e0b","#60a5fa","#e879f9","#fb923c","#34d399","#f87171","#a78bfa"];
 export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGap, lightsByEid={}, lightsLoading=false, floors=[], opts={}){
   const SHOW = !!opts.showcase;
+  // A wall screen sized for its room (lights_map, wall mode): room names grow
+  // past what the drawing's own width gives them. 1 everywhere else.
+  const LS = Number(opts.labelScale) > 1 ? Math.min(6, Number(opts.labelScale)) : 1;
   // Which palette Showcase paints with — see SHOWCASE_THEMES above. Falls
   // back to "classic" for an unknown/missing name exactly the way
   // AUTOMORPH_STYLE falls back to "glow", so a stale saved value from a
@@ -2906,7 +2916,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   // taller than the map itself; then "put that on the same line as the
   // motion color index bar, be more efficient with the rapidly evaporating
   // space" — so the two rows became one).
-  const LEGEND_H=32;
+  const LEGEND_H=32*LS;   // a wall's key is drawn LS times bigger (below)
   // Top of the stack in DRAWN storeys, not level numbers — otherwise a gap in
   // the numbering reserved empty canvas above the building.
   const maxIsoZ = levels.length ? rankOf(levels[levels.length-1]) : 0;
@@ -2975,10 +2985,21 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     const b=t>=66 ? 255 : (t<=19 ? 0 : Math.round(138.52*Math.log(t-10)-305.04));
     return [255, Math.max(0,Math.min(255,g)), Math.max(0,Math.min(255,b))];
   };
-  const glowCol=(l,entry)=>Array.isArray(l&&l.rgb)&&l.rgb.length>=3
+  const liveCol=(l)=>Array.isArray(l&&l.rgb)&&l.rgb.length>=3
     ? QCOL(l.rgb)
-    : (Number(l&&l.ct)>0 ? QCOL(kelvinRGB(l.ct)) : ((entry&&entry.color)||"#fbbf24"));
-  const bodyCol=(l,entry)=>SHOW ? glowCol(l,entry) : ((entry&&entry.color)||"#fbbf24");
+    : (Number(l&&l.ct)>0 ? QCOL(kelvinRGB(l.ct)) : null);
+  const glowCol=(l,entry)=>liveCol(l)||((entry&&entry.color)||"#fbbf24");
+  // The working map wears the live colour too, but only over the default
+  // amber pin: a pin given its own colour keeps it, and a light reporting no
+  // colour (onoff, white mode) is drawn exactly as it always was.
+  // Only when asked (Settings → UI Structure → Atlas, opts.liveColours):
+  // off, the working map is amber exactly as it always was.
+  const LIVECOL=!!opts.liveColours;
+  const bodyCol=(l,entry)=>{
+    if(SHOW) return glowCol(l,entry);
+    const pin=(entry&&entry.color)||"#fbbf24";
+    return LIVECOL && String(pin).toLowerCase()==="#fbbf24" ? (liveCol(l)||pin) : pin;
+  };
   // Detail has to be legible on whatever colour the fixture is throwing, and a
   // WLED run can be anything from pale yellow to deep blue — so the ink is
   // picked from the body's luminance rather than assumed dark.
@@ -3085,6 +3106,52 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     const room=rooms.find(r=>r.z===pl.z && pointInPolygon(r.pts, pl.x, pl.y));
     if(!room) continue;
     floodFx.push({eid: pl.eid, room, x: pl.x, y: pl.y, z: pl.z, liveWet: li.state==="on"});
+  }
+  // Alert pulse (Settings → UI Structure → Atlas, off by default): the host
+  // names the openings to flag, {entity_id: "rain_open" | "left_open"} (a
+  // window or cover open while it rains, a door left open for hours), and
+  // each rings its room the flood ring's way, in amber: three quick ripples
+  // in the rain, one slow one left open. Its room is the one beside the
+  // wall section it is linked to, the sensor's own area first (an inside
+  // door has a room on both sides). Not set, nothing here runs.
+  const ALERT_OPEN=opts.alertOpenings || null;
+  const alertFx=[];
+  if(ALERT_OPEN){
+    for(const bar of ((model && model.rf_barriers_m) || [])){
+      const kind=bar.linked_entity_id ? ALERT_OPEN[bar.linked_entity_id] : null;
+      if(kind!=="rain_open" && kind!=="left_open") continue;
+      const bpts=(bar.points_m||[]).map(p=>[Number(p[0]), Number(p[1])]);
+      if(bpts.length<2 || bpts.some(p=>!Number.isFinite(p[0])||!Number.isFinite(p[1]))) continue;
+      const z=frame.levelOf(String(bar.floor_id || "main"));
+      const a=bpts[0], b=bpts[bpts.length-1], L=Math.hypot(b[0]-a[0], b[1]-a[1]) || 1;
+      const mx=(a[0]+b[0])/2, my=(a[1]+b[1])/2, nx=-(b[1]-a[1])/L*0.3, ny=(b[0]-a[0])/L*0.3;
+      const sides=[[mx+nx, my+ny], [mx-nx, my-ny]];
+      const area=String((lightsByEid[bar.linked_entity_id]||{}).area_name || "").toLowerCase();
+      let hit=null;
+      for(const r of rooms){
+        if(r.z!==z) continue;
+        const side=sides.find(q=>pointInPolygon(r.pts, q[0], q[1]));
+        if(!side) continue;
+        if(!hit || (area && String(r.room).toLowerCase()===area)) hit={room: r, side};
+        if(area && String(r.room).toLowerCase()===area) break;
+      }
+      if(hit) alertFx.push({eid: bar.linked_entity_id, room: hit.room, x: hit.side[0], y: hit.side[1], kind});
+    }
+  }
+
+  // ── Temperature / humidity / CO2 heatmap (views/atlas_heatmap.js) ────────
+  // Off unless opts.heatmap names a kind. Its sources are found here, before
+  // the defs, for the same reason as airFx: it clips to the room polygons.
+  const HEAT=HEATMAP && HEATMAP.HEATMAP_KINDS.includes(opts.heatmap) ? opts.heatmap : null;
+  const heatByZ=new Map();
+  if(HEAT){
+    const placedSet={};
+    for(const l of lights) placedSet[l.eid]=true;
+    for(const z of levels){
+      const srcs=HEATMAP.heatSources(HEAT, lights.filter(l=>l.z===z), rooms.filter(r=>r.z===z), byRoom||{}, lightsByEid,
+        hiddenEids, placedSet, (n)=>roomCentre.get(n), NOW_MS, pointInPolygon);
+      if(srcs.size) heatByZ.set(z, srcs);
+    }
   }
 
   // ── Fit to room ───────────────────────────────────────────────────────────
@@ -3251,8 +3318,10 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   // liveWet spins faster and staggers three ripples (something is actively
   // happening); latched-only spins slower with a single ripple (steady,
   // needs attention, nothing is moving right now).
-  const floodRingSvg=(room, eid, wx, wy, liveWet)=>{
-    if(CLASSF && CLASSF!=="flood") return "";
+  // alert: an Alert pulse opening ("rain_open" | "left_open", alertFx): the
+  // same ring in amber, in the Doors/Windows class. Absent, the leak ring.
+  const floodRingSvg=(room, eid, wx, wy, liveWet, alert)=>{
+    if(CLASSF && CLASSF!==(alert ? "door" : "flood")) return "";
     const cid=roomClip.get(room);
     if(!cid) return "";
     const [cx,cy]=iso(wx,wy,room.z);
@@ -3266,7 +3335,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     let ripples="";
     for(let k=0;k<N;k++){
       const begin=(k*DUR/N).toFixed(2);
-      ripples+=`<path d="${FLOOD_WAVE_PATH}" fill="none" stroke="${FLOOD_BORDER}" stroke-width="3" `+
+      ripples+=`<path d="${FLOOD_WAVE_PATH}" fill="none" stroke="${alert ? ALERT_AMBER : FLOOD_BORDER}" stroke-width="3" `+
         `vector-effect="non-scaling-stroke" opacity="0">`+
         `<animateTransform attributeName="transform" type="scale" values="${(rMax*0.03).toFixed(1)};${rMax.toFixed(1)}" `+
         `dur="${DUR}s" begin="${begin}s" repeatCount="indefinite"/>`+
@@ -3274,7 +3343,8 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
         `</path>`;
     }
     const spin=(liveWet?9:18).toFixed(1);
-    return `<g class="lflood" data-eid="${escSVG(eid)}" data-class="flood" data-latched="${liveWet?0:1}" `+
+    return (alert ? `<g class="lalert" data-eid="${escSVG(eid)}" data-class="door" data-alert="${alert}" `
+      : `<g class="lflood" data-eid="${escSVG(eid)}" data-class="flood" data-latched="${liveWet?0:1}" `)+
       `clip-path="url(#${cid})" pointer-events="none" transform="translate(${cx.toFixed(1)},${cy.toFixed(1)})">`+
       `<g><animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="${spin}s" repeatCount="indefinite"/>${ripples}</g></g>`;
   };
@@ -3527,6 +3597,9 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   if(airFx.length) emitRoomClips();
   // Same reasoning as airFx just above, for the flood ring's clip.
   if(floodFx.length) emitRoomClips();
+  if(heatByZ.size) emitRoomClips();
+  // And the Alert pulse's rings.
+  if(alertFx.length) emitRoomClips();
   s+=`</defs>`;
   if(SHOW) s+=`<rect x="${viewX0}" y="${viewY}" width="${WTOTAL}" height="${HTOTAL}" fill="url(#psvig)" pointer-events="none"/>`;
 
@@ -3795,7 +3868,9 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       const dim=dimmed(l);
       const op=(SHOW?(on?1:0.62):(on?1:0.45))*(dim?0.22:1);
       const gAttrs=`data-class="${lightClassOf(l)}"${dim?' pointer-events="none"':""}`;
-      const tCol=SHOW?(on?lit:THEME.labelColorOff):(on?"#111827":"#e2e8f0");
+      // A working-map body in a live colour (deep blue as readily as pale
+      // white) picks its code's ink from that colour; the amber pin keeps its own.
+      const tCol=SHOW?(on?lit:THEME.labelColorOff):(on?(lit===((entry&&entry.color)||"#fbbf24")?"#111827":inkOn(lit)):"#e2e8f0");
       // Live temperature readout gate — placed (entry) AND fresh (last
       // hour). Computed once, up here, because BOTH the body wash below and
       // the digits further down key off it; two copies of the rule could
@@ -5560,7 +5635,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // <text> itself) because the collision check below needs it.
       // Trimmed ~10% (Garry, 2026-09-07: room names were "too much space" —
       // shrink-to-fit below only ever shrinks further from here, never grows).
-      const rfsBase=SHOW?5.9:6.7;
+      const rfsBase=(SHOW?5.9:6.7)*LS;
       const rtxt=SHOW?String(r.room).toUpperCase():String(r.room);
       // Shrink to fit the room's own isometric width — a fixed size read
       // fine in an average room but visibly overflowed a small one, live on
@@ -5817,9 +5892,11 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       // Under the hit-line (pointer-events none): the line stays the target.
       function doorLeafSvg(bar, bpts, z, shown, dl, dim){
         if(!DOORS) return "";
-        const dc = dl && dl.device_class;
+        // A garage cover is drawn as a garage door; blinds, shades and the
+        // like hang in a window, which has no leaf.
+        const dc = dl && dl.device_class==="garage" ? "garage_door" : dl && dl.device_class;
         const nm = String(bar.name||""), mat = String(bar.material||"").toLowerCase();
-        if(dc==="window" || (!["door","garage_door","opening"].includes(dc) && (/window/i.test(nm) || mat==="glass" && !/door|slid|patio/i.test(nm)))) return "";
+        if(dc==="window" || ["blind","shade","shutter","curtain","awning"].includes(dc) || (!["door","garage_door","opening"].includes(dc) && (/window/i.test(nm) || mat==="glass" && !/door|slid|patio/i.test(nm)))) return "";
         const a=bpts[0], b=bpts[bpts.length-1], L=Math.hypot(b[0]-a[0], b[1]-a[1]);
         if(!(L > 0.2)) return "";
         const ux=(b[0]-a[0])/L, uy=(b[1]-a[1])/L;
@@ -5908,8 +5985,8 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
           // semantics (state=="on" == open) — wrong for at least one real
           // sensor (Upper Garage Car Door Contact) that reports backwards.
           // bar.invert_state flips the reading for just that one barrier.
-          const rawOn=!!(dl && dl.state==="on");
-          const isOpen=bar.invert_state ? !rawOn : rawOn;
+          // A cover (blinds, a garage door) is open while any of it is.
+          const isOpen=openingOpen(dl, bar.invert_state);
           // Garry, 2026-09-10 (repeated, emphatically): "the doors when
           // open show a grey line where the door is, I want nothing
           // there." A prior pass drew a dashed DOOR_BORDER line for the
@@ -5924,6 +6001,15 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
             // like it's open, fix in sim style". The gap stays clear (no
             // line where the door is); its leaf stands swung open beside it.
             s+=doorLeafSvg(bar, bpts, z, "open", dl, barDim);
+            // A cover part-way open says how far, small, at the opening's middle.
+            const pct=coverPercent(dl);
+            if(pct!==null && pct>0 && pct<100){
+              const a=bpts[0], b=bpts[bpts.length-1];
+              const [mx,my]=iso((a[0]+b[0])/2,(a[1]+b[1])/2,z);
+              // On a wall screen it grows with the room names (LS).
+              s+=`<text class="lv-coverpct" x="${mx.toFixed(1)}" y="${(my-4*LS).toFixed(1)}" text-anchor="middle" font-size="${+(8*LS).toFixed(1)}" `+
+                `fill="#cbd5e1" opacity="${barDim.toFixed(2)}" pointer-events="none">${pct}%</text>`;
+            }
           }
         }
         // The two points where this opening meets the rest of the wall it
@@ -6149,6 +6235,8 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
       }
       s+=auraGlow+auraEdge;
     }
+    // The heatmap, under the air bars, the labels and the markers.
+    if(heatByZ.has(z)) s+=HEATMAP.heatFloorSvg(HEAT, heatByZ.get(z), hereRooms, floorBox.get(z), iso, z, (r)=>roomClip.get(r), (0.45*go).toFixed(2));
     // Poor-air rooms on this floor: the rising bars, under the labels and
     // the markers (see airFx, computed before the defs).
     for(const fx of airFx){
@@ -6160,6 +6248,11 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     for(const fx of floodFx){
       if(fx.room.z!==z) continue;
       s+=floodRingSvg(fx.room, fx.eid, fx.x, fx.y, fx.liveWet);
+    }
+    // Flagged openings on this floor (Alert pulse): the amber ring.
+    for(const fx of alertFx){
+      if(fx.room.z!==z) continue;
+      s+=floodRingSvg(fx.room, fx.eid, fx.x, fx.y, fx.kind==="rain_open", fx.kind);
     }
     for(const fn of labelJobs) fn();
 
@@ -6457,6 +6550,7 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
   {
     const R=7, FS=10, ly=LEGEND_Y0+10+R;
     let lx=18+R;
+    const legendAt=s.length;
     levels.forEach((z,i)=>{
       const color=levelColor(z);
       // The floor the drawing put here (floorIdAtLevel): HA floors usually
@@ -6481,6 +6575,21 @@ export function buildIsoSVG(model, byRoom, hiddenEids, focusZ, floorGap, horizGa
     s+=`<text x="${lx}" y="${ly+3}" fill="#9fb0a8" font-size="${KFS}" font-weight="500">${key}</text>`;
     lx+=key.length*KFS*0.6+10;
     s+=`<rect x="${lx}" y="${ly-2}" width="120" height="1.5" rx="0.75" fill="url(#psmotionlegend)"/>`;
+    let keyEnd=lx+130;
+    if(HEAT){
+      const hk=HEATMAP.heatLegendSvg(HEAT, lx+136, ly, KFS);
+      s+=hk.svg; keyEnd=hk.end+10;
+    }
+    // On a wall the key grows with the room names, as far as the width allows.
+    const k=Math.min(LS, (W-20)/keyEnd);
+    if(k>1) s=s.slice(0, legendAt)+`<g transform="translate(10 ${LEGEND_Y0+4}) scale(${k.toFixed(3)}) translate(-10 ${-(LEGEND_Y0+4)})">`+s.slice(legendAt)+`</g>`;
+    // The width held it under LS: give back the height kept for it, or the
+    // wall would fit a smaller house above an empty band.
+    if(LS>1 && k<LS){
+      const H2=HTOTAL-32*(LS-Math.max(1,k));
+      s=s.replace(`viewBox="${viewX0} ${viewY} ${WTOTAL} ${HTOTAL}"`, `viewBox="${viewX0} ${viewY} ${WTOTAL} ${H2}"`)
+         .replace(`data-natural-h="${HTOTAL}"`, `data-natural-h="${H2}"`);
+    }
   }
 
   s+=`</svg>`;

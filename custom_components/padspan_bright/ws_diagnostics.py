@@ -356,10 +356,22 @@ async def ws_propagation_health(hass: HomeAssistant, connection, msg) -> None:
         else:
             grade = "D"
 
+    # Held-out accuracy (heldout.py), shown beside the score; the grade
+    # above is unchanged by it. The cached result: a stale one is redone in
+    # the background, never while this waits.
+    heldout = None
+    _pc = domain.get("presence_coordinator")
+    if calib and _pc is not None and hasattr(_pc, "heldout_cached"):
+        try:
+            heldout = _pc.heldout_cached()
+        except Exception:
+            heldout = None
+
     connection.send_result(msg["id"], {
         "grade": grade,
         "coverage_pct": coverage_pct,
         "accuracy": accuracy,
+        "heldout": heldout,
         "fingerprint_stability": {
             "avg_variance": avg_variance,
             "rooms_stable": rooms_stable,
