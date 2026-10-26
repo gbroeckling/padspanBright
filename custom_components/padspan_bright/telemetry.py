@@ -100,6 +100,7 @@ from homeassistant.core import HomeAssistant
 
 from .build_info import BUILD_VERSION
 from .const import (
+    DATA_CALIBRATION,
     DATA_FABRIC,
     DATA_MAPS,
     DATA_MODEL,
@@ -287,12 +288,43 @@ EVENTS: frozenset[str] = frozenset({
     # ESPHome coexistence bug left proxies hearing ~9%). Counted per drop and
     # reported only as a bucket (PROXY_DROP_EVENTS), never the number.
     "proxy_rate_drop",
+    # 0.38.171: Vacation Mode switched on (a new trip, or one resumed within
+    # 3 weeks on the trip's own routine), and off from the panel or by a
+    # factory reset; whether the turned-off notice reached an alert target
+    # (vacation_mode.async_notify_turned_off). An accidental Disable mid-trip
+    # left a house dark for 11 days with nobody told.
+    "vacation_on", "vacation_resumed", "vacation_off_panel", "vacation_off_reset",
+    "vacation_off_notified", "vacation_off_not_pushed",
+    # 0.38.172, the trip options: ended on its end date, paused because
+    # someone came home, and (once a day each) the after-dark, bedtime and
+    # max on-time rules holding a light off the pattern asked for.
+    "vacation_off_end_date", "vacation_paused_home",
+    "vacation_rule_dark", "vacation_rule_bedtime", "vacation_rule_max_on",
 })
 # A new install's first steps (onboarding.py): how long from setup to the
 # first room and to the first calibration point, as buckets, once per
 # install. Never bumped: build_payload adds them (count 1) until a report
 # carrying them is accepted.
 ONBOARDING_EVENTS: frozenset[str] = frozenset(f"{s}:{b}" for s in _ONB_STEPS for b in _ONB_BUCKETS)
+# How long ago this install was first seen (settings first_seen_ts), as a
+# word: whether a newly reporting install is new or an old one that just
+# turned the report on. first_seen_ts exists from 0.38.87 (2026-09-28): an
+# install older than that reads as first seen the day it updated past it.
+INSTALL_AGE_WORDS: tuple[str, ...] = ("lt1d", "1_7d", "8_30d", "31_90d", "gt90d")
+
+
+def install_age_word(first_seen_ts: Any, now_ts: float) -> str | None:
+    if isinstance(first_seen_ts, bool) or not isinstance(first_seen_ts, (int, float)) or first_seen_ts <= 0:
+        return None
+    d = (now_ts - first_seen_ts) / 86400
+    if d < 0:
+        return None
+    for edge, word in ((1, "lt1d"), (7, "1_7d"), (30, "8_30d"), (90, "31_90d")):
+        if d < edge:
+            return word
+    return "gt90d"
+
+
 # The day's proxy_rate_drop count, as one of these instead of the number.
 PROXY_DROP_BUCKETS: tuple[str, ...] = ("1", "2_5", "gt5")
 PROXY_DROP_EVENTS: frozenset[str] = frozenset(f"proxy_rate_drops:{b}" for b in PROXY_DROP_BUCKETS)
@@ -342,6 +374,7 @@ UI_ERROR_HELPERS: frozenset[str] = frozenset({
     "live_aboard_house", "live_aboard_library", "live_aboard_use",
     "live_aboard_weather", "live_aboard_showcase", "live_aboard_fps",
     "live_aboard_studio",                           # Live Aboard's Studio look (atlas_3d_look "studio")
+    "calibration_walk",                             # Calibration's Walk a room tab (calibration_room_walk)
     "live_aboard_pieces", "live_aboard_furnish",   # Live Aboard P2 Furnish
     "live_aboard_import",
     "live_aboard_devices",                          # Live Aboard P5: furniture that is a device
@@ -352,6 +385,8 @@ UI_ERROR_HELPERS: frozenset[str] = frozenset({
     "live_aboard_runs", "live_aboard_strip",        # Live Aboard's Strip tool: strips and string lights
     "atlas_screen", "atlas_aboard",                 # the flat Atlas: the map alone, full screen; Live Aboard's on the map
     "map_text",                                     # the map as text for screen readers (Overview, the flat Atlas)
+    "whos_where",                                   # Who's where now, before any room is drawn (Overview)
+    "wizard_build",                                 # the Setup Wizard's "Put it on the map" (Mapping)
     "atlas_heatmap",                                # the flat Atlas: temperature / humidity / CO2 heatmap
     "live_aboard_marks",                            # Live Aboard: the Atlas's leak sensors, locks, codes and class chips
     "live_aboard_motion",                           # Live Aboard: motion (the ring, the room's glow, markers, coverage, the chip)
@@ -594,6 +629,8 @@ _FEATURE_ON_ONLY: dict[str, str] = {
     # 0.38.165's positioning settings, all off by default.
     "positioning_pick_better": "pick_better", "positioning_unsure": "unsure",
     "positioning_sensor_fusion": "fusion",
+    # 0.38.167: Calibration's Walk a room tab, off by default.
+    "calibration_room_walk": "room_walk",
 }
 # Small enumerations reported by value (each from a fixed vocabulary in
 # ws_settings; anything unexpected is dropped by assert_shareable's length rule).
@@ -1604,6 +1641,34 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
             env["heldout"] = _ho
     except Exception:
         pass
+    # Walk a room (room_walk.py), only while it is on and a walk was saved:
+    # rooms walked as a bucket word, and whether the last walk moved k-NN's
+    # held-out rooms-right up, down or not at all: the pair stored at walk
+    # time, never today's score against it.
+    try:
+        from .room_walk import report_buckets as _rw_buckets  # noqa: PLC0415
+        _cal = dom.get(DATA_CALIBRATION)
+        _cd = getattr(_cal, "data", None) or {}
+        from .room_walk import change_word as _rw_change  # noqa: PLC0415
+        _rwd = _cd.get("room_walk") or {}
+        _chg = _rw_change(_rwd.get("before"), _rwd.get("after"))
+        _rw = _rw_buckets(settings, list(_cd.get("points") or []), _chg)
+        if _rw:
+            env["room_walk"] = _rw
+    except Exception:
+        pass
+    _age = install_age_word(settings.get("first_seen_ts"), time.time())
+    if _age:
+        env["install_age"] = _age
+    # Vacation Mode (vacation_mode.report_buckets), only where it was used.
+    try:
+        from .vacation_mode import _VM_LOG, report_buckets as _vac_buckets  # noqa: PLC0415
+        _vlog = dom.get(_VM_LOG)
+        _vac = _vac_buckets(settings, list(getattr(_vlog, "entries", None) or []), time.time())
+        if _vac:
+            env["vacation"] = _vac
+    except Exception:
+        pass
     features = {k: bool(settings.get(k)) for k in _FEATURE_FLAGS}
     features.update(_overview_features(settings))
     for k, word in _FEATURE_ON_ONLY.items():
@@ -1909,6 +1974,19 @@ def _check_load_sections(payload: dict[str, Any]) -> None:
                  "sp_med": MEDIAN_BUCKETS, "better": BETTER_WORDS}
         if not isinstance(ho, dict) or not all(k in words and v in words[k] for k, v in ho.items()):
             raise ValueError("env.heldout not in the vocabulary")
+    if isinstance(env, dict) and "room_walk" in env:
+        from .room_walk import CHANGE_WORDS, WALKS_BUCKETS  # noqa: PLC0415
+        rw = env["room_walk"]
+        words = {"walks": WALKS_BUCKETS, "change": CHANGE_WORDS}
+        if not isinstance(rw, dict) or not all(k in words and v in words[k] for k, v in rw.items()):
+            raise ValueError("env.room_walk not in the vocabulary")
+    if isinstance(env, dict) and "install_age" in env and env["install_age"] not in INSTALL_AGE_WORDS:
+        raise ValueError("env.install_age not in the vocabulary")
+    if isinstance(env, dict) and "vacation" in env:
+        from .vacation_mode import REPORT_WORDS as _VW  # noqa: PLC0415
+        vac = env["vacation"]
+        if not isinstance(vac, dict) or not all(k in _VW and v in _VW[k] for k, v in vac.items()):
+            raise ValueError("env.vacation not in the vocabulary")
     if isinstance(env, dict) and "screens" in env:
         scr = env["screens"]
         if (not isinstance(scr, list) or len(scr) > SCREENS_LISTED

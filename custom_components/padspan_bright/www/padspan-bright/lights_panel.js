@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.166";
-const BUILD_ID = "20261025T083043Z";
+const APP_VERSION = "0.38.174";
+const BUILD_ID = "20261026T131951Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -25,7 +25,8 @@ const { hasControlCard } =
 const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable, lightIsTouched,
         sunAmbient, toggleEntity, atlasLookFromSettings,
         wireUseSurface, openControlCard, controlApiFor, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates, doorInvertOf,
-        wireHoverHud, screenHeight, captureWholeHouse, applyWholeHouse, ensureExactDevices } =
+        wireHoverHud, screenHeight, captureWholeHouse, applyWholeHouse, ensureExactDevices,
+        vacationOptionsOf, vacationEndsText } =
   await import(`./views/lights_map.js${new URL(import.meta.url).search}`);
 const { keepSubscribed } =
   await import(`./views/push_subscription.js${new URL(import.meta.url).search}`);
@@ -435,6 +436,8 @@ class PadSpanLightsApp extends HTMLElement {
       // Vacation Mode's own state — read here too now that the banner lives
       // in the shared Atlas card (both hosts), not panel.js's global chrome.
       this.state._vacationModeEnabled = !!s.vacation_mode_enabled;
+      this.state._vacationModeResumed = !!s.vacation_mode_pattern_for;
+      this.state._vacationSettings = s;
       this.state._vacationModeIntensity = Number.isFinite(Number(s.vacation_mode_intensity)) ? Number(s.vacation_mode_intensity) : 100;
       // {entity_id: epoch-s of its most recent "on"} — flood_latch.py's
       // event listener writes this server-side; ungated, same reasoning as
@@ -991,13 +994,26 @@ class PadSpanLightsApp extends HTMLElement {
       // renderer rather than panel.js's global chrome).
       onVacationModeEnable: async () => {
         if (!this._hass) return false;
-        try { await this._ws({ type: "padspan_bright/settings_set", vacation_mode_enabled: true }); }
+        let res = null;
+        try { res = await this._ws({ type: "padspan_bright/settings_set", vacation_mode_enabled: true }); }
         catch (e) { return false; }
         this.state._vacationModeEnabled = true;
+        this.state._vacationModeResumed = !!res?.settings?.vacation_mode_pattern_for;
         this._render();
         return true;
       },
       vacationModeEnabled: !!this.state._vacationModeEnabled,
+      vacationModeResumed: !!this.state._vacationModeResumed,
+      vacationOptions: vacationOptionsOf(this.state._vacationSettings),
+      vacationModeEnds: vacationEndsText(this.state._vacationSettings),
+      onVacationOptions: async (patch) => {
+        if (!this._hass) return false;
+        let res = null;
+        try { res = await this._ws({ type: "padspan_bright/settings_set", ...patch }); }
+        catch (e) { this._toast("Could not save the Vacation Mode option: " + String(e), true); return false; }
+        if (res?.settings) this.state._vacationSettings = res.settings;
+        return true;
+      },
       vacationModeIntensity: this.state._vacationModeIntensity || 100,
       onVacationModeDisable: async () => {
         if (!this._hass) return false;

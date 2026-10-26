@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.166";
-const RELEASE_BUILD_ID = "20261025T083043Z";
+const APP_VERSION = "0.38.174";
+const RELEASE_BUILD_ID = "20261026T131951Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -39,7 +39,7 @@ const BUILD_ID = (() => {
     return RELEASE_BUILD_ID;
   }
 })();
-const CHANNEL = "stable";
+const CHANNEL = "beta";
 
 // ── Editions and tiers ───────────────────────────────────────────────────────
 // Which surfaces this build shows (views/editions.js). Loaded with the same
@@ -154,6 +154,7 @@ import(`./views/map_text.js?b=${BUILD_ID}`)
 // _loadView() fetches it immediately and re-renders.
 let SAMPLE_SNAPSHOT = null;
 let HELP = {};
+let HELP_MOD = null;   // help_content.js itself: helpTexts() rebuilds HELP in a shipped language
 const VIEWS = {};
 // Expose VIEWS globally so the Preact bridge can access loaded view modules
 window.__PADSPAN_VIEWS = VIEWS;
@@ -213,7 +214,7 @@ function _loadView(id) {
 // Phase 1: critical modules — just enough for the default view
 const _criticalPromise = Promise.allSettled([
   import(`./sample_data.js?b=${BUILD_ID}`).then(m => { SAMPLE_SNAPSHOT = m.SAMPLE_SNAPSHOT || null; }),
-  import(`./help_content.js?b=${BUILD_ID}`).then(m => { HELP = m.HELP || {}; }),
+  import(`./help_content.js?b=${BUILD_ID}`).then(m => { HELP = m.HELP || {}; HELP_MOD = m; }),
   import(`./views/overview.js?b=${BUILD_ID}`).then(m => { VIEWS.overview = m; }),
   import(`./views/follow.js?b=${BUILD_ID}`).then(m => { VIEWS.follow = m; }),
 ]).then(results => {
@@ -497,6 +498,11 @@ const { buildEvidenceSvg, roomScoreBars } =
 // A push subscription kept across HA restarts (motion_reconnects, below).
 const { keepSubscribed } =
   await import(`./views/push_subscription.js${new URL(import.meta.url).search}`);
+// The panel's translations (views/i18n.js), the same module help_content.js
+// imports. English, or a language not shipped, loads nothing. Not awaited:
+// if it fails to load, the help simply stays English.
+const _i18nPromise = import(`./views/i18n.js?b=${BUILD_ID}`)
+  .catch(err => { console.warn("PadSpan: i18n module failed to load", err); return null; });
 
 function pill(text){ return el("span",{class:"pill"}, text); }
 
@@ -613,6 +619,9 @@ class PadSpanHaApp extends HTMLElement {
     // which reads states off its own hass: hand it each new one.
     if(this.state && this.state._overviewAtlas) this.state._overviewAtlas.hass = hass;
     // Follow the sun (_sunLook): the look changes at sunrise and sunset.
+    // The help in the HA profile's language, asked again only when it changes.
+    const langSeen = hass ? ((hass.locale && hass.locale.language) || hass.language || "") : "";
+    if(hass && langSeen !== this._langSeen){ this._langSeen = langSeen; this._loadHelpLanguage(); }
     if(this.state?.settings?.theme_follow_sun === true && (hass?.states?.["sun.sun"]?.state || null) !== (this._sunSeen ?? null)) this._applyTheme();
     // Motion sensors back from an offline blip (motion_reconnects.py), pushed
     // on every change — one subscription per connection (a new connection,
@@ -1722,7 +1731,23 @@ class PadSpanHaApp extends HTMLElement {
    */
   async _pollTick(){
     if(!this._hass) return;
-    if(this.state.dataMode !== "live") return;
+    if(this.state.dataMode !== "live"){
+      // A new install still on the demo house turns to its own house once
+      // Home Assistant reports a Bluetooth scanner. The server decides
+      // (onboarding.py, live_first); this only notices: every 10 s for the
+      // first five minutes on the page, then every two (a house with no
+      // scanner yet isn't asked forever), and never mid-task in Mapping.
+      const _mapsBusy = this.state.view === "maps" && (!!this.state._mapsWizard || ["upload", "stack", "edit"].includes(this.state.mapsTab));
+      if(this.state.settings?.onboarding?.live_first === "pending" && !_mapsBusy){
+        this._liveFirstSince = this._liveFirstSince || Date.now();
+        const _every = (Date.now() - this._liveFirstSince) < 300000 ? 10000 : 120000;
+        if(Date.now() - (this._liveFirstTs || 0) > _every){
+          this._liveFirstTs = Date.now();
+          await this._liveFirstCheck();
+        }
+      }
+      return;
+    }
     if(this._pollInFlight) return;
     if(this.state.view === "maps") return;
 
@@ -2197,6 +2222,20 @@ class PadSpanHaApp extends HTMLElement {
    *   real BLE data every 5 seconds.
    * The choice is persisted server-side via settings_set.
    */
+  async _liveFirstCheck(){
+    try {
+      await this._fetchSettings();
+      if(this.state.dataMode !== "live") return;
+      // Only when the server made the switch, not someone's own click or
+      // another tab.
+      if(this.state.settings?.onboarding?.live_first === "switched")
+        this._toast("PadSpan found your Bluetooth scanners: this is your own house now.");
+      await this._refreshAll(false);
+      this._startPolling();
+      this._scheduleRender();
+    } catch(e){}
+  }
+
   async _setDataMode(mode){
     try {
       const res = await this._callWS({ type: "padspan_bright/settings_set", data_mode: mode });
@@ -2848,12 +2887,28 @@ class PadSpanHaApp extends HTMLElement {
     this._renderSidebarTrial();
   }
 
+  /** HELP in hass's language: a shipped one loads i18n/<lang>/help.json and
+   *  rebuilds HELP through it; English keeps the imported HELP untouched. */
+  _loadHelpLanguage(){
+    Promise.all([_i18nPromise, _criticalPromise]).then(([I18N]) => I18N ? I18N.useLanguage(this._hass, ["help"]) : "en").then(lang => {
+      if(HELP_MOD && (lang !== "en" || HELP !== HELP_MOD.HELP)) HELP = lang === "en" ? HELP_MOD.HELP : HELP_MOD.helpTexts();
+    }).catch(err => console.warn("PadSpan: help translation failed to load", err));
+  }
+
   /** Open a help modal for the given key (content loaded from help_content.js). */
   _showHelp(key){
     const h = HELP[key];
     if(!h){ this._toast("No help entry for: " + key, false); return; }
     const body = document.createElement("div");
     body.style.cssText = "line-height:1.75;font-size:14px";
+    // A translated page opens with a note: the rest of the panel is English.
+    const note = HELP_MOD && HELP_MOD.helpNote ? HELP_MOD.helpNote() : "";
+    if(note){
+      const n = document.createElement("div");
+      n.style.cssText = "margin-bottom:12px;color:#94a3b8;font-size:13px;font-style:italic";
+      n.textContent = note;
+      body.appendChild(n);
+    }
     const paras = Array.isArray(h.body) ? h.body : [h.body];
     for(const p of paras){
       const d = document.createElement("div");
@@ -2882,6 +2937,8 @@ class PadSpanHaApp extends HTMLElement {
       helpers: {
         el, esc, pill,
         HELP,
+        /** "" in English; in a shipped language, the note a translated help page opens with. */
+        helpNote: () => (HELP_MOD && HELP_MOD.helpNote ? HELP_MOD.helpNote() : ""),
         mapImageUrl,
         radioShortId,
         awayTimeoutS,
@@ -3099,6 +3156,9 @@ class PadSpanHaApp extends HTMLElement {
         wsCall: async (type, data={}) => await this._callWS({ type, ...data }),
         // Record a data_mode the server just reported (factory reset re-read).
         applyDataMode: (mode) => this._applyDataMode(mode),
+        // Switch Sample/Live as the top bar does ("Preview a finished house",
+        // "Back to my house").
+        setDataMode: (mode) => this._setDataMode(mode),
         // Opt-in usage report: count one allow-listed event. A no-op unless the
         // person turned the report on — no traffic leaves the browser otherwise.
         telemetryEvent: (name, extra) => this._telemetryEvent(name, extra),
@@ -3954,6 +4014,9 @@ class PadSpanHaApp extends HTMLElement {
         if (typeof this.state._isoUpdateObjects === "function") {
           try { this.state._isoUpdateObjects(); } catch(e) {}
         }
+        if (typeof this.state._whosWhereUpdate === "function") {
+          try { this.state._whosWhereUpdate(); } catch(e) {}
+        }
       } else {
         // Update suspend countdown in-place (no full rebuild)
         if(_curSusp) {
@@ -3967,6 +4030,9 @@ class PadSpanHaApp extends HTMLElement {
         if (typeof this.state._isoUpdateObjects === "function") {
           try { this.state._isoUpdateObjects(); } catch(e) {}
         }
+        if (typeof this.state._whosWhereUpdate === "function") {
+          try { this.state._whosWhereUpdate(); } catch(e) {}
+        }
         this._lastGoodRender = performance.now();
         return;
       }
@@ -3979,6 +4045,9 @@ class PadSpanHaApp extends HTMLElement {
        && VIEWS.overview.atlasHomeOn && VIEWS.overview.atlasHomeOn(this._ctx())) {
       if (typeof this.state._isoUpdateObjects === "function") {
         try { this.state._isoUpdateObjects(); } catch(e) {}
+      }
+      if (typeof this.state._whosWhereUpdate === "function") {
+        try { this.state._whosWhereUpdate(); } catch(e) {}
       }
       this._lastGoodRender = performance.now();
       return;
@@ -4152,7 +4221,12 @@ class PadSpanHaApp extends HTMLElement {
         const bar = el("div",{"data-getting-started":"card",style:"background:#0a1f14;border:1px solid #1a4228;border-radius:8px;padding:10px 14px;margin-bottom:12px"});
         // Header
         const hdr = el("div",{style:"display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"});
-        hdr.appendChild(el("div",{style:"font-weight:700;font-size:13px;color:#52b788"}, `Getting started \u2014 ${_completedCount}/${_steps.length}`));
+        // A live house with no room drawn already has Who's where now on the
+        // Overview (views/whos_where.js): the map steps are the optional next
+        // step, not a gate in front of seeing anything.
+        const _mapOptional = this.state.dataMode === "live" && !Object.keys((this.state.model || {}).room_geometry_m || {}).length;
+        hdr.appendChild(el("div",{style:"font-weight:700;font-size:13px;color:#52b788"},
+          _mapOptional ? `Make it a map (optional) \u2014 ${_completedCount}/${_steps.length}` : `Getting started \u2014 ${_completedCount}/${_steps.length}`));
         const skipBtn = el("span",{"data-getting-started":"dismiss",style:"cursor:pointer;font-size:10px;color:#64748b;text-decoration:underline"}, "Skip setup");
         skipBtn.addEventListener("click", () => {
           this.state._onboardingDismissed = true;
@@ -4164,6 +4238,8 @@ class PadSpanHaApp extends HTMLElement {
         });
         hdr.appendChild(skipBtn);
         bar.appendChild(hdr);
+        if (_mapOptional) bar.appendChild(el("div",{style:"font-size:12px;color:#94a3b8;margin:-4px 0 8px"},
+          "Who's where already works below. A floor plan adds the map, and with three or more scanners placed on it, positions between them."));
 
         // Progress dots
         const dots = el("div",{style:"display:flex;gap:4px;margin-bottom:8px"});

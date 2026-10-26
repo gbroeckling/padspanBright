@@ -53,7 +53,8 @@ const { mapXform, worldGauge, metresToWorld, mapFracToMetres,
 const { tuneSavePlanInit, tuneDiffMapDraft, tuneMissingFabricPins, tuneConflictingSources,
         tuneReconcileDraft, tuneSyncTuneDrafts, tuneSnapBaseline,
         tuneTryAcquire, tuneRelease, tuneLivePhase, tuneWriteBlock, tuneRadioSig,
-        tuneBeaconBaseline, tuneBeaconWrites, tuneBeaconHeldText } =
+        tuneBeaconBaseline, tuneBeaconWrites, tuneBeaconHeldText, tuneBeaconFromFabric,
+        tuneBeaconInBounds } =
   await import(`./tune_save_plan.js${new URL(import.meta.url).search}`);
 tuneSavePlanInit({ mapFracToMetres, metresToMapFrac });
 
@@ -141,6 +142,10 @@ export function render(ctx) {
 
   // Tab bar
   const TABS = [["tune","Tune"],["beacon","Beacon Tune"],["setup","Setup"],["pin","Pin & Listen"],["roam","Roam"],["model","Model"],["matrix","Error Matrix"]];
+  // Walk a room (calibration_room_walk, off by default): its tab exists only while on.
+  const _walkOn = ctx.state.settings?.calibration_room_walk === true;
+  if (_walkOn) TABS.push(["walk", "Walk a room"]);
+  else if (cs.tab === "walk") cs.tab = "tune";
   const tabBar = el("div", { class: "tabs", style: "margin-bottom:14px;flex-wrap:wrap;gap:4px" });
   for (const [id, label] of TABS) {
     tabBar.appendChild(el("button", {
@@ -157,8 +162,23 @@ export function render(ctx) {
   if (cs.tab === "matrix") root.appendChild(_matrixTab(ctx, el, cs, calData));
   if (cs.tab === "tune")  root.appendChild(_tuneTab(ctx, el, cs, calData));
   if (cs.tab === "beacon") root.appendChild(_beaconTuneTab(ctx, el, cs, calData));
+  if (cs.tab === "walk" && _walkOn) root.appendChild(_walkTab(ctx, el, cs, calData));
 
   return root;
+}
+
+// ── Walk a room (views/calibration_walk.js, loaded on first use) ─────────────
+let _WALK = null;
+function _walkTab(ctx, el, cs, calData) {
+  if (!_WALK) {
+    import(`./calibration_walk.js${new URL(import.meta.url).search}`)
+      .then(m => { _WALK = m; ctx.actions.renderRooms(); })
+      .catch(e => ctx.toast("Could not load Walk a room: " + (e && e.message || e), true));
+    return el("div", { class: "muted" }, "Loading…");
+  }
+  return _WALK.renderWalk(ctx, el, cs, calData, {
+    findAds: _findBeaconAds, accept: _acceptCalSample, snap: _recordableSnap, phase: tuneLivePhase, heldoutLine: _heldoutLine,
+  });
 }
 
 // ── Guided Calibration Wizard ────────────────────────────────────────────────
@@ -3648,11 +3668,8 @@ function _tuneTab(ctx, el, cs, calData) {
                   removedMaps.push(mapId);
                 }
               }
-              // 2. Save cleaned maps immediately so removal persists
-              for (const mapId of removedMaps) {
-                const origMap = maps_list.find(m => m.id === mapId);
-                if (!origMap) continue;
-              }
+              // 2. Nothing to save here: radio_reset (step 4) removes this
+              //    receiver's pins from every map on the server.
               // 3. Update state BEFORE any re-render so rebuilt UI is correct
               ts.dirtyMaps = {};
               ts._mapsStamp = null;
@@ -3966,6 +3983,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     bs.editBaseline = {};
     for (const m of maps_list) bs.editBaseline[m.id] = tuneBeaconBaseline(bs.draftBeacons[m.id]);
     bs._mapsStamp = mapsStamp;
+    bs._fabStamp = null;
     _autoPinTracked();
     // Dedup: ensure each beacon key, label, AND address appears at most once.
     // Cross-protocol dedup: use snapshot all_addresses to detect same device.
@@ -4002,20 +4020,24 @@ function _beaconTuneTab(ctx, el, cs, calData) {
         _dedupRemoved = true;
       }
     }
-    // Auto-save deduped beacons to backend so duplicates are permanently cleaned
+    // Duplicates are dropped from this tab's draft only: nothing is saved, so
+    // the maps keep them. The dirty flags are cleared as they always were here.
     if (_dedupRemoved) {
-      (async () => {
-        for (const mid of Object.keys(bs.dirtyMaps)) {
-          if (!bs.dirtyMaps[mid]) continue;
-          const origMap = maps_list.find(m => m.id === mid);
-          if (!origMap) continue;
-          try {
-            bs.dirtyMaps[mid] = false;
-          } catch(_) {}
-        }
-      })();
+      for (const mid of Object.keys(bs.dirtyMaps)) {
+        if (bs.dirtyMaps[mid] && maps_list.find(m => m.id === mid)) bs.dirtyMaps[mid] = false;
+      }
     }
   }
+  // The fabric's pins over the maps' own rows (#89), whenever either changes.
+  function _syncFabricPins() {
+    const fabStamp = JSON.stringify(ctx.state.model?.beacon_positions_m || {}) + "|" +
+      JSON.stringify(ctx.state.model?.map_transforms || {});
+    if (fabStamp === bs._fabStamp) return;
+    tuneBeaconFromFabric(maps_list, bs.draftBeacons, bs.editBaseline,
+      ctx.state.model?.beacon_positions_m, ctx.state.model?.map_transforms);
+    bs._fabStamp = fabStamp;
+  }
+  _syncFabricPins();
 
   // Auto-enable live tracking for beacons that have snapshot position data
   // (metres from k-NN, or room from the presence coordinator). This makes
@@ -4461,14 +4483,10 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           // No longer an existing pin: placed again, it is judged as new (a phone is held back).
           if (t.bk.key && ctx.state.model && ctx.state.model.beacon_positions_m) delete ctx.state.model.beacon_positions_m[t.bk.key];
         } catch(_) {}
-        // Auto-save the deletion
+        // The fabric_beacon_remove above is the only write; the dirty flags
+        // are cleared as they always were here.
         for (const mid of Object.keys(bs.dirtyMaps)) {
-          if (!bs.dirtyMaps[mid]) continue;
-          const origMap = maps_list.find(m => m.id === mid);
-          if (!origMap) continue;
-          try {
-            bs.dirtyMaps[mid] = false;
-          } catch(_) {}
+          if (bs.dirtyMaps[mid] && maps_list.find(m => m.id === mid)) bs.dirtyMaps[mid] = false;
         }
         _refreshTimerRow();
         _refreshSVG();
@@ -4683,6 +4701,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     bs.editBaseline = {};
     for (const m of maps_list) bs.editBaseline[m.id] = tuneBeaconBaseline(bs.draftBeacons[m.id]);
     bs.dirtyMaps = {};
+    bs._fabStamp = null;
     _autoPinTracked();
     // Dedup: ensure each beacon key, label, AND address appears at most once
     const _seenKeysR = new Set();
@@ -4710,6 +4729,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
         return true;
       });
     }
+    _syncFabricPins();
     bs.selectedBk = null;
     bs.fg = ctx.state.settings?.overview_iso_floor_gap ?? 150;
     bs.hg = ctx.state.settings?.overview_iso_horiz_gap ?? 0;
@@ -4811,12 +4831,27 @@ function _beaconTuneTab(ctx, el, cs, calData) {
   // ── Drag interaction ────────────────────────────────────────────────────────
   // Document-level listeners (always fire). bs._dragging prevents DOM destruction.
   let _didDrag = false;
+  // A double-click on a beacon never reached the map's dblclick: each click
+  // redraws the map, so the second lands on a new node and the browser's
+  // dblclick has no target left on the page - a dead zone the size of the
+  // hit circle while placing. Two taps on a beacon within 500 ms and 12 px
+  // are a double-click here. Placing, it means what it means anywhere on the
+  // map (place at that spot, the banner's instruction); otherwise the first
+  // tap has already selected the beacon and the second changes nothing.
+  let _lastBkTap = null, _bkTapPlacedAt = 0;
 
   isoDiv.addEventListener("pointerdown", e => {
     const g = e.target.closest("[data-bk-id]");
     if (!g) return;
     e.preventDefault();
     e.stopPropagation();
+    const tap = _lastBkTap;
+    _lastBkTap = null;
+    if (bs.pendingPlace && tap && Date.now() - tap.t < 500 && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 12) {
+      _bkTapPlacedAt = Date.now();
+      _placeAtPoint(e);
+      return;
+    }
     const mapId = g.getAttribute("data-map-id");
     const bkId  = g.getAttribute("data-bk-id");
     const z     = Number(g.getAttribute("data-z") || 0);
@@ -4834,11 +4869,15 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     if (!xf) { console.warn("[PadSpan] bk drag: no xform for map", mapId); isoDiv.style.cursor = ""; return; }
     const [origWx, origWy] = xf.mapPt(bkObj.x, bkObj.y);
     const [origPx, origPy] = iso(origWx, origWy, z);
+    const origX = bkObj.x, origY = bkObj.y, origDirty = bs.dirtyMaps[mapId];
 
     bs._dragging = true;
 
     const onMove = (ev) => {
       ev.preventDefault();
+      // A finger's jitter during a tap isn't a drag: it would eat the
+      // double-tap and nudge the pin.
+      if (!_didDrag && Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 4) return;
       _didDrag = true;
       const svgNode = isoDiv.querySelector("svg");
       if (!svgNode) return;
@@ -4863,7 +4902,15 @@ function _beaconTuneTab(ctx, el, cs, calData) {
       document.removeEventListener("pointercancel", onUp, true);
       bs._dragging = false;
       isoDiv.style.cursor = "";
-      if (_didDrag) {
+      if (!_didDrag && ev.type === "pointerup") _lastBkTap = { t: Date.now(), x: ev.clientX, y: ev.clientY };
+      // Dropped off its map: put back, never saved there (#90 saved one
+      // ~86 m outside the house).
+      const offMap = _didDrag && !tuneBeaconInBounds(bkObj.x, bkObj.y);
+      if (offMap) {
+        bkObj.x = origX; bkObj.y = origY; bs.dirtyMaps[mapId] = origDirty;
+        ctx.toast(`${bkObj.label || bkObj.key || "Beacon"} was dropped outside the map - put back where it was`, true);
+      }
+      if (_didDrag && !offMap) {
         const mapObj = maps_list.find(m => m.id === mapId);
         if (mapObj) bkObj.room = _detectRoom(bkObj.x, bkObj.y, mapObj) || bkObj.room || "";
         // Auto-save position and start live timer
@@ -4959,8 +5006,8 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     _refreshPlaceBanner();
   }
 
-  // Double-click to place a pending beacon
-  isoDiv.addEventListener("dblclick", e => {
+  // Double-click to place a pending beacon, at the point clicked (clientX/Y).
+  function _placeAtPoint(e) {
     if (!bs.pendingPlace) return;
     const svgNode = isoDiv.querySelector("svg");
     if (!svgNode) return;
@@ -5061,6 +5108,10 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     });
     popup.appendChild(cancelBtn2);
     isoWrap.appendChild(popup);
+  }
+  isoDiv.addEventListener("dblclick", e => {
+    if (Date.now() - _bkTapPlacedAt < 600) return;  // placed by the beacon's own double-click
+    _placeAtPoint(e);
   });
 
   // ── Auto-save beacon position to map + start live timer ──────────────────

@@ -28,7 +28,8 @@ const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable
         sunAmbient, spreadInRoom, createUndoStack, toggleEntity,
         wireUseSurface, openControlCard, controlApiFor, openBarrierCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates, doorInvertOf,
         isOutdoorFloorId, wireHoverHud, pressRing, HOLD_MS, PRESS_RING_MS,
-        captureWholeHouse, applyWholeHouse, layoutTierFor, ensureExactDevices, isExactEntity } =
+        captureWholeHouse, applyWholeHouse, layoutTierFor, ensureExactDevices, isExactEntity,
+        vacationOptionsOf, vacationEndsText } =
   await import(`./lights_map.js${new URL(import.meta.url).search}`);
 // Fixture-shape vocabulary + derivation (the tab owns the manual override UI).
 const { LIGHT_SHAPES, deriveLightShape, isControllable, deviceClassOf, hasControlCard, hasFixedGlyph, isDoorSensor } =
@@ -44,6 +45,13 @@ const { whatIfDelta } =
   await import(`./whatif_placement.js${new URL(import.meta.url).search}`);
 // "Import from a robot vacuum" beside the .sh3d import (vacuum_import.js).
 // Optional: a block that fails to load must not blank the Mapping tab.
+// The Setup Wizard's "Put it on the map" (wizard_build.js) and the Tune
+// planner it writes scanners with, given this module's own conversions.
+// If either can't load, the Finish step just doesn't offer it.
+const { planHouse, buildHouse } = await import(`./wizard_build.js${new URL(import.meta.url).search}`)
+  .catch(() => ({ planHouse: null, buildHouse: null }));
+const TSP = await import(`./tune_save_plan.js${new URL(import.meta.url).search}`).catch(() => null);
+if (TSP) TSP.tuneSavePlanInit({ mapFracToMetres, metresToMapFrac });
 const VACUUM = await import(`./vacuum_import.js${new URL(import.meta.url).search}`)
   .catch(err => { console.warn("PadSpan: vacuum_import failed to load", err); return null; });
 // The 90-day trial card, shared by every paid wall (trial_offer.js).
@@ -1449,6 +1457,87 @@ function _wizardFinish(ctx, map, isBasic){
   wrap.appendChild(el("div",{class:"muted", style:"margin-bottom:14px;line-height:1.6"},
     `${rooms} room${rooms===1?"":"s"} traced, ${scanners} scanner${scanners===1?"":"s"} placed. ` +
     "Next: calibrate, so PadSpan learns what those scanners actually see from each room — a few minutes walking around with your phone gets you most of the way."));
+  // What's traced here but not yet on the house the Overview draws: one
+  // explicit click puts it there (wizard_build.js), missing pieces only.
+  // The plan is read HERE, in the editor; the module only sees the fabric.
+  // Never while the demo house is on screen (#88): its radios would become
+  // phantom scanners in the real fabric, so only what Home Assistant hears.
+  const offered = !!(map && planHouse && buildHouse && TSP);
+  const liveSources = new Set(((ctx.state.live?.snapshot?.ble?.radios) || []).map(r => r && r.source).filter(Boolean));
+  const traced = offered ? {
+    mapId: map.id,
+    floorId: map.floor_id || "main",
+    rooms: Object.keys(map.room_bounds || {}),
+    scanners: (map.receivers || []).map(r => r && r.source).filter(src => src && liveSources.has(src)),
+    readable: TSP.tunePlacementReadable(((ctx.state.model || {}).map_transforms || {})[map.id]),
+  } : null;
+  // The Tune planner, as Calibration → Tune saves: every plan that pins
+  // these scanners is planned, and one pinned at different spots or floors
+  // on two plans is refused on both (tuneConflictingSources), never written
+  // from whichever came last. The rows are their own baseline, so only pins
+  // missing from the fabric are planned.
+  const planPins = (sources) => {
+    const mdl = ctx.state.model || {};
+    const all = [], invalid = [];
+    let refused = false;
+    for (const m of (ctx.state.maps?.list || [])) {
+      const rows = (m.receivers || []).filter(r => r && sources.includes(r.source));
+      if (!rows.length) continue;
+      const base = Object.fromEntries(rows.map(r => [r.source, { x: r.x, y: r.y }]));
+      const p = TSP.tuneDiffMapDraft(m, rows, mdl.scanner_positions_m || {}, mdl.map_transforms || {}, base, true);
+      if (!p || p.refused) { if (m.id === map.id) refused = true; continue; }
+      all.push(...p.writes.map(w => ({ ...w, _map: m.id })));
+      if (m.id === map.id) invalid.push(...(p.invalid || []));   // another plan's bad row isn't this one's
+    }
+    const bad = new Set(TSP.tuneConflictingSources(all));
+    const writes = all.filter(w => w._map === map.id && !bad.has(w.source)).map(({ _map, ...w }) => w);
+    return { writes, invalid: [...new Set([...invalid, ...bad])], refused };
+  };
+  const plan = traced ? planHouse(traced, ctx.state.model) : null;
+  const writeBlock = TSP ? TSP.tuneWriteBlock(ctx.state) : null;
+  if (plan && (plan.rooms.length || plan.scanners.length)) {
+    const box = el("div",{style:"padding:10px 12px;border:1px solid #2d6a4f;border-radius:8px;margin-bottom:14px","data-wizard-build":"1"});
+    const n = (k, word) => `${k} ${word}${k === 1 ? "" : "s"}`;
+    if (writeBlock) {
+      box.appendChild(el("div",{style:"font-size:13px"}, writeBlock));
+    } else if (!plan.readable) {
+      box.appendChild(el("div",{style:"font-size:13px"},
+        "Set this floor's scale first (step 2): PadSpan needs to know how big it is before it can put these rooms and scanners on the map of your house."));
+    } else {
+      const what = [plan.rooms.length ? n(plan.rooms.length, "room") : "", plan.scanners.length ? n(plan.scanners.length, "scanner") : ""].filter(Boolean).join(" and ");
+      box.appendChild(el("div",{style:"font-size:13px;margin-bottom:8px;line-height:1.5"},
+        `${what} ${plan.rooms.length + plan.scanners.length === 1 ? "is" : "are"} on this floor plan but not yet on the map of your house that the Overview, the Atlas and positioning draw from. Nothing already on it changes.`));
+      // Re-reading the model redraws this step mid-write: the flag keeps the
+      // new button in progress, so a second click can't start a second build.
+      const building = !!ctx.state._wizardBuilding;
+      const putBtn = el("button",{class:"btn primary"}, building ? "Putting it on the map…" : "Put it on the map");
+      putBtn.disabled = building;
+      putBtn.addEventListener("click", async () => {
+        if (ctx.state._wizardBuilding) return;
+        const blockNow = TSP.tuneWriteBlock(ctx.state);   // as Tune's Save checks at the click
+        if (blockNow) { ctx.toast(blockNow, true); return; }
+        ctx.state._wizardBuilding = true;
+        putBtn.disabled = true;
+        putBtn.textContent = "Putting it on the map…";
+        try {
+          const r = await buildHouse(ctx, traced, { planPins, refresh: () => ctx.actions.modelRefresh() });
+          const done = [r.rooms ? n(r.rooms, "room") : "", r.scanners ? n(r.scanners, "scanner") : ""].filter(Boolean).join(" and ");
+          const left = r.failed.length + r.notConvertible.length + r.otherPlan.length;
+          const where = "Mapping → Rooms and Calibration → Tune show them";
+          ctx.toast(done
+            ? `${done} now on the map${left ? `; ${left} couldn't be (${where})` : ""}.`
+            : `Nothing could be put on the map${left ? `: ${left} couldn't be (${where})` : ""}.`, !done || !!left);
+        } catch (e) {
+          ctx.toast("Couldn't put it on the map: " + (e?.message || e), true);
+        } finally {
+          ctx.state._wizardBuilding = false;
+          await ctx.actions.modelRefresh();
+        }
+      });
+      box.appendChild(putBtn);
+    }
+    wrap.appendChild(box);
+  }
   const row = el("div",{style:"display:flex;gap:10px;flex-wrap:wrap"});
   const calBtn = el("button",{class:"btn primary"}, "Go to Calibration →");
   calBtn.addEventListener("click", ()=>{
@@ -2312,7 +2401,12 @@ function _edit(ctx, map, allMaps){
       const liveRadios = (snap2 && snap2.ble && Array.isArray(snap2.ble.radios)) ? snap2.ble.radios : [];
       const _sid = ctx.helpers.radioShortId || (src => src.slice(0,3).toUpperCase());
       right.appendChild(el("div",{class:"muted", style:"margin-top:14px;font-size:12px;font-weight:600"}, "Live BLE Radios"));
-      if(liveRadios.length){
+      // #88: in Sample mode these are the demo house's radios. Placed on a
+      // real plan they'd become phantom scanners at the next Tune → Save.
+      const _rxBlock = TSP ? TSP.tuneWriteBlock(ctx.state) : null;
+      if(_rxBlock){
+        right.appendChild(el("div",{class:"muted", style:"font-size:11px;margin-top:2px"}, _rxBlock));
+      } else if(liveRadios.length){
         right.appendChild(el("div",{class:"muted", style:"font-size:11px;margin-top:2px;margin-bottom:6px"}, "Click Add to place on map, then drag to position."));
         const radList = el("div",{style:"display:flex;flex-direction:column;gap:5px"});
         for(const radio of liveRadios){
@@ -2925,9 +3019,6 @@ function _edit(ctx, map, allMaps){
           try {
             // Save transform directly to fabric — fabric is the sole authority
             const _txResult = await ctx.actions.callWS({ type: "padspan_bright/fabric_map_transform_set", map_id: map.id, transform });
-            // Re-derive spatial data for this map only (don't overwrite other transforms)
-            try {
-            } catch(e2) {}
             ctx.toast(`Scale saved: ${scale_x_m.toFixed(1)}m \u00d7 ${scale_y_m.toFixed(1)}m (${ppm} px/m)`);
             ctx.state.maps._measurePts = [];
             ctx.state.maps._measurements = [];
@@ -3271,49 +3362,14 @@ function _edit(ctx, map, allMaps){
 
         applyStatus.textContent = "Uploading rotated image…";
 
-        // Remap receiver and room bound coordinates through the same rotation
-        const _rotPoint = (px, py) => {
-          // px, py are 0-1 fractions in the old image
-          const ox = px * sw - sw/2;
-          const oy = py * sh - sh/2;
-          const rx = ox * Math.cos(rad) - oy * Math.sin(rad);
-          const ry = ox * Math.sin(rad) + oy * Math.cos(rad);
-          return [Math.max(0, Math.min(1, (rx + nw/2) / nw)),
-                  Math.max(0, Math.min(1, (ry + nh/2) / nh))];
-        };
-
-        // Rotate receivers
-        const newReceivers = (map.receivers || []).map(r => {
-          const [nx, ny] = _rotPoint(r.x || 0, r.y || 0);
-          return { ...r, x: nx, y: ny };
-        });
-        // Rotate beacons
-        const newBeacons = (map.beacons || []).map(b => {
-          const [nx, ny] = _rotPoint(b.x || 0, b.y || 0);
-          return { ...b, x: nx, y: ny };
-        });
-        // Rotate room bounds
-        const newBounds = {};
-        for(const [room, b] of Object.entries(map.room_bounds || {})){
-          if(b && b.type === "poly" && Array.isArray(b.points)){
-            newBounds[room] = { ...b, points: b.points.map(p => { const [nx,ny] = _rotPoint(p[0],p[1]); return [nx,ny]; }) };
-          } else if(b && b.type === "circle"){
-            const [cx2,cy2] = _rotPoint(b.cx||0.5, b.cy||0.5);
-            newBounds[room] = { ...b, cx: cx2, cy: cy2 };
-          } else {
-            newBounds[room] = b;
-          }
-        }
-
+        // The server turns the room outlines and pins with the image (the
+        // pixel_op below): there is nothing to remap or save here.
         const _repRes = await ctx.actions.mapsReplaceImage({
           map_id: map.id, png_base64: b64, width: nw, height: nh,
           pixel_op: { deg: _rotAngle, sx: 1, sy: 1 },
         });
         if(_repRes && _repRes.scale_invalidated){
           ctx.toast("Map scale could not survive this rotation — re-measure the map (Measure tool).", true);
-        }
-        // Save rotated coordinates
-        if(newReceivers.length || Object.keys(newBounds).length || newBeacons.length){
         }
         applyStatus.style.color = "#4ade80";
         applyStatus.textContent = `Rotated ${_rotAngle}° and saved. Reloading edit…`;
@@ -4839,6 +4895,34 @@ function _floorHeights(ctx){
     }catch(e){ ctx.toast("Save failed: "+String(e), true); }
   }},"Save Floor Heights")));
   return wrap;
+}
+
+// Receivers on the maps that no live BLE scanner matches. Pure: reads only.
+export function _staleReceivers(maps, isLive){
+  const out = [];
+  for(const m of (maps||[])){
+    for(const r of (m.receivers||[])){
+      if(!isLive(r)) out.push({ name: r.label || r.source || r.id || "?", source: r.source || "", map: m.name || m.id || "" });
+    }
+  }
+  return out;
+}
+
+// The list behind the 3D Stack "N stale" button. Says what it is and how to
+// take one off a floor plan today; it has no button of its own and writes
+// nothing.
+export function _staleReceiversBox(el, list){
+  return el("div",{class:"stale-rx-box",style:"margin-top:8px;padding:8px 10px;border:1px solid #92400e;border-radius:6px;font-size:12px"},[
+    el("div",{style:"color:#ffd54f;margin-bottom:4px"},
+      `${list.length} receiver${list.length !== 1 ? "s" : ""} on your maps that no live scanner matches right now`),
+    el("div",{class:"muted",style:"margin-bottom:6px"},
+      "A scanner that is offline, unplugged or renamed in Home Assistant shows here too. Nothing has been removed."),
+    el("ul",{style:"margin:0 0 6px 18px;padding:0"},
+      list.map(s => el("li",{}, `${s.name}${s.source && !s.name.includes(s.source) ? ` (${s.source})` : ""} — ${s.map}`))),
+    el("div",{class:"muted"},
+      "To take one off a floor plan: open that map in Library, go to Edit, click the receiver, press Delete receiver, then Save Layout. " +
+      "That removes it from that floor plan only. Its saved position in the house model stays, so it can show up again if that map is re-measured or its image is replaced."),
+  ]);
 }
 
 // ── 3D Stack Tab (large — this single function renders the whole tab) ──────
@@ -6765,10 +6849,11 @@ function _stack(ctx, maps, helpBtn){
       isoResetBtn.disabled = false;
     }
   }, "Reset");
-  // ── Stale Receiver Cleanup ──
+  // ── Stale Receivers (read-only) ──
   // A receiver is "stale" if its source MAC / label doesn't match any currently
-  // active BLE scanner in HA. This can happen when scanners are removed or
-  // renamed. The cleanup button removes stale receivers from all maps.
+  // active BLE scanner in HA. This can happen when scanners are removed,
+  // renamed, or simply offline. The button only lists them: nothing here
+  // removes or writes anything.
   const snap_rx = (ctx.state.live?.snapshot?.ble?.radios) || [];
   const liveSourceSet = new Set(snap_rx.map(r => r.source).filter(Boolean));
   // name→source and source→name lookups for backfill matching
@@ -6781,26 +6866,16 @@ function _stack(ctx, maps, helpBtn){
     if(radio.source) liveNameLower.set(radio.source.toLowerCase(), radio.source);
   }
 
-  // Backfill: if a receiver has no source but its label matches a live radio name,
-  // populate source so future stale checks work reliably
-  const backfillMaps = [];
+  // Backfill, in memory only: if a receiver has no source but its label
+  // matches a live radio name, fill in source for the rest of this session.
+  // Nothing is saved.
   for(const m of maps){
-    let changed = false;
     for(const r of (m.receivers||[])){
       if(r.source) continue; // already has source
       // Try exact name match first, then case-insensitive
       const matched = nameToSource.get(r.label) || liveNameLower.get((r.label||"").toLowerCase());
-      if(matched){ r.source = matched; changed = true; }
+      if(matched) r.source = matched;
     }
-    if(changed) backfillMaps.push(m);
-  }
-  // Persist backfill silently (fire-and-forget)
-  if(backfillMaps.length){
-    (async ()=>{
-      for(const m of backfillMaps){
-        try{  }catch(e){}
-      }
-    })();
   }
 
   // Now count stale — a receiver matches if source is in live set OR label matches a live radio
@@ -6810,32 +6885,19 @@ function _stack(ctx, maps, helpBtn){
     if(r.label && liveNameLower.has((r.label||"").toLowerCase())) return true;
     return false;
   };
-  let staleCount = 0;
-  for(const m of maps){
-    for(const r of (m.receivers||[])){
-      if(!_rxIsLive(r)) staleCount++;
-    }
-  }
+  const staleList = _staleReceivers(maps, _rxIsLive);
+  const staleCount = staleList.length;
   const cleanLbl = el("span",{class:"muted",style:"font-size:11px;min-width:50px"}, "");
+  const staleBox = staleCount > 0 ? _staleReceiversBox(el, staleList) : null;
+  if(staleBox && !ctx.state.maps._staleListOpen) staleBox.style.display = "none";
   const cleanBtn = el("button",{class:"btn inline",style:"padding:2px 10px;font-size:12px" + (staleCount > 0 ? ";color:#ffd54f;border-color:#92400e" : ";opacity:0.5"),
-    title: staleCount > 0 ? `Remove ${staleCount} receiver(s) not matching any live BLE scanner` : "All receivers match live scanners",
-    onclick: async ()=>{
+    title: staleCount > 0 ? `${staleCount} receiver(s) not matching any live BLE scanner — click to see which` : "All receivers match live scanners",
+    onclick: ()=>{
       if(!staleCount){ cleanLbl.textContent = "All clean"; setTimeout(()=>{ cleanLbl.textContent = ""; }, 2000); return; }
-      if(!confirm(`Remove ${staleCount} stale receiver(s) from your maps?\n\nThese receivers don't match any active BLE scanner.`)) return;
-      cleanBtn.disabled = true; cleanLbl.textContent = "Cleaning…";
-      try{
-        for(const m of maps){
-          const orig = m.receivers || [];
-          const kept = orig.filter(r => _rxIsLive(r));
-          if(kept.length < orig.length){
-          }
-        }
-        cleanLbl.textContent = `Removed ${staleCount} ✓`;
-        setTimeout(()=>{ cleanLbl.textContent = ""; ctx.actions.renderRooms(); }, 1500);
-      }catch(e){ cleanLbl.textContent = "Error"; }
-      cleanBtn.disabled = false;
+      ctx.state.maps._staleListOpen = !ctx.state.maps._staleListOpen;
+      staleBox.style.display = ctx.state.maps._staleListOpen ? "" : "none";
     }
-  }, staleCount > 0 ? `Clean ${staleCount} stale` : "No stale");
+  }, staleCount > 0 ? `${staleCount} stale` : "No stale");
 
   card.appendChild(el("div",{style:"display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap"},[
     el("span",{class:"muted",style:"font-size:12px"},"Floor:"),
@@ -6855,6 +6917,7 @@ function _stack(ctx, maps, helpBtn){
     cleanLbl,
     roomListToggle,
   ]));
+  if(staleBox) card.appendChild(staleBox);
 
   rebuildIso();
   card.appendChild(isoWrap);
@@ -9988,6 +10051,13 @@ function _lightsTab(ctx, maps, active) {
       return true;
     },
     vacationModeEnabled: !!ctx.state.settings?.vacation_mode_enabled,
+    vacationModeResumed: !!ctx.state.settings?.vacation_mode_pattern_for,
+    vacationOptions: vacationOptionsOf(ctx.state.settings),
+    vacationModeEnds: vacationEndsText(ctx.state.settings),
+    onVacationOptions: async (patch) => {
+      try { await ctx.actions.settingsSet(patch); return true; }
+      catch (e) { ctx.toast("Could not save the Vacation Mode option: " + String(e), true); return false; }
+    },
     vacationModeIntensity: Number.isFinite(Number(ctx.state.settings?.vacation_mode_intensity))
       ? Number(ctx.state.settings.vacation_mode_intensity) : 100,
     onVacationModeDisable: async () => {

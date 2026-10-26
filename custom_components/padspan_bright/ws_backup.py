@@ -503,14 +503,13 @@ async def ws_store_backup_restore(hass: HomeAssistant, connection, msg) -> None:
                         if data_key == DATA_SETTINGS and isinstance(data, dict) and hasattr(store_obj, "data"):
                             # Vacation Mode's spans describe what is in the recorder
                             # now, not when the backup was taken (vacation_mode.py).
-                            import time as _time
                             from .vacation_mode import restore_fields
                             # A tester sign-up is not house configuration: the
                             # live one stays, so an older backup can neither lose
                             # one nobody could then withdraw, nor bring back one
                             # that was withdrawn (tester.carried_over).
                             from .tester import carried_over
-                            data = {**data, **restore_fields(store_obj.data or {}, data, _time.time()),
+                            data = {**data, **restore_fields(store_obj.data or {}),
                                     **carried_over(store_obj.data or {})}
                             # The one-time "Atlas on" has already run here: an
                             # older backup must not run it again over a choice
@@ -525,8 +524,11 @@ async def ws_store_backup_restore(hass: HomeAssistant, connection, msg) -> None:
                             data["server_offers"] = (store_obj.data or {}).get("server_offers") or {}
                             # Nor bring back the trial milestone card, or restart
                             # its week (settings_store.trial_state_kept).
-                            from .settings_store import trial_state_kept
+                            from .settings_store import live_first_kept, trial_state_kept
                             data.update(trial_state_kept(store_obj.data or {}, data))
+                            # Nor bring back a new install's pending switch to
+                            # Live over the mode restored here (live_first_kept).
+                            data.update(live_first_kept(store_obj.data or {}, data))
                             # The licence on this install stays when it is the
                             # better one: a backup from before a purchase (or
                             # from a trial) blanked the key or put the old one

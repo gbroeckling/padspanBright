@@ -26,6 +26,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
+from .build_info import EDITION
 from .const import SETTINGS_STORE_KEY
 
 _LOGGER = logging.getLogger(__name__)
@@ -112,6 +113,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "positioning_pick_better": False,
     "positioning_unsure": False,
     "positioning_sensor_fusion": False,
+    # Walk a room (0.38.167), OFF by default: a "Walk a room" tab on
+    # Calibration (room_walk.py). Off, Calibration is exactly what it was.
+    "calibration_room_walk": False,
     "assumed_device_height_m": 1.0,  # carry height above the floor for 3D distance (pocketed phone)
     # GPS bridge (gap #5, best-in-class roadmap): the fabric's own metre
     # plane has no inherent relationship to true north or a real-world
@@ -205,6 +209,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "vacation_mode_tracked_since": 0,     # backend-only: epoch-s from which every vacation span is in vacation_mode_periods (stamped once on upgrade if Vacation Mode ran before spans were recorded; 0 = always) — vacation_mode.py learned_pattern
     "vacation_mode_pattern_prev": {},     # backend-only: the last pattern learned before a vacation — stands in while a new vacation's build finds nothing (vacation_mode.py learned_pattern)
     "vacation_mode_pattern_attempt": [0, 0],  # backend-only: [enabled_at, epoch-s] of the last build that found nothing usable — retried hourly, not every tick
+    "vacation_mode_pattern_for": 0,       # backend-only: the enabled_at a carried-over pattern serves — turned back on within 3 weeks of a trip, it resumes that trip's routine (vacation_mode.resumable)
+    "vacation_mode_last_off": {},         # backend-only: {ts, by, via, how} — who last turned Vacation Mode off, for the panel and the turned-off notice
+    # Trip options (0.38.172), each off until set — vacation_mode.OPTION_DEFAULTS
+    "vacation_mode_dark_only": False,     # lights go on only after sunset (+ offset) and before sunrise
+    "vacation_mode_dark_offset_min": 0,   # -60..120 minutes after sunset
+    "vacation_mode_end_at": 0,            # epoch-s the trip ends (it turns itself off then); 0 = no end
+    "vacation_mode_pause_home": False,    # anyone's person.* at home: nothing is switched until they leave
+    "vacation_mode_bedtime": "",          # "HH:MM" (17:00-03:00): lights off from then (±20 min) until 05:00
+    "vacation_mode_max_on_min": 0,        # 0 = no limit, else 15-720: a light it turned on goes off after this, and rests as long
     "overview_show_walls": False,   # Overview: draw RF barrier walls over the map
     "overview_show_outdoor": False, # Overview: draw outdoor areas (sheds, driveways) as an overlay
     "overview_show_trails": False,  # Overview/Pure Live: fading movement trail behind each tracked object
@@ -338,6 +351,35 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 
+def live_first_kept(live: dict[str, Any] | None, other: dict[str, Any] | None,
+                    from_bright: bool = False) -> dict[str, Any]:
+    """onboarding["live_first"] through a settings restore or a Bright import
+    (`other` is the settings coming in). This install's own answer
+    ("switched", "chosen") always stays. Otherwise:
+
+    - a restore never leaves "pending": restoring is choosing settings, the
+      mode among them, so a new install's switch to Live must not run over it;
+    - a Bright import keeps this install's "pending" unless Bright itself was
+      Live or had answered: PadSpan Bright never asked (it is never marked),
+      so its default "sample" is no one's choice, and a move from Bright
+      would otherwise end on the demo house for good.
+
+    Returns {"onboarding": ...} to apply, or {} when there is nothing to change."""
+    a, b = live or {}, other or {}
+    mine = a.get("onboarding").get("live_first") if isinstance(a.get("onboarding"), dict) else None
+    ob = dict(b["onboarding"]) if isinstance(b.get("onboarding"), dict) else None
+    if mine in ("switched", "chosen"):
+        return {"onboarding": {**(ob or {}), "live_first": mine}}
+    if from_bright and mine == "pending" and (ob or {}).get("live_first") not in ("switched", "chosen") \
+            and b.get("data_mode") != "live":
+        return {"onboarding": {**(ob or {}), "live_first": "pending"}}
+    if ob is None:
+        return {}
+    if ob.get("live_first") == "pending":
+        del ob["live_first"]
+    return {"onboarding": ob}
+
+
 def trial_state_kept(live: dict[str, Any] | None, other: dict[str, Any] | None = None) -> dict[str, Any]:
     """The trial milestone's two per-install facts, kept through a settings
     restore, a factory reset and a Bright import (`other` is the settings
@@ -405,13 +447,19 @@ class SettingsStore:
             self.data = dict(DEFAULT_SETTINGS)
         # A brand-new install — no settings file and no other PadSpan file in
         # .storage — starts with the iPhone setup steps on and its first steps
-        # measured. Every install from before keeps what it has (the guide
-        # off unless someone turned it on). Decided once: the file saved
+        # measured, and opens on its own house as soon as Home Assistant
+        # reports a Bluetooth scanner (onboarding.py, "live_first"). Every
+        # install from before keeps what it has (the guide off unless someone
+        # turned it on, and the mode it is in). Decided once: the file saved
         # below makes every later load an existing install, and a factory
         # reset or a restore writes one too.
         if loaded is None and first_run:
             self.data["iphone_irk_guide"] = True
             self.data["onboarding"] = {"setup_ts": time.time()}
+            # PadSpan Bright is the Atlas alone: it has no presence screens to
+            # open on, so its mode is left as it always was.
+            if EDITION != "bright":
+                self.data["onboarding"]["live_first"] = "pending"
         # Normalize followed_addrs: uppercase + dedup (order preserved).
         # Every comparison in the system (frontend followedHas, backend
         # settings_set, tag_integration) is uppercase; historic entries were
