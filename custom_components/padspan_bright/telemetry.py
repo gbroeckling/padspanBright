@@ -87,6 +87,7 @@ counters survive a failed send and go with the next one.
 
 from __future__ import annotations
 
+import threading
 import json
 import logging
 import math
@@ -96,7 +97,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 
 from .build_info import BUILD_VERSION
 from .const import (
@@ -139,6 +140,9 @@ _MAX_BYTES = 8192
 # closed list, because the report's KEYS are also data that leaves the box,
 # and an open pattern would let any authenticated user put a word into it.
 EVENTS: frozenset[str] = frozenset({
+    # Mapping → 3D Stack's stale-receiver list opened (0.38.170 made it read-only
+    # and honest): whether anyone looks, once per opening.
+    "stale_receivers_listed",
     # 0.38.160: a device's room held through a short gap (once per hold, so
     # whether the setting ever does anything in a real house), and a robot
     # vacuum's map imported / a walker point accepted into calibration.
@@ -300,6 +304,26 @@ EVENTS: frozenset[str] = frozenset({
     # max on-time rules holding a light off the pattern asked for.
     "vacation_off_end_date", "vacation_paused_home",
     "vacation_rule_dark", "vacation_rule_bedtime", "vacation_rule_max_on",
+    # 0.38.177: why a calibration save failed (the floor has no metre scale,
+    # or anything else), and the Calibration tab showing that a floor needs
+    # measuring before points can go on it.
+    "calibration_save_refused_no_scale", "calibration_save_failed_other", "calib_floor_unmeasured",
+    # 0.38.177: calibration points cleared on purpose (Clear all, one map's
+    # Clear) — so a house whose points went to zero can be told apart from one
+    # that lost them (health.calibration_points_vanished).
+    "calibration_cleared_all", "calibration_cleared_map",
+    # and a floor plan deleted on purpose (plain, or after moving its work to
+    # another map) — beside health.maps_vanished.
+    "map_deleted", "map_deleted_migrated",
+    # 0.38.178: a slim snapshot sent (Optimize for scale) — how many walls use it.
+    "snapshot_slim_sent",
+    # 0.38.178, guest tags (guest_tags.py): a tag made a guest tag, a stay
+    # started and ended, notices sent / failed / held for quiet hours, an
+    # off-limits room entered, a stay ended because its tag went unheard a
+    # week (a high count says leaving is not being caught).
+    "guest_tag_marked", "guest_session_started", "guest_session_ended",
+    "guest_notice_sent", "guest_notice_failed", "guest_quiet_held",
+    "guest_offlimits_sent", "guest_stale_ended",
 })
 # A new install's first steps (onboarding.py): how long from setup to the
 # first room and to the first calibration point, as buckets, once per
@@ -325,6 +349,34 @@ def install_age_word(first_seen_ts: Any, now_ts: float) -> str | None:
     return "gt90d"
 
 
+# Room timing that is not the default, and a Home Assistant floor the outdoor
+# rules now count as outside (0.38.182: a delay of 0 means 0, the outdoor rules
+# read is_outdoor_floor). Sent only where one of them applies.
+PRESENCE_CFG_WORDS: dict[str, tuple[str, ...]] = {
+    "poll": ("1_4", "6_9", "10", "11_60"),
+    "delay": ("0", "1_19", "21_60", "gt60"),
+    "outdoor": ("ha",),
+}
+
+
+def presence_cfg_words(settings: dict, ha_floor_ids: Any = ()) -> dict[str, str]:
+    from .presence_rules import is_outdoor_floor, room_change_delay_s  # noqa: PLC0415
+    from .const import OUTSIDE_FLOOR_ID  # noqa: PLC0415
+    out: dict[str, str] = {}
+    try:
+        poll = int(settings.get("presence_poll_interval_s") or 5)
+    except (TypeError, ValueError):
+        poll = 5
+    if poll != 5:
+        out["poll"] = "1_4" if poll < 5 else "6_9" if poll < 10 else "10" if poll == 10 else "11_60"
+    d = room_change_delay_s(settings)
+    if d != 20.0:
+        out["delay"] = "0" if d == 0 else "1_19" if d < 20 else "21_60" if d <= 60 else "gt60"
+    if any(f != OUTSIDE_FLOOR_ID and is_outdoor_floor(f) for f in (ha_floor_ids or ())):
+        out["outdoor"] = "ha"
+    return out
+
+
 # The day's proxy_rate_drop count, as one of these instead of the number.
 PROXY_DROP_BUCKETS: tuple[str, ...] = ("1", "2_5", "gt5")
 PROXY_DROP_EVENTS: frozenset[str] = frozenset(f"proxy_rate_drops:{b}" for b in PROXY_DROP_BUCKETS)
@@ -338,7 +390,7 @@ VIEWS: frozenset[str] = frozenset({
     "follow", "overview", "purelive", "objects", "devices", "bluetooth", "presence",
     "history", "monitor", "maps", "events", "health", "settings", "manage", "debug",
     "diagnostics", "qa", "training", "calibration", "traceback", "forensics",
-    "sandbox", "occupancy", "installbase",
+    "sandbox", "occupancy", "installbase", "guests",
 })
 SUBTABS: dict[str, frozenset[str]] = {
     "bluetooth": frozenset({"visualization", "monitor", "scanners", "irk_panel", "esphome_configs"}),
@@ -408,10 +460,23 @@ UI_ERROR_HELPERS: frozenset[str] = frozenset({
     "i18n",                                         # the panel's translations helper (t / tn)
 })
 UI_ERROR_SHELLS: frozenset[str] = frozenset({"panel", "atlas_panel", "lib", "other"})
+# 0.38.177: beside each, the kind of error (views/ui_error.js UI_ERROR_KINDS)
+# and the line it came from, ui_error_at:<module>:<line> — a line in
+# PadSpan's own file, checked by ui_error_at_allowed.
+UI_ERROR_KINDS: tuple[str, ...] = ("type", "reference", "range", "syntax", "rejection", "other")
 UI_ERRORS: frozenset[str] = frozenset(
     {f"ui_error:{m}" for m in VIEWS | UI_ERROR_HELPERS | UI_ERROR_SHELLS}
     | {f"ui_error_while:{v}" for v in VIEWS | {"atlas"}}
+    | {f"ui_error_kind:{k}" for k in UI_ERROR_KINDS}
 )
+_UI_ERROR_AT = re.compile(r"ui_error_at:([a-z0-9_]{1,40}):([1-9][0-9]{0,4})")
+
+
+def ui_error_at_allowed(name: str) -> bool:
+    """ui_error_at:<module>:<line> with a module from the closed list and a
+    line number; nothing else of the error."""
+    m = _UI_ERROR_AT.fullmatch(name)
+    return bool(m) and m.group(1) in (VIEWS | UI_ERROR_HELPERS | UI_ERROR_SHELLS)
 # The 90-day trial offer (views/trial_offer.js) and the Overview's Getting
 # started card — a funnel, like the wizards above: where the offer was SEEN
 # (once per surface per page), where it was STARTED, and where the licence
@@ -437,7 +502,7 @@ PRO_OFFER_EVENTS: frozenset[str] = frozenset(
      "pro_invite_claim_failed", "pro_invite_declined", "free_pro_card_shown", "free_pro_card_no"}
 )
 OFFER_EVENTS: frozenset[str] = frozenset(
-    {f"{what}:{s}" for what in ("trial_offer_shown", "trial_started", "trial_failed") for s in TRIAL_SURFACES}
+    {f"{what}:{s}" for what in ("trial_offer_shown", "trial_started", "trial_failed", "trial_optin") for s in TRIAL_SURFACES}
     | {f"getting_started_step:{s}" for s in GETTING_STARTED_STEPS}
     | {"getting_started_shown", "getting_started_dismissed", "trial_nudge_dismissed"}
     | PRO_OFFER_EVENTS
@@ -492,9 +557,26 @@ HOUSE3D_FALLBACK_KINDS: tuple[str, ...] = ("no_webgl", "slow_gpu", "context_lost
 # house3d_wall_capped: a wall was stopped under a floor above it, or a
 # needle-thin stretch of a tall room kept to its floor's height, once per
 # page load (0.38.164).
+# house3d_fallback_size:<band> (0.38.193), sent with each fallback: how many
+# rooms the house has, so a slow screen can be told from a very big house.
+HOUSE_SIZE_BANDS: tuple[str, ...] = ("lt20", "20_60", "60_150", "gt150")
+# Stairs, once per page load where Live Aboard draws some (0.38.194,
+# live_aboard.js countStairs): drawn; whether every flight lands in a room on
+# the level it reaches, or some land in none, or some have nothing to reach;
+# one reaching a split level or a few steps within a floor; each shape and
+# style in use. Never where, how many or which.
+STAIR_SHAPES: tuple[str, ...] = ("straight", "l", "u", "l2", "l3")
+STAIR_STYLES: tuple[str, ...] = ("closed", "open", "treads", "floating")
+STAIR_USE_EVENTS: frozenset[str] = frozenset(
+    {"stairs_drawn", "stairs_reach:split_level", "stairs_reach:within"}
+    | {f"stairs_outcome:{k}" for k in ("all_ok", "some_landing", "some_nofloor")}
+    | {f"stairs_shape:{k}" for k in STAIR_SHAPES} | {f"stairs_style:{k}" for k in STAIR_STYLES}
+)
 HOUSE3D_EVENTS: frozenset[str] = frozenset(
     {"house3d_opened", "house3d_wet_window", "house3d_loft_rail", "house3d_mezzanine", "house3d_wall_capped"}
     | {f"house3d_fallback:{k}" for k in HOUSE3D_FALLBACK_KINDS}
+    | {f"house3d_fallback_size:{b}" for b in HOUSE_SIZE_BANDS}
+    | STAIR_USE_EVENTS
 )
 # Its photo step (ws_house3d_photo.py), counted by the server once per photo
 # sent: photo_read:ok, :no_ai_task (none chosen, gone, can't read pictures, or
@@ -502,7 +584,46 @@ HOUSE3D_EVENTS: frozenset[str] = frozenset(
 # answer) or :error (the AI Task failed). Never the photo, the AI Task or the
 # answer; and nothing while the 3D house is off (the command refuses first).
 PHOTO_READ_OUTCOMES: tuple[str, ...] = ("ok", "no_ai_task", "bad_answer", "error")
-PHOTO_EVENTS: frozenset[str] = frozenset(f"photo_read:{k}" for k in PHOTO_READ_OUTCOMES)
+# And (0.38.187) what each photo sent to the AI Task was of (photo_subject:
+# furniture, tag, scanner or person) and how long the AI took to answer
+# (photo_secs:<band>, answered or failed). Never the photo or the answer.
+PHOTO_SUBJECTS: tuple[str, ...] = ("furniture", "tag", "scanner", "person")
+PHOTO_SECS: tuple[str, ...] = ("lt5", "5_15", "15_45", "gt45")
+# Stairs read off a floor plan (ws_house3d_stairs.py, 0.38.188), once per plan
+# sent: stair_read:found (one or more), :none, :bad_answer, :error or
+# :no_ai_task. Never the plan, the answer or where the stairs are.
+STAIR_READ_OUTCOMES: tuple[str, ...] = ("found", "none", "bad_answer", "error", "no_ai_task")
+PHOTO_EVENTS: frozenset[str] = frozenset(
+    {f"photo_read:{k}" for k in PHOTO_READ_OUTCOMES} | {f"photo_subject:{k}" for k in PHOTO_SUBJECTS}
+    | {f"photo_secs:{k}" for k in PHOTO_SECS})
+# And (0.38.193) how long the AI took over each plan, in the photo bands.
+STAIR_EVENTS: frozenset[str] = frozenset(
+    {f"stair_read:{k}" for k in STAIR_READ_OUTCOMES} | {f"stair_secs:{k}" for k in PHOTO_SECS})
+# The Overview's accuracy tips (setup_checks.py, 0.38.193): each one shown,
+# opened (gone to its fix) or hidden, and the whole card hidden. Whether the
+# nudges move the three setup steps most homes skip.
+TIP_IDS: tuple[str, ...] = ("floor_heights", "receiver_heights", "scale")
+TIP_EVENTS: frozenset[str] = frozenset(
+    {f"tip_{a}:{t}" for a in ("shown", "opened", "hidden") for t in TIP_IDS} | {"tip_hidden:all"})
+# The AI Task chosen for photos (env.ai, 0.38.187), only where one is chosen:
+# local (Ollama), cloud (OpenAI, Google, Anthropic, Home Assistant Cloud…),
+# unknown (another integration) or unready (chosen, but gone, blind to
+# pictures, or Home Assistant too old). Never its name or entity.
+AI_TASK_WORDS: tuple[str, ...] = ("local", "cloud", "unknown", "unready")
+
+
+def ai_task_word(hass: HomeAssistant) -> str | None:
+    st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
+    if not str(((st.data if st else {}) or {}).get("atlas_3d_ai_task_entity") or "").strip():
+        return None
+    try:
+        from .ws_house3d_photo import ai_task  # noqa: PLC0415
+        ai = ai_task(hass)
+    except Exception:  # noqa: BLE001
+        return None
+    if not ai.get("ready"):
+        return "unready"
+    return "local" if ai.get("local") is True else "cloud" if ai.get("local") is False else "unknown"
 # The panels' own measurements (www/padspan-bright/client_perf.js — the same lists
 # there, held equal by tests/test_telemetry.py). Once a minute while a panel
 # is on screen: its frame rate, and where the browser tells (Chromium) its
@@ -609,9 +730,6 @@ _FEATURE_FLAGS: tuple[str, ...] = (
     "atlas_3d_enabled", "low_memory_mode",
     # Pro: the Atlas as Overview (0.38.137) — whether anyone wants it as the front door.
     "overview_atlas",
-    # Themes (0.38.157): Light for everyone, Day on Pro; the stored switch,
-    # so a lapsed Pro still says day_theme. theme_palette is in the ENUMS.
-    "day_theme", "light_theme",
 )
 # 0.38.160's switches, all off by default: whether anyone turns them on.
 # Sent ONLY when on (true), so a house that never touches them sends exactly
@@ -626,11 +744,17 @@ _FEATURE_ON_ONLY: dict[str, str] = {
     "wall_fully": "wall_fully", "hold_last_room_s": "room_hold",
     "wall_floor_cycle_s": "wall_floor_cycle", "atlas_3d_director": "director",
     "enhanced_security": "enhanced_security",
+    # 0.38.178: several wall screens (Settings → Optimize for scale).
+    "optimize_for_scale": "scale",
+    "guest_tags_enabled": "guest_tags",
     # 0.38.165's positioning settings, all off by default.
     "positioning_pick_better": "pick_better", "positioning_unsure": "unsure",
     "positioning_sensor_fusion": "fusion",
     # 0.38.167: Calibration's Walk a room tab, off by default.
     "calibration_room_walk": "room_walk",
+    # Themes (0.38.157): Light for everyone, Day on Pro; the stored switch,
+    # so a lapsed Pro still says day_theme. theme_palette is in the ENUMS.
+    "day_theme": "day_theme", "light_theme": "light_theme",
 }
 # Small enumerations reported by value (each from a fixed vocabulary in
 # ws_settings; anything unexpected is dropped by assert_shareable's length rule).
@@ -910,9 +1034,9 @@ def enabled(hass: HomeAssistant) -> bool:
 
 
 def event_allowed(name: str) -> bool:
-    return (name in EVENTS or name in TAB_EVENTS or name in UI_ERRORS or name in OFFER_EVENTS
-            or name in WEATHER_EVENTS or name in HOUSE3D_EVENTS or name in PHOTO_EVENTS
-            or name in CLIENT_EVENTS or name in SCREEN_EVENTS or name in OVERVIEW_EVENTS)
+    return (name in EVENTS or name in TAB_EVENTS or name in UI_ERRORS or ui_error_at_allowed(name) or name in OFFER_EVENTS
+            or name in WEATHER_EVENTS or name in HOUSE3D_EVENTS or name in PHOTO_EVENTS or name in STAIR_EVENTS
+            or name in CLIENT_EVENTS or name in SCREEN_EVENTS or name in OVERVIEW_EVENTS or name in TIP_EVENTS)
 
 
 def bump(hass: HomeAssistant, event: str, n: int = 1) -> bool:
@@ -926,6 +1050,7 @@ def bump(hass: HomeAssistant, event: str, n: int = 1) -> bool:
     dom = hass.data.setdefault(DOMAIN, {})
     counters: dict[str, int] = dom.setdefault(_DATA_COUNTERS, {})
     counters[event] = int(counters.get(event, 0)) + max(1, int(n))
+    _persist_counters(hass)
     return True
 
 
@@ -993,6 +1118,92 @@ def note_screen(hass: HomeAssistant, screen: str, event: str = "client_screen_se
     return True
 
 
+# The window's counters on disk too (0.38.177): they lived only in memory, so
+# a restart before the day's report took them with it. A house restarted four
+# times on the day its calibration points went to zero, and its report could
+# not say whether anyone had cleared them. Saved two minutes after a count;
+# taken and given back like the in-memory ones; read back once per start.
+COUNTERS_STORE_KEY = "padspan_bright.telemetry_counters"
+_DATA_COUNTERS_STORE = "_telemetry_counters_store"
+COUNTERS_SAVE_DELAY_S = 120
+
+
+def _counters_store(hass: HomeAssistant) -> Any:
+    dom = hass.data.setdefault(DOMAIN, {})
+    st = dom.get(_DATA_COUNTERS_STORE)
+    if st is None:
+        from homeassistant.helpers.storage import Store  # noqa: PLC0415
+        st = dom[_DATA_COUNTERS_STORE] = Store(hass, 1, COUNTERS_STORE_KEY)
+    return st
+
+
+_DATA_COUNTERS_SAVE_DUE = "_telemetry_counters_save_due"
+
+
+def _persist_counters(hass: HomeAssistant, now: bool = False) -> None:
+    """Save the window now, or once within COUNTERS_SAVE_DELAY_S of a count.
+    Not Store.async_delay_save: that restarts its wait on every call, and on
+    a house counting every few seconds (irk_unresolved_rpa) it never saved."""
+    # Only ever on Home Assistant's event loop. bump() can be called from code
+    # running in a worker thread, and there async_call_later and
+    # async_create_task are refused: the save was created and never run
+    # (Garry's house, 2026-10-29: "calls hass.async_create_task from a thread
+    # other than the event loop", telemetry.py _due, since 0.38.177).
+    tid = getattr(hass, "loop_thread_id", None)
+    if isinstance(tid, int) and threading.get_ident() != tid:
+        hass.loop.call_soon_threadsafe(_persist_counters, hass, now)
+        return
+    try:
+        dom = hass.data.setdefault(DOMAIN, {})
+        st = _counters_store(hass)
+
+        def _snap() -> dict:
+            return {"counters": dict(dom.get(_DATA_COUNTERS) or {})}
+        if now:
+            hass.async_create_task(st.async_save(_snap()))
+            return
+        if dom.get(_DATA_COUNTERS_SAVE_DUE):
+            return
+        from homeassistant.helpers.event import async_call_later  # noqa: PLC0415
+
+        # A callback: without it Home Assistant runs a plain function given
+        # to async_call_later in a worker thread, where creating the task is refused.
+        @callback
+        def _due(_now: Any = None) -> None:
+            dom[_DATA_COUNTERS_SAVE_DUE] = False
+            hass.async_create_task(st.async_save(_snap()))
+        dom[_DATA_COUNTERS_SAVE_DUE] = True
+        async_call_later(hass, COUNTERS_SAVE_DELAY_S, _due)
+    except Exception as err:  # noqa: BLE001 — counting must never fail anything
+        _LOGGER.debug("Telemetry counters not saved: %s", err)
+
+
+def merge_saved_counters(counters: dict[str, int], saved: Any) -> dict[str, int]:
+    """The in-memory window plus what the last run had saved, names still on
+    the closed list only (a name dropped from it since is not sent)."""
+    out = dict(counters)
+    raw = saved.get("counters") if isinstance(saved, dict) else None
+    for k, v in (raw if isinstance(raw, dict) else {}).items():
+        if isinstance(k, str) and event_allowed(k) and isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            out[k] = int(out.get(k, 0)) + v
+    return out
+
+
+async def async_restore_counters(hass: HomeAssistant) -> None:
+    dom = hass.data.setdefault(DOMAIN, {})
+    if dom.get("_telemetry_counters_restored"):
+        return
+    dom["_telemetry_counters_restored"] = True
+    try:
+        saved = await _counters_store(hass).async_load()
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Telemetry counters not read back: %s", err)
+        return
+    if enabled(hass):
+        dom[_DATA_COUNTERS] = merge_saved_counters(dom.get(_DATA_COUNTERS) or {}, saved)
+    _persist_counters(hass, now=True)
+
+
 def _take_counters(hass: HomeAssistant) -> dict[str, int]:
     """The counters since the last report — and reset them."""
     dom = hass.data.setdefault(DOMAIN, {})
@@ -1002,6 +1213,7 @@ def _take_counters(hass: HomeAssistant) -> dict[str, int]:
     dom[_DATA_SCREENS] = set()
     dom[_DATA_SCREEN_WORDS_TAKEN] = dom.get(_DATA_SCREEN_WORDS) or {}
     dom[_DATA_SCREEN_WORDS] = {}
+    _persist_counters(hass, now=True)
     return out
 
 
@@ -1045,6 +1257,7 @@ def _give_back_windows(hass: HomeAssistant, taken: tuple[dict[str, int], dict[st
     counters = hass.data.setdefault(DOMAIN, {}).setdefault(_DATA_COUNTERS, {})
     for k, v in usage.items():
         counters[k] = int(counters.get(k, 0)) + int(v)
+    _persist_counters(hass, now=True)
     # The screens it counted go back with their counts, so they aren't counted again.
     dom = hass.data[DOMAIN]
     dom.setdefault(_DATA_SCREENS, set()).update(dom.pop(_DATA_SCREENS_TAKEN, None) or set())
@@ -1625,6 +1838,25 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         env["hw"] = _hw_payload(hass)
     except Exception:
         pass
+    # Split levels (room_meta floor_raise_m, 0.38.190), only from a house
+    # with one: how many rooms are raised and how many sunk. Counts, never
+    # which rooms or by how much.
+    _up = sum(1 for v in _rm.values() if isinstance(v, dict) and isinstance(v.get("floor_raise_m"), (int, float))
+              and not isinstance(v.get("floor_raise_m"), bool) and v["floor_raise_m"] > 0)
+    _down = sum(1 for v in _rm.values() if isinstance(v, dict) and isinstance(v.get("floor_raise_m"), (int, float))
+                and not isinstance(v.get("floor_raise_m"), bool) and v["floor_raise_m"] < 0)
+    if _up or _down:
+        env["split_levels"] = {"raised": _up, "sunk": _down}
+    # Live Aboard's stairs (0.38.193), only from a house with some and its 3D
+    # file loaded: how many, how many the AI read off a plan and were kept,
+    # how many are a few steps within one floor. Counts only.
+    try:
+        from .setup_checks import house3d_pieces, stairs_summary  # noqa: PLC0415
+        _stairs = stairs_summary(house3d_pieces(hass))
+        if _stairs:
+            env["stairs"] = _stairs
+    except Exception:
+        pass
     # Quiet mode on only (a panel filter the backend never applies): how much
     # of the house it hides. A quiet-off report is exactly what it was.
     if settings.get("quiet_mode") is True:
@@ -1660,6 +1892,33 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
     _age = install_age_word(settings.get("first_seen_ts"), time.time())
     if _age:
         env["install_age"] = _age
+    # Guest tags (guest_tags.report_buckets): words only, never a name, only where on and used.
+    try:
+        from .guest_tags import report_buckets as _guest_buckets  # noqa: PLC0415
+        _gb = _guest_buckets(hass, time.time())
+        if _gb:
+            env["guest"] = _gb
+    except Exception:
+        pass
+    # Room timing off the default, and a registry floor named outside (presence_cfg_words).
+    try:
+        try:
+            from homeassistant.helpers import floor_registry as _fr  # noqa: PLC0415
+            _fids = [f.floor_id for f in _fr.async_get(hass).async_list_floors()]
+        except Exception:
+            _fids = []
+        _pc = presence_cfg_words(settings, _fids)
+        if _pc:
+            env["presence_cfg"] = _pc
+    except Exception:
+        pass
+    # The AI Task chosen for photos (ai_task_word), only where one is chosen.
+    try:
+        _ai = ai_task_word(hass)
+        if _ai:
+            env["ai"] = {"task": _ai}
+    except Exception:
+        pass
     # Vacation Mode (vacation_mode.report_buckets), only where it was used.
     try:
         from .vacation_mode import _VM_LOG, report_buckets as _vac_buckets  # noqa: PLC0415
@@ -1771,6 +2030,32 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
         "radios_unresolved": sum(1 for r in radios if r.get("device_match") == "none"),
         "radios_matched_partial": sum(1 for r in radios if r.get("device_match") == "partial"),
     }
+    # The Shelly rules' use (0.38.175: a scanner matched to its Shelly by its
+    # network MAC + 2; 0.38.176: a scanner device with no area takes its
+    # Shelly's), in the last snapshot built. Only from a house where one did.
+    _sr = ble.get("shelly_rules") if isinstance(ble.get("shelly_rules"), dict) else {}
+    for _k, _key in (("mac", "radios_shelly_mac"), ("area_via", "radios_area_via")):
+        if isinstance(_sr.get(_k), int) and _sr[_k] > 0:
+            health[_key] = _sr[_k]
+    # Forensics switched on, in live mode, but not recording because the
+    # licence no longer reaches Pro (0.38.191: it used to go on recording).
+    # Only from a house with Forensics on.
+    try:
+        if settings.get("forensics_enabled") is True and settings.get("data_mode") == "live":
+            from .forensics_store import _recording_enabled  # noqa: PLC0415
+            health["forensics_paused_licence"] = not _recording_enabled(hass)
+    except Exception:
+        pass
+    # Rooms on one floor drawn over each other by more than 10 cm (0.38.193):
+    # a hand-traced outline past its wall, which can put a flight of stairs
+    # or a device in the wrong room. Pairs counted; only with rooms drawn.
+    try:
+        from .setup_checks import rooms_overlapping  # noqa: PLC0415
+        _geo = dom.get(DATA_MODEL).room_geometry_m() if dom.get(DATA_MODEL) is not None else {}
+        if _geo:
+            health["rooms_overlap"] = rooms_overlapping(_geo)
+    except Exception:
+        pass
     # 0.38.122's fixes, read at the report. Each is left out, not a 0, when
     # what it reads is not there, and a failure leaves out only that one.
     # #149: calibration points whose room is no room (an [auto] point with a
@@ -1782,6 +2067,23 @@ def build_payload(hass: HomeAssistant, *, consume: bool = False) -> dict[str, An
             _known |= {str(a.name) for a in _ar.async_get(hass).async_list_areas()}
             _pt_rooms = (str(p.get("room") or "") for p in cal_points if isinstance(p, dict))
             health["cal_points_phantom_room_n"] = sum(1 for r in _pt_rooms if r and r not in _known)
+            # 0.38.177: the last report had points, this one none, and no
+            # clear was recorded in between (calibration_points_seen, kept by
+            # send_now and by every clear) — calibration lost, not cleared.
+            # Only with the calibration store loaded, as above.
+            _seen = settings.get("calibration_points_seen")
+            if isinstance(_seen, int) and not isinstance(_seen, bool) and _seen > 0 and not cal_points:
+                health["calibration_points_vanished"] = True
+    except Exception as err:
+        _LOGGER.debug("Telemetry: calibration health left out: %s", err)
+    # 0.38.177: fewer maps than the last report, with no delete recorded in
+    # between (maps_seen, kept by send_now and by every delete).
+    try:
+        _maps_seen = settings.get("maps_seen")
+        _maps_now = _len(maps.get("maps") or [])
+        if isinstance(_maps_seen, int) and not isinstance(_maps_seen, bool) and _maps_now < _maps_seen \
+                and dom.get(DATA_MAPS) is not None:
+            health["maps_vanished"] = True
     except Exception as err:
         _LOGGER.debug("Telemetry: cal_points_phantom_room_n left out: %s", err)
     # #147: Beacon Tune pins on a device that moves (tune_save_plan.js
@@ -1982,6 +2284,19 @@ def _check_load_sections(payload: dict[str, Any]) -> None:
             raise ValueError("env.room_walk not in the vocabulary")
     if isinstance(env, dict) and "install_age" in env and env["install_age"] not in INSTALL_AGE_WORDS:
         raise ValueError("env.install_age not in the vocabulary")
+    if isinstance(env, dict) and "guest" in env:
+        from .guest_tags import REPORT_WORDS as _GW  # noqa: PLC0415
+        gst = env["guest"]
+        if not isinstance(gst, dict) or not all(k in _GW and v in _GW[k] for k, v in gst.items()):
+            raise ValueError("env.guest not in the vocabulary")
+    if isinstance(env, dict) and "ai" in env:
+        a = env["ai"]
+        if not isinstance(a, dict) or set(a) != {"task"} or a["task"] not in AI_TASK_WORDS:
+            raise ValueError("env.ai not in the vocabulary")
+    if isinstance(env, dict) and "presence_cfg" in env:
+        pc = env["presence_cfg"]
+        if not isinstance(pc, dict) or not all(k in PRESENCE_CFG_WORDS and v in PRESENCE_CFG_WORDS[k] for k, v in pc.items()):
+            raise ValueError("env.presence_cfg not in the vocabulary")
     if isinstance(env, dict) and "vacation" in env:
         from .vacation_mode import REPORT_WORDS as _VW  # noqa: PLC0415
         vac = env["vacation"]
@@ -2152,7 +2467,9 @@ async def send_now(hass: HomeAssistant, *, force: bool = False) -> dict[str, Any
         return {"sent": False, "reason": "network", "bytes": len(body)}
     if st:
         try:
-            await st.async_set(telemetry_last_day=_today())
+            await st.async_set(telemetry_last_day=_today(),
+                               calibration_points_seen=int((payload.get("env") or {}).get("calibration_points") or 0),
+                               maps_seen=int((payload.get("env") or {}).get("maps") or 0))
         except Exception:
             pass
     # A new install's first steps went: never again (onboarding.py).
@@ -2176,6 +2493,7 @@ def reset_windows(hass: HomeAssistant) -> None:
     hass.data.setdefault(DOMAIN, {})[_DATA_COUNTERS] = {}
     hass.data[DOMAIN][_DATA_SCREENS] = set()
     hass.data[DOMAIN][_DATA_SCREEN_WORDS] = {}
+    _persist_counters(hass, now=True)
     try:
         from .ws_common import _log_handler  # noqa: PLC0415
         if _log_handler is not None:
@@ -2205,6 +2523,10 @@ def async_setup_telemetry(hass: HomeAssistant) -> None:
 
     dom = hass.data.setdefault(DOMAIN, {})
     dom.setdefault(_DATA_STARTED, time.monotonic())
+    try:
+        hass.async_create_task(async_restore_counters(hass))
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Telemetry counters not restored: %s", err)
     try:
         from . import perf_sampler  # noqa: PLC0415
         perf_sampler.async_start(hass)

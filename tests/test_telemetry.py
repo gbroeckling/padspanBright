@@ -775,6 +775,13 @@ def test_a_configured_house_says_that_instead():
     assert p["env"]["floors_with_height"] == 2
     assert p["env"]["rooms_with_height"] == 1
     assert "Living" not in json.dumps(p), "a count, never the room"
+    assert "split_levels" not in p["env"], "only from a house with a split level"
+    dom[DATA_MODEL].data["room_meta"]["Kitchen"]["floor_raise_m"] = 0.75
+    dom[DATA_MODEL].data["room_meta"]["Living"]["floor_raise_m"] = -0.3
+    p = T.build_payload(h)
+    T.assert_shareable(p)
+    assert p["env"]["split_levels"] == {"raised": 1, "sunk": 1}
+    assert "0.75" not in json.dumps(p["env"]), "a count, never how far"
     assert p["env"]["scanners_with_z"] == 2
     assert p["health"]["floors_all_default"] is False
     assert p["health"]["scanner_z_uniform"] is False, "two distinct mounting heights"
@@ -1823,5 +1830,118 @@ def test_install_age_is_a_word_from_first_seen():
     T.assert_shareable(payload)
     assert payload["env"]["install_age"] == "1_7d"
     payload["env"]["install_age"] = "2.0 days"
+    with pytest.raises(ValueError):
+        T.assert_shareable(payload)
+
+
+
+def test_the_days_counts_survive_a_restart_and_only_closed_names_come_back():
+    """0.38.177: counters live on disk too. What the last run saved is added
+    back at start; a name no longer on the list, or a non-count, is dropped."""
+    saved = {"counters": {"calibration_cleared_all": 1, "tab:maps": 3, "nicole_s_office": 5,
+                          "calibration_point_added": True, "follow_alert_sent": -2}}
+    out = T.merge_saved_counters({"tab:maps": 2}, saved)
+    assert out == {"tab:maps": 5, "calibration_cleared_all": 1}
+    assert T.merge_saved_counters({"a": 1}, None) == {"a": 1}
+    assert T.merge_saved_counters({}, {"counters": "junk"}) == {}
+
+
+def test_bump_saves_the_window_once_within_two_minutes_however_often_it_counts(monkeypatch):
+    """Not a trailing debounce: a house counting every second still saves."""
+    import sys
+    h = _hass()
+    store = MagicMock()
+    h.data[DOMAIN][T._DATA_COUNTERS_STORE] = store
+    later = []
+    import types
+    ev = types.ModuleType("homeassistant.helpers.event")
+    ev.async_call_later = lambda _h, delay, fn: later.append((delay, fn))
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.event", ev)
+    for _ in range(50):
+        assert T.bump(h, "calibration_cleared_all")
+    assert len(later) == 1 and later[0][0] == T.COUNTERS_SAVE_DELAY_S
+    # A callback, or Home Assistant runs it in a worker thread and the save is
+    # created but refused (Garry's house, 2026-10-29).
+    assert getattr(later[0][1], "_hass_callback", False) is True
+    later[0][1]()                                    # two minutes on: saved, with all 50
+    store.async_save.assert_called_once_with({"counters": {"calibration_cleared_all": 50}})
+    T.bump(h, "calibration_cleared_all")
+    assert len(later) == 2                           # the next count starts a new wait
+
+
+def test_a_count_from_a_worker_thread_is_handed_to_the_event_loop(monkeypatch):
+    """bump() from code in a worker thread schedules nothing there: the save
+    is handed to Home Assistant's loop (call_soon_threadsafe) and done there."""
+    import sys
+    import threading
+    import types
+    h = _hass()
+    h.data[DOMAIN][T._DATA_COUNTERS_STORE] = MagicMock()
+    h.loop_thread_id = threading.get_ident()            # this thread is "the loop"
+    handed, later = [], []
+    h.loop.call_soon_threadsafe = lambda fn, *a: handed.append((fn, a))
+    ev = types.ModuleType("homeassistant.helpers.event")
+    ev.async_call_later = lambda _h, delay, fn: later.append(fn)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.event", ev)
+    t = threading.Thread(target=lambda: T.bump(h, "calibration_cleared_all"))
+    t.start()
+    t.join()
+    assert later == [] and len(handed) == 1 and handed[0][0] is T._persist_counters
+    handed[0][0](*handed[0][1])                         # on the loop: the wait starts there
+    assert len(later) == 1 and later[0]._hass_callback is True
+    # On the loop itself, nothing is handed over.
+    T.bump(h, "calibration_cleared_all")
+    assert len(handed) == 1
+
+
+def test_calibration_points_that_vanish_without_a_clear_are_flagged_once():
+    h = _hass()
+    st = h.data[DOMAIN][DATA_SETTINGS]
+    cal = MagicMock()
+    cal.data = {"points": [], "model": {}}
+    cal.list_points.return_value = []
+    h.data[DOMAIN]["calibration"] = cal
+    st.data["calibration_points_seen"] = 38
+    payload = T.build_payload(h)
+    T.assert_shareable(payload)
+    assert payload["health"].get("calibration_points_vanished") is True
+    st.data["calibration_points_seen"] = 0          # cleared on purpose, or already reported
+    assert "calibration_points_vanished" not in T.build_payload(h)["health"]
+
+
+def test_fewer_maps_than_the_last_report_without_a_delete_is_flagged():
+    from types import SimpleNamespace
+    from custom_components.padspan_bright.const import DATA_MAPS
+    from custom_components.padspan_bright import ws_maps as WM
+    h = _hass()
+    st = h.data[DOMAIN][DATA_SETTINGS]
+    ms = SimpleNamespace(data={"maps": [{"id": "a"}, {"id": "b"}]})
+    h.data[DOMAIN][DATA_MAPS] = ms
+    st.data["maps_seen"] = 3
+    payload = T.build_payload(h)
+    T.assert_shareable(payload)
+    assert payload["health"].get("maps_vanished") is True
+    WM._note_map_deleted(h, ms, migrated=False)           # a delete on purpose moves the marker
+    assert st.data["maps_seen"] == 2
+    assert "maps_vanished" not in T.build_payload(h)["health"]
+
+
+def test_presence_cfg_only_off_the_defaults():
+    """0.38.182: env.presence_cfg says which installs run room timing off the
+    default (a delay of 0 now means 0; installs from before 0.21 may still
+    poll at 10 s) and which have a Home Assistant floor the outdoor rules now
+    count as outside. Nothing is sent from an install on the defaults."""
+    assert T.presence_cfg_words({"presence_poll_interval_s": 5}) == {}
+    assert T.presence_cfg_words({"presence_poll_interval_s": 5, "room_change_delay_s": 20}) == {}
+    assert T.presence_cfg_words({"presence_poll_interval_s": 10, "room_change_delay_s": 0}) == {"poll": "10", "delay": "0"}
+    assert T.presence_cfg_words({"presence_poll_interval_s": 3, "room_change_delay_s": 90}) == {"poll": "1_4", "delay": "gt60"}
+    assert T.presence_cfg_words({}, ["ground", "__outside__"]) == {}
+    assert T.presence_cfg_words({}, ["ground", "outside"]) == {"outdoor": "ha"}
+    h = _hass()
+    h.data[DOMAIN][DATA_SETTINGS].data["room_change_delay_s"] = 0
+    payload = T.build_payload(h)
+    T.assert_shareable(payload)
+    assert payload["env"]["presence_cfg"] == {"delay": "0"}
+    payload["env"]["presence_cfg"] = {"delay": "0.0"}
     with pytest.raises(ValueError):
         T.assert_shareable(payload)

@@ -1350,3 +1350,95 @@ class TestSwapAndRelearn:
         await self._call("ws_calibration_relearn_radio", store,
                          {"id": 1, "source": "s1", "gain_db": 3})
         store._async_train_rf.assert_awaited_once()
+
+
+
+# ═══ 0.38.177: the refusal has a reason the report can count, and the tab
+# says a floor needs measuring before anyone stands still for a capture ════
+
+async def test_the_no_scale_refusal_is_its_own_error_and_counted_as_such(monkeypatch):
+    from custom_components.padspan_bright import ws_calibration as W
+    from custom_components.padspan_bright.calibration_store import NoScaleError
+    assert issubclass(NoScaleError, ValueError)        # old callers catching ValueError still do
+    counted = []
+    monkeypatch.setattr(W, "_bump", lambda _h, name, n=1: counted.append(name))
+    for exc, word in ((NoScaleError("This map has no metre scale yet"), "calibration_save_refused_no_scale"),
+                      (RuntimeError("disk full"), "calibration_save_failed_other")):
+        cal = MagicMock()
+        cal.async_add_point = AsyncMock(side_effect=exc)
+        monkeypatch.setattr(W, "_get_cal_store", AsyncMock(return_value=cal))
+        conn = MagicMock()
+        await _call_save(W, conn)
+        conn.send_error.assert_called_once()
+        assert counted[-1] == word
+
+
+async def _call_save(W, conn):
+    import inspect
+    fn = W.ws_calibration_save_point
+    while hasattr(fn, "__wrapped__"):
+        fn = fn.__wrapped__
+    res = fn(MagicMock(), conn, {"id": 1, "point": {}})
+    if inspect.isawaitable(res):
+        await res
+
+
+def test_the_calibration_tab_checks_the_floor_is_measured_before_a_capture():
+    """The guide only moves past Setup with a measured floor; Pin & Listen and
+    Roam show the way to Measure instead of collecting points that will be
+    refused (an install's first day, 2026-10-24: seven refused saves)."""
+    from pathlib import Path
+    js = (Path(__file__).resolve().parents[1] / "custom_components" / "padspan_bright" / "www" / "padspan-bright"
+          / "views" / "calibration.js").read_text(encoding="utf-8")
+    assert "const ready = !!(cs.deviceId && cs.mapId && _floorScaled(ctx, cs.mapId));" in js
+    for fn in ("function _pinAndListen(", "function _roam("):
+        body = js[js.index(fn):]
+        body = body[:body.index("const maps = ctx.state.maps?.list || [];")]
+        assert "if (!_floorScaled(ctx, cs.mapId))" in body and "_noScaleCard(ctx, el, cs)" in body, fn
+    helper = js[js.index("function _floorScaled("):js.index("function _noScaleCard(")]
+    assert "if (!t || !mapId) return true;" in helper, "no model loaded yet must not block"
+    # Run for real: before model_get answers, nothing is blocked, even with an
+    # empty map_transforms already there (the stable review, 2026-10-29).
+    import json as _json, shutil as _sh, subprocess as _sp
+    node = _sh.which("node")
+    if node:
+        cases = [({"_modelLoaded": False, "model": {"map_transforms": {}}}, "m1", True),
+                 ({"_modelLoaded": True, "model": {"map_transforms": {}}}, "m1", False),
+                 ({"_modelLoaded": True, "model": {"map_transforms": {"m1": {"scale_x_m": 10}}}}, "m1", True),
+                 ({"_modelLoaded": True, "model": {}}, "m1", True)]
+        code = helper + "\n" + "".join(f"console.log(JSON.stringify(_floorScaled({{state: {_json.dumps(st)}}}, {_json.dumps(mid)})));\n"
+                                        for st, mid, _ in cases)
+        out = _sp.run([node, "-e", code], capture_output=True, text=True, timeout=60).stdout.split()
+        assert out == [_json.dumps(want) for *_, want in cases], out
+
+
+
+async def test_a_clear_on_purpose_is_counted_and_moves_the_reports_marker(monkeypatch):
+    """So the next report does not read cleared points as lost."""
+    import inspect
+    from types import SimpleNamespace
+    from custom_components.padspan_bright import ws_calibration as W
+    from custom_components.padspan_bright.const import DATA_SETTINGS, DOMAIN
+    counted = []
+    monkeypatch.setattr(W, "_bump", lambda _h, name, n=1: counted.append(name))
+    sets = {}
+
+    async def _set(**kw):
+        sets.update(kw)
+    hass = MagicMock()
+    hass.data = {DOMAIN: {DATA_SETTINGS: SimpleNamespace(data={}, async_set=_set)}}
+    for cmd, word, msg in (("ws_calibration_clear", "calibration_cleared_all", {"id": 1}),
+                           ("ws_calibration_clear_map", "calibration_cleared_map", {"id": 2, "map_id": "m1"})):
+        cal = MagicMock()
+        cal.data = {"points": [{"id": "keep"}] if cmd.endswith("_map") else []}
+        cal.async_clear_all = AsyncMock(return_value=38)
+        cal.async_clear_map = AsyncMock(return_value=3)
+        monkeypatch.setattr(W, "_get_cal_store", AsyncMock(return_value=cal))
+        fn = getattr(W, cmd)
+        while hasattr(fn, "__wrapped__"):
+            fn = fn.__wrapped__
+        res = fn(hass, MagicMock(), msg)
+        if inspect.isawaitable(res):
+            await res
+        assert counted[-1] == word
+        assert sets["calibration_points_seen"] == len(cal.data["points"])

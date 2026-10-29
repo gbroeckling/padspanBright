@@ -358,6 +358,10 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     from .emergency_test import WS_COMMANDS as _emergency_commands
     for _cmd in _emergency_commands:
         websocket_api.async_register_command(hass, _cmd)
+    # Guest tags (ws_guests.py) — off until chosen in Settings; get works, the rest refuse while off.
+    from .ws_guests import WS_COMMANDS as _guest_commands
+    for _cmd in _guest_commands:
+        websocket_api.async_register_command(hass, _cmd)
     # Sub-zones (ws_subzones.py) — normally off; list works, the rest refuse while off.
     from .ws_subzones import WS_COMMANDS as _subzone_commands
     for _cmd in _subzone_commands:
@@ -378,7 +382,15 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     from .ws_house3d_photo import WS_COMMANDS as _house3d_photo_commands
     for _cmd in _house3d_photo_commands:
         websocket_api.async_register_command(hass, _cmd)
+    # Stairs read off a floor plan by the same AI Task (ws_house3d_stairs.py, Settings → AI); stores nothing.
+    from .ws_house3d_stairs import WS_COMMANDS as _house3d_stairs_commands
+    for _cmd in _house3d_stairs_commands:
+        websocket_api.async_register_command(hass, _cmd)
     websocket_api.async_register_command(hass, ws_flood_reset)
+    # The Overview's accuracy tips (setup_checks.py): the setup steps the report finds skipped most.
+    from .setup_checks import WS_COMMANDS as _setup_tip_commands
+    for _cmd in _setup_tip_commands:
+        websocket_api.async_register_command(hass, _cmd)
     # A motion sensor's last real change across an offline blip (motion_reconnects.py).
     from .motion_reconnects import ws_motion_reconnects
     websocket_api.async_register_command(hass, ws_motion_reconnects)
@@ -614,7 +626,9 @@ async def ws_model_update(hass: HomeAssistant, connection, msg) -> None:
         "type": "padspan_bright/room_height_set",
         vol.Required("room"): vol.All(str, vol.Length(min=1, max=120)),
         # Metres from the room's floor to the top of its space; null = its floor's.
-        vol.Required("height_m"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("height_m"): vol.Any(None, vol.Coerce(float)),
+        # Split level (0.38.190): how far its floor sits above its floor's; null = level.
+        vol.Optional("floor_raise_m"): vol.Any(None, vol.Coerce(float)),
     }
 )
 @websocket_api.async_response
@@ -628,15 +642,26 @@ async def ws_room_height_set(hass: HomeAssistant, connection, msg) -> None:
     if not mdl:
         connection.send_error(msg["id"], "no_model_store", "Model store not initialized")
         return
-    h = msg["height_m"]
-    if h is not None and not math.isfinite(h):
-        connection.send_error(msg["id"], "invalid", "height_m must be a height in metres, or null for the floor's")
+    if "height_m" not in msg and "floor_raise_m" not in msg:
+        connection.send_error(msg["id"], "invalid", "Send height_m, floor_raise_m or both")
         return
-    ok, stored = await mdl.async_set_room_height(msg["room"], h)
-    if not ok:
-        connection.send_error(msg["id"], "not_found", f"{msg['room']} is not a room on the map.")
-        return
-    connection.send_result(msg["id"], {"ok": True, "room": msg["room"], "height_m": stored})
+    out: dict[str, Any] = {"ok": True, "room": msg["room"]}
+    for key in ("height_m", "floor_raise_m"):
+        v = msg.get(key)
+        if v is not None and not math.isfinite(v):
+            connection.send_error(msg["id"], "invalid", f"{key} must be metres, or null")
+            return
+    if "height_m" in msg:
+        ok, out["height_m"] = await mdl.async_set_room_height(msg["room"], msg["height_m"])
+        if not ok:
+            connection.send_error(msg["id"], "not_found", f"{msg['room']} is not a room on the map.")
+            return
+    if "floor_raise_m" in msg:
+        ok, out["floor_raise_m"] = await mdl.async_set_room_raise(msg["room"], msg["floor_raise_m"])
+        if not ok:
+            connection.send_error(msg["id"], "not_found", f"{msg['room']} is not a room on the map.")
+            return
+    connection.send_result(msg["id"], out)
 
 
 # ── Settings Helpers ───────────────────────────────────────────────────────────

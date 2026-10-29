@@ -92,6 +92,10 @@ export function render(ctx){
       "Radio Map overlays signal heatmaps on the 3D iso view. " +
       "Distortion Map visualises where the RF model diverges from reality. " +
       "Adaptive Learning lets the system continuously improve from live positioning data."],
+    ["ai", "AI",
+      "AI power features: PadSpan can use an AI you have set up in Home Assistant (an AI Task) to read photos, " +
+      "and soon floor plans. Nothing here runs unless you switch it on and pick an AI Task. A cloud AI sends what it " +
+      "reads out of the house; a local one (like Ollama) keeps it home."],
     ["ui", "UI Structure",
       "Choose which tabs appear in the sidebar when using Advanced mode. " +
       "All tabs are always visible in Development mode regardless of these settings. " +
@@ -134,6 +138,8 @@ export function render(ctx){
     root.appendChild(_settingsPresence(ctx, el));
   } else if(activeTab === "features"){
     root.appendChild(_settingsFeatures(ctx, el));
+  } else if(activeTab === "ai"){
+    root.appendChild(_settingsAI(ctx, el));
   } else if(activeTab === "ui"){
     root.appendChild(_settingsUI(ctx, el));
   } else {
@@ -843,6 +849,41 @@ function _settingsPresence(ctx, el){
     ]));
   }
 
+  // ── Guest tags (guest_tags.py, 0.38.178): off until turned on here ───────
+  {
+    const gOn = settings.guest_tags_enabled === true;
+    const gToggle = el("input",{type:"checkbox",style:"width:16px;height:16px;accent-color:#fbbf24;cursor:pointer"});
+    gToggle.checked = gOn;
+    gToggle.addEventListener("change", async()=>{
+      if (gToggle.checked && !confirm("Turn on guest tags?\n\nA tag you lend to a guest (a house-sitter, a visitor, a cleaner) is followed room by room while they have it, and you can be told when they arrive, leave or go into a room you choose.\n\nTell your guests the tag is tracked.")) { gToggle.checked = false; return; }
+      try {
+        await ctx.actions.settingsSet({ guest_tags_enabled: gToggle.checked });
+        ctx.toast(gToggle.checked ? "Guest tags on — see the Guests tab" : "Guest tags off");
+        ctx.actions.renderRooms();
+      } catch(e){ gToggle.checked = !gToggle.checked; ctx.toast("Failed to save: " + (e?.message || e), true); }
+    });
+    const keep = el("select",{class:"select",style:"width:auto"});
+    for (const [v, t] of [[0,"not kept"],[7,"7 days"],[30,"30 days"],[90,"90 days"]]) keep.appendChild(el("option",{value:String(v)}, t));
+    keep.value = String(settings.guest_retention_days ?? 30);
+    keep.addEventListener("change", async()=>{
+      try { await ctx.actions.settingsSet({ guest_retention_days: parseInt(keep.value, 10) }); ctx.toast("Saved"); }
+      catch(e){ ctx.toast("Failed to save: " + (e?.message || e), true); }
+    });
+    wrap.appendChild(el("div",{class:"card",style:"border-color:" + (gOn ? "#fbbf24" : "#2d4a38")},[
+      el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:4px"},[
+        el("div",{class:"h2",style:"margin:0;color:#fbbf24"}, "Guest tags"),
+      ]),
+      el("div",{style:rowStyle},[ gToggle, el("span",{style:"font-size:13px;color:#e2e8f0"}, "Use tags as guest tags") ]),
+      el("div",{class:"muted",style:"font-size:12px;margin:4px 0 8px;line-height:1.5"},
+        "Lend a tag PadSpan already knows (a beacon, a Find My tag, a spare phone) to a guest. While they have it, the Guests tab shows where they are, " +
+        "when they arrived and left, and how long they spent in each room, and you can be told when they arrive, leave, or go into a room you set as off-limits. " +
+        "A house-sitter can count as someone home for Vacation Mode. Off: nothing is tracked or kept, and the Guests tab is hidden."),
+      el("div",{style:rowStyle},[ el("span",{style:"font-size:12px;color:#94a3b8"},"Keep a finished stay's report (name, times, rooms) for"), keep ]),
+      el("div",{class:"muted",style:"font-size:11px"},
+        "Guests' names stay in this Home Assistant: never in the usage report, never in a backup. Only an administrator can lend a tag or end a stay."),
+    ]));
+  }
+
   // ── Fabric source ─────────────────────────────────────────────────────────
   // "Runs without Home Assistant areas" — the fabric is the model, and this
   // decides whether HA's registry gets to write into it.
@@ -911,7 +952,7 @@ function _settingsPresence(ctx, el){
 
   // ── Room change delay ──────────────────────────────────────────────────────
   const currentDelay = (settings.room_change_delay_s != null ? Number(settings.room_change_delay_s) : 20);
-  const _pollInt = (settings.presence_poll_interval_s != null ? Number(settings.presence_poll_interval_s) : 10);
+  const _pollInt = (settings.presence_poll_interval_s != null ? Number(settings.presence_poll_interval_s) : 5);
   const polls = Math.max(1, Math.round(currentDelay / _pollInt));
   const delayInp = el("input", {
     type: "number", min: "0", max: "300", step: "5", value: String(currentDelay), style: inpStyle,
@@ -938,7 +979,7 @@ function _settingsPresence(ctx, el){
     ]),
     el("div", { class: "muted", style: "font-size:11px;margin-top:8px" },
       `Current: ${currentDelay}s → requires ~${polls} consecutive ${_pollInt}s poll${polls !== 1 ? "s" : ""} agreement. ` +
-      `Set to 0 for instant room switching.`
+      `Set to 0 to switch on the first poll that agrees (indoor↔outdoor and far-apart rooms still need the stricter checks).`
     ),
   ]));
 
@@ -1063,13 +1104,13 @@ function _settingsPresence(ctx, el){
   }
 
   // ── Presence Poll Interval ──────────────────────────────────────────────────
-  const currentPoll = (settings.presence_poll_interval_s != null ? Number(settings.presence_poll_interval_s) : 10);
+  const currentPoll = (settings.presence_poll_interval_s != null ? Number(settings.presence_poll_interval_s) : 5);
   const pollInp = el("input", {
     type: "number", min: "1", max: "60", step: "1", value: String(currentPoll), style: inpStyle,
   });
   const pollSaveBtn = el("button", { class: "btn" }, "Save");
   pollSaveBtn.addEventListener("click", async () => {
-    const v = Math.max(1, Math.min(60, parseInt(pollInp.value) || 10));
+    const v = Math.max(1, Math.min(60, parseInt(pollInp.value) || 5));
     try {
       await ctx.actions.settingsSet({ presence_poll_interval_s: v });
       ctx.toast(`Poll interval set to ${v}s`);
@@ -1089,8 +1130,13 @@ function _settingsPresence(ctx, el){
       pollSaveBtn,
     ]),
     el("div", { class: "muted", style: "font-size:11px;margin-top:8px" },
-      `Current: ${currentPoll}s. Default: 10s. Range: 1–60s.`
+      `Current: ${currentPoll}s. Default: 5s. Range: 1–60s.`
     ),
+    // Installs from before 0.21 kept the old 10 s default (it was never
+    // changed for them: 10 s may also be someone's choice). Say so, once.
+    currentPoll === 10 ? el("div", { class: "muted", style: "font-size:11px;margin-top:6px;color:#fbbf24" },
+      "10 s was the default before PadSpan 0.21. At 5 s a room change needs half the wait for the same Room Change Delay. " +
+      "Keep 10 s if you chose it for a slow machine.") : null,
   ]));
 
   // ── CPU Mode ───────────────────────────────────────────────────────────────
@@ -1169,6 +1215,44 @@ function _settingsPresence(ctx, el){
     ]),
     el("div", { class: "muted", style: "font-size:11px;margin-top:8px" },
       "Applies from the next update — no restart needed."
+    ),
+  ]));
+
+  // ── Optimize for scale (0.38.178) ──────────────────────────────────────────
+  // Several wall screens at once. Off by default: one screen gets nothing
+  // from it, and the Overview then shows only the devices it can draw.
+  const scaleOn = !!settings.optimize_for_scale;
+  const scaleWhat =
+    "• The Overview and the Atlas's 3D people ask for a slim update: the people, tags and devices it can draw, " +
+    "with the counts, instead of every passing Bluetooth device (about 2 MB a screen every 5 seconds in a busy house).\n" +
+    "• Screens polling close together share one update (within 4.5 s instead of 2 s), so Home Assistant builds it about once per poll however many screens are on.\n" +
+    "• A screen whose page is hidden (display off, tab in the background) asks for nothing until it is shown again.\n" +
+    "Monitor, Devices, Bluetooth and every other view still get everything. On the Overview, the list behind the objects count shows only what the slim update carries.";
+  const scaleBtn = el("button", { class: "btn inline", style: scaleOn
+    ? "background:#0a2a1a;border-color:#52b788;color:#52b788;font-weight:700"
+    : "color:#94a3b8" }, scaleOn ? "On" : "Off");
+  scaleBtn.addEventListener("click", async () => {
+    try {
+      await ctx.actions.settingsSet({ optimize_for_scale: !scaleOn });
+      ctx.toast(`Optimize for scale ${!scaleOn ? "on" : "off"}`);
+      ctx.actions.renderRooms();
+    } catch(e) { ctx.toast("Failed to save setting", true); }
+  });
+  wrap.appendChild(el("div", { class: "card" }, [
+    el("div", { class: "h2" }, "Optimize for scale"),
+    el("div", { class: "muted", style: "font-size:12px;margin-bottom:10px" },
+      "For houses with several wall screens or tablets showing PadSpan at once. It cuts what each screen asks Home Assistant for, " +
+      "which matters most in a busy house or on a small machine (a Raspberry Pi)."
+    ),
+    el("div", { style: "font-size:12px;white-space:pre-line;margin-bottom:12px;padding:8px 10px;" +
+      "border:1px solid #2d4a38;border-radius:6px;background:rgba(82,183,136,.06);color:#b0c4b1" },
+      "What it does:\n" + scaleWhat),
+    el("div", { style: rowStyle }, [
+      el("div", { style: "font-size:13px;color:#a7f3d0;min-width:130px" }, "Optimize for scale"),
+      scaleBtn,
+    ]),
+    el("div", { class: "muted", style: "font-size:11px;margin-top:8px" },
+      "Applies from the next update — no restart needed. Each screen picks it up within 30 seconds."
     ),
   ]));
 
@@ -1256,10 +1340,16 @@ function _settingsPresence(ctx, el){
   // after opting in; the backend refuses to send anything identifier-shaped
   // regardless (telemetry.py assert_shareable).
   const telOn = !!settings.telemetry_enabled;
+  // A free licence granted from 0.38.181 (trial, tester, free year) keeps the
+  // report on until it ends (settings_store.report_locked_until; the backend
+  // refuses too). The panel only sees whether that lock is set.
+  const telLocked = telOn && !!settings.report_locked;
   const telBtn = el("button", { class: "btn inline", style: telOn
     ? "background:#0a2a1a;border-color:#52b788;color:#52b788;font-weight:700"
-    : "color:#94a3b8" }, telOn ? "Opted in" : "Not sharing");
+    : "color:#94a3b8", title: telLocked ? "On for your free trial" : "" }, telOn ? "Opted in" : "Not sharing");
+  if (telLocked) telBtn.disabled = true;
   telBtn.addEventListener("click", async () => {
+    if (telLocked) return;
     // Off, on a key used on more than two homes: what that means, first.
     const offWarn = telOn ? reportOffConfirmText(settings) : "";
     if (offWarn && !confirm(offWarn)) return;
@@ -1351,6 +1441,8 @@ function _settingsPresence(ctx, el){
       telBtn,
       telStatus,
     ]),
+    telLocked ? el("div", { class: "muted", style: "font-size:11px;margin:-2px 0 6px" },
+      `On while you use a free licence: it can't be turned off until it ends${settings.report_locked ? " (" + String(settings.report_locked).slice(0, 10) + ")" : ""}, or with a bought key.`) : null,
     el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:10px" }, [previewBtn, sendBtn, idBtn]),
     telOut,
     // "Become a tester": its own section, consent and button, never part of
@@ -2996,7 +3088,10 @@ function _tiersWizardFree(ctx, w, isBright){
       ? "This install is PadSpan Bright — a lighter download for a household that only wants lighting from a map, not presence tracking. Every light shown room-by-room on a map and switched on or off from here is free, no key, forever. Placing each one exactly where it hangs needs a key — see below."
       : "This install is PadSpan Bright. Presence tracking, Overview, Follow, Pure Live, Occupancy, Calibration, mapping and everything else here is free, no key, forever."));
   wrap.appendChild(el("div",{style:"padding:10px 12px;background:#0a1a12;border:1px solid #1a4228;border-radius:8px;font-size:13px;color:#94a3b8;line-height:1.6"},
-    "A key only ever unlocks two things beyond that: Forensics (which Bluetooth devices were near a scanner in any time window, with dwell time and CSV export), and light placement (fixture shapes and sizes, WLED, Showcase, Fit room). The free tier above is not a trial of anything — it stays free whether or not you ever add a key. If you want to see light placement on your own house first, a one-time 90-day free trial of PadSpan Bright Pro is available below — no card, and nothing is taken away when it ends, editing just returns to the free view."));
+    (isBright
+      ? "A PadSpan Pro key adds the paid features: light placement (fixture shapes and sizes, WLED, Showcase, Fit room), the 3D house (Live Aboard), the wall screen and more."
+      : "A PadSpan Pro key adds the paid features: light placement (fixture shapes and sizes, WLED, Showcase, Fit room), Forensics (which Bluetooth devices were near a scanner in any time window, with dwell time and CSV export), the 3D house (Live Aboard), the wall screen, Locate, Busy Times and more.")
+    + " The free tier above is not a trial of anything — it stays free whether or not you ever add a key. To try PadSpan Pro on your own house first, a one-time 90-day free trial is available below, no card. When it ends, nothing you set up is deleted, and it all comes back as you left it when you buy."));
   wrap.appendChild(_tiersWizardFooter(ctx, w));
   return wrap;
 }
@@ -3020,9 +3115,9 @@ function _tiersWizardLadder(ctx, w, isBright){
       "Want presence tracking too? That's a separate, full download — PadSpan Bright — not an upgrade of this one."));
   } else {
     wrap.appendChild(row("PadSpan Bright (free)", null,
-      "Presence tracking and everything else in this app except the two paid features below. No key, no time limit."));
+      "Presence tracking and everything else in this app except the paid features below. No key, no time limit."));
     wrap.appendChild(row("PadSpan Pro", PRO_PRICE,
-      "Adds Forensics and light placement (fixture shapes and sizes, WLED, Showcase, Fit room) to this install."));
+      "Adds light placement (fixture shapes and sizes, WLED, Showcase, Fit room), the 3D house, the wall screen, Forensics, Locate and Busy Times to this install."));
     wrap.appendChild(el("div",{class:"muted",style:"font-size:12px;margin-top:6px;line-height:1.5"},
       "Only want lighting, not presence tracking? PadSpan Bright is a lighter, separate download built for exactly that."));
   }
@@ -3235,22 +3330,29 @@ function _settingsLicence(ctx, el){
   // Status — the backend's own answer, never re-derived here.
   let line, colour;
   if (!hasKey) {
-    line = "No licence key on this install. Forensics and light placement are locked. " +
+    line = "No licence key on this install. " + (edition === "PadSpan Bright"
+             ? "Light placement, the 3D house and the wall screen are locked. "
+             : "The paid features are locked: light placement, Forensics, the 3D house, the wall screen, Locate and Busy Times. ") +
            "Everything else is free and stays free.";
     colour = "#94a3b8";
   } else if (lapsed) {
     line = "\u26A0 " + (isTrial ? "Your 90-day trial" : keyProd + " licence") + " expired" + (exp ? " on " + exp : "") +
-           " \u2014 paid editing is off. Everything you already built is still here, still readable and still exportable.";
+           (edition === "PadSpan Bright"
+             ? " \u2014 light placement is read-only and the 3D house and the wall screen"
+             : " \u2014 light placement is read-only, Forensics has stopped recording, and the 3D house, the wall screen, Locate and Busy Times") +
+           " are off. Nothing you set up is deleted: it all comes back as you left it when you " + (isTrial ? "buy." : "renew.");
     colour = "#fbbf24";
   } else if (typeof daysLeft === "number" && daysLeft < 0) {
     // Expired but inside the grace period: still working, not for long.
     const graceLeft = Math.max(1, 14 + daysLeft);   // days_left rounds down; the last day is still a day
     line = "\u26A0 " + (isTrial ? "Your trial" : keyProd + " licence") + " expired" + (exp ? " on " + exp : "") +
-           " \u2014 paid editing stops in " + graceLeft + " day" + (graceLeft === 1 ? "" : "s") + ".";
+           (edition === "PadSpan Bright"
+             ? " \u2014 light placement goes read-only and the 3D house and the wall screen switch off in "
+             : " \u2014 light placement goes read-only, Forensics stops recording and the 3D house, the wall screen, Locate and Busy Times switch off in ") + graceLeft + " day" + (graceLeft === 1 ? "" : "s") + ".";
     colour = "#fbbf24";
   } else if (isTrial) {
     line = "\u2713 Trial active \u00B7 " + daysLeft + " day" + (daysLeft === 1 ? "" : "s") + " left" +
-           (exp ? " (" + exp + ")" : "") + ". Buy anytime to keep editing after it ends \u2014 nothing is lost either way.";
+           (exp ? " (" + exp + ")" : "") + ". Buy any time to keep Pro after it ends \u2014 nothing you set up is lost either way.";
     colour = expiringSoon ? "#fbbf24" : "#8ee5b4";
   } else if (expiringSoon) {
     line = "\u2713 " + keyProd + " licensed \u00B7 renews in " + daysLeft +
@@ -3345,10 +3447,12 @@ function _settingsLicence(ctx, el){
   }
 
   card.appendChild(el("div", { style: "font-size:11px;color:#94a3b8;margin-top:10px;line-height:1.5" },
-    "One key unlocks both paid features: Forensics, and placing lights exactly where they hang " +
-    "(fixture shapes and sizes, WLED, Showcase, Fit room). A PadSpan Bright Pro key unlocks the " +
-    "lighting half only. The gate governs editing \u2014 a lapsed licence never removes or hides " +
-    "anything you already built."));
+    "A PadSpan Pro key unlocks the paid features, among them light placement (fixture shapes and sizes, " +
+    "WLED, Showcase, Fit room), " + (edition === "PadSpan Bright"
+      ? "the 3D house and the wall screen. "
+      : "Forensics, the 3D house, the wall screen, Locate and Busy Times. ") +
+    "A PadSpan Bright Pro key unlocks light placement only. A lapsed licence never deletes anything: " +
+    "what you set up comes back as you left it when you renew."));
   return card;
 }
 
@@ -3572,7 +3676,7 @@ function _settingsFeatures(ctx, el){
         // lighting product, and this card should not call it PadSpan Pro.
         const _prod = String(settings.license_tier || "").toLowerCase() === "bright" ? "PadSpan Bright Pro" : "PadSpan Pro";
         const line = lapsed
-          ? `⚠ ${_prod} licence expired${licExp ? ` on ${licExp}` : ""} — paid editing is off. Everything you already recorded is still here and still exportable.`
+          ? `⚠ ${_prod} licence expired${licExp ? ` on ${licExp}` : ""} — Forensics has stopped recording. What it recorded stays searchable for its retention period, and recording starts again when you renew.`
           : expiringSoon
           ? `✓ ${_prod} licensed · renews in ${daysLeft} day${daysLeft === 1 ? "" : "s"}${licExp ? ` (${licExp})` : ""}`
           : `✓ ${_prod} licensed` + (licExp >= "2090" ? " · lifetime" : licExp ? ` · valid until ${licExp}` : "");
@@ -3846,6 +3950,94 @@ function _atlas3dDirector(ctx, el, settings, save, row){
     "It can also fly to a person or tag you pick when they go into a room you pick (or, with no room picked, any room, or a person arriving home), with the same card and the same rules, at most once every 2 minutes each. Only people and tags Live Aboard shows (Views → Show people, Show tags & scanners) are flown to. Nobody picked: off."));
   return wrap;
 }
+/** Settings → AI (Garry, 2026-10-27: "group AI power features into a section
+ *  called AI"): the AI Task that reads for PadSpan, the switches for what it
+ *  reads, and what is coming. An administrator's settings (ws_settings: a
+ *  cloud AI sends what it reads out of the house). */
+function _settingsAI(ctx, el){
+  const settings = ctx.state.settings || {};
+  const wrap = el("div",{});
+  const note = el("div",{style:"font-size:11px;color:#94a3b8;margin:8px 0 0"}, "Saves as soon as you change it.");
+  const save = async (key, value, undo) => {
+    try {
+      const r = await ctx.actions.wsCall("padspan_bright/settings_set", { [key]: value });
+      if (r && r.settings && ctx.state) ctx.state.settings = r.settings;
+      note.textContent = "Saved.";
+      return true;
+    } catch (e) {
+      if (undo) undo();
+      ctx.toast("Could not save: " + String((e && e.message) || e), true);
+      return false;
+    }
+  };
+  const head = el("div",{class:"card",style:"border:1px solid #1a4228;background:#0f1a12;margin-bottom:14px"});
+  head.appendChild(el("div",{style:"font-weight:700;font-size:14px;color:#52b788;margin-bottom:6px"}, "AI power features"));
+  head.appendChild(el("div",{style:"font-size:12px;color:#94a3b8;line-height:1.5"},
+    "PadSpan can use an AI you have set up in Home Assistant (an AI Task) to fill things in for you. It only reads what you " +
+    "give it, when you ask, and keeps nothing. A cloud AI (OpenAI, Google, Anthropic, Home Assistant Cloud) sends it out " +
+    "of the house; a local one (like Ollama) keeps it home."));
+  wrap.appendChild(head);
+
+  // The AI Task (ws_house3d_photo.py reads it): one for everything here.
+  const card = el("div",{class:"card",style:"margin-bottom:14px"});
+  card.appendChild(el("div",{class:"h2"}, "Your AI"));
+  const aiStates = (ctx.hass && ctx.hass.states) || {};
+  const aiCur = String(settings.atlas_3d_ai_task_entity || "");
+  const aiIds = Object.keys(aiStates).filter(e => e.startsWith("ai_task.")).sort();
+  const aiSel = document.createElement("select");
+  aiSel.className = "select";
+  aiSel.style.width = "auto";
+  aiSel.style.maxWidth = "100%";
+  aiSel.appendChild(el("option",{value:""}, "None"));
+  for (const eid of (aiCur && !aiIds.includes(aiCur) ? [aiCur, ...aiIds] : aiIds)) {
+    const n = aiStates[eid] && aiStates[eid].attributes && aiStates[eid].attributes.friendly_name;
+    aiSel.appendChild(el("option",{value:eid}, n ? `${n} (${eid})` : eid));
+  }
+  aiSel.value = aiCur;
+  let aiLast = aiCur;
+  aiSel.addEventListener("change", ()=>{ const want = aiSel.value; save("atlas_3d_ai_task_entity", want, ()=>{ aiSel.value = aiLast; }).then(ok=>{ if (ok) aiLast = want; }); });
+  card.appendChild(el("div",{style:"display:flex;align-items:center;gap:10px;flex-wrap:wrap"},
+    [el("span",{style:"font-size:13px;color:#a7f3d0;min-width:130px"}, "AI Task"), aiSel]));
+  card.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-top:6px"}, aiIds.length
+    ? "Pick one whose model can read pictures (a vision model). Needs Home Assistant 2025.8 or newer."
+    : "No AI Task in Home Assistant yet. Add an AI integration with a vision model (like Ollama, or a cloud one), then pick its AI Task here. Needs Home Assistant 2025.8 or newer."));
+  wrap.appendChild(card);
+
+  // What it reads: a switch each; what is not built yet says so.
+  const feats = el("div",{class:"card",style:"margin-bottom:14px"});
+  feats.appendChild(el("div",{class:"h2"}, "What it does for you"));
+  const sw = (key, label, desc, on, soon) => {
+    const r = el("label",{style:`display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-top:1px solid #1e3a2a;cursor:${soon ? "default" : "pointer"}`});
+    const cb = el("input",{type:"checkbox", style:"margin-top:3px"});
+    cb.checked = !!on; cb.disabled = !!soon;
+    if (!soon) cb.addEventListener("change", ()=>{ const want = cb.checked; save(key, want, ()=>{ cb.checked = !want; }); });
+    r.appendChild(cb);
+    r.appendChild(el("div",{},[
+      el("div",{style:"font-size:13px;color:#e2e8f0;font-weight:600"}, [label,
+        soon ? el("span",{style:"margin-left:8px;font-size:10px;font-weight:700;letter-spacing:.06em;color:#fbbf24;border:1px solid rgba(251,191,36,.45);border-radius:999px;padding:0 7px"}, "COMING SOON") : null]),
+      el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-top:2px"}, desc),
+    ]));
+    return r;
+  };
+  feats.appendChild(sw("ai_photos_enabled", "Furniture from a photo",
+    "In Live Aboard's Furnish, take a photo of a sofa, a bed or a lamp and the AI fills in its kind, style, colours and sizes. " +
+    "Tags, receivers and people's figures too. It names the piece itself, then reads that kind's details; telling it what the piece is first is quicker. It asks you for one real measurement unless something in the photo shows the scale.",
+    settings.ai_photos_enabled !== false, false));
+  feats.appendChild(sw("ai_stairs_enabled", "Stairs from your floor plans",
+    "Adds Read stairs off the plans (AI) to Live Aboard's Furnish → Build ▾ → House. Your AI looks for the stairs on each floor " +
+    "plan you placed and puts what it finds in as a first guess: check where each one stands and which way is up, then " +
+    "drag, turn or delete it. A small AI on your own computer finds most staircases but often gets their shape and which " +
+    "way is up wrong; a cloud AI reads plans better. The plans are sent to your AI only when you press it. Off until you turn it on.",
+    settings.ai_stairs_enabled === true, false));
+  feats.appendChild(sw("", "Rooms and walls from a floor plan picture",
+    "Traces the rooms and walls of a floor plan image for you, as a first guess to check before it is kept.", false, true));
+  feats.appendChild(sw("", "Ask your voice assistant where someone is",
+    "Lets an AI voice assistant in Home Assistant ask PadSpan which room someone is in, in your own words.", false, true));
+  feats.appendChild(note);
+  wrap.appendChild(feats);
+  return wrap;
+}
+
 function _atlas3dSection(ctx, el, settings){
   const box = el("div",{style:"margin-top:14px;padding-top:12px;border-top:1px solid #1e3a2a"});
   box.appendChild(el("div",{style:"font-weight:600;font-size:14px;color:#e2e8f0;margin-bottom:4px"},"🏠 Live Aboard"));
@@ -3952,27 +4144,9 @@ function _atlas3dSection(ctx, el, settings){
   // administrator's (ws_settings holds the same rule).
   more.appendChild(_atlas3dDirector(ctx, el, settings, save, row));
 
-  // The AI Task that reads photos in Furnish (ws_house3d_photo.py): an
-  // administrator's choice, since a cloud one sends each photo out of the house.
-  const aiStates = (ctx.hass && ctx.hass.states) || {};
-  const aiCur = String(settings.atlas_3d_ai_task_entity || "");
-  const aiIds = Object.keys(aiStates).filter(e => e.startsWith("ai_task.")).sort();
-  const aiSel = document.createElement("select");
-  aiSel.className = "select";
-  aiSel.style.width = "auto";
-  aiSel.style.maxWidth = "100%";
-  aiSel.appendChild(el("option",{value:""}, "None"));
-  for (const eid of (aiCur && !aiIds.includes(aiCur) ? [aiCur, ...aiIds] : aiIds)) {
-    const n = aiStates[eid] && aiStates[eid].attributes && aiStates[eid].attributes.friendly_name;
-    aiSel.appendChild(el("option",{value:eid}, n ? `${n} (${eid})` : eid));
-  }
-  aiSel.value = aiCur;
-  let aiLast = aiCur;
-  aiSel.addEventListener("change", ()=>{ const want = aiSel.value; save("atlas_3d_ai_task_entity", want, ()=>{ aiSel.value = aiLast; }).then(ok=>{ if (ok) aiLast = want; }); });
-  more.appendChild(row("AI Task for photos", [aiSel]));
-  more.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-top:4px"}, aiIds.length
-    ? "Reads the photos you take in Furnish. Pick one with a vision model. A cloud one sends each photo out of the house; a local one (like Ollama) keeps it home. Needs Home Assistant 2025.8 or newer."
-    : "No AI Task in Home Assistant yet. Add an AI integration with a vision model (like Ollama), then pick its AI Task here. Needs Home Assistant 2025.8 or newer."));
+  // The AI Task that reads photos lives in Settings → AI (with its switches).
+  more.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-top:8px"},
+    "Furniture from a photo, and the AI Task that reads it, are in Settings → AI."));
 
   // North: the GPS Bridge's own bearing (settings.fabric_bearing_deg), kept
   // to 0–359 the same way; a blank is refused rather than saved as 0, since

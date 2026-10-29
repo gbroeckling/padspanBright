@@ -164,6 +164,14 @@ tryCase("recipe: nothing is ever refused", () => {
     F.disposePiece(g);
   }
 });
+// A stair style a newer version made (a short lowercase word) is kept by an
+// edit here and drawn closed; anything else becomes closed.
+tryCase("recipe: a newer stair style is kept and drawn closed", () => {
+  const keep = F.clampRecipe({ kind: "stairs", params: { style: "glass" } }), junk = F.clampRecipe({ kind: "stairs", params: { style: "Glass!" } });
+  const L0 = F.stairFlights({ w: 1, d: 3, h: 2.8 }, keep.params);
+  check("recipe: a newer stair style is kept and drawn closed", keep.params.style === "glass" && junk.params.style === "closed" && L0.style === "closed"
+    && F.clampRecipe({ kind: "sofa", params: { arms: "glass" } }).params.arms !== "glass", { keep: keep.params.style, junk: junk.params.style, drawn: L0.style });
+});
 tryCase("recipe: pieceSize is the clamped box", () => {
   const s = F.pieceSize({ kind: "bed", width_m: 50, depth_m: 1.9, height_m: "x" });
   const d = F.FURNITURE.bed.size;
@@ -268,8 +276,11 @@ for (const kind of Object.keys(F.FURNITURE)) {
         const fin = [bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z].every(Number.isFinite);
         check(`build: ${kind}`, g.userData.fallback === false, { where, fallback: true });
         check(`build: ${kind}`, fin && !bb.isEmpty() && bb.max.x - bb.min.x > 0 && bb.max.y - bb.min.y > 0 && bb.max.z - bb.min.z > 0, { where, bb });
+        // Stairs with a balustrade: it stands its full height over the top
+        // flights, up into the floor reached's opening (no higher than a rail).
+        const railUp = kind === "stairs" && !F.stairFlights(s, F.clampRecipe(recipe).params).plain ? F.STAIR_RAIL_M + 0.12 : 0;
         const inside = bb.min.x >= -s.w / 2 - EPS && bb.max.x <= s.w / 2 + EPS && bb.min.z >= -s.d / 2 - EPS && bb.max.z <= s.d / 2 + EPS
-          && bb.min.y >= -EPS && bb.max.y <= s.h + EPS;
+          && bb.min.y >= -EPS && bb.max.y <= s.h + railUp + EPS;
         check(`build: ${kind}`, inside, { where, s, min: bb.min, max: bb.max });
         const free = kind === "tv" && F.clampRecipe(recipe).params.unit === "none";   // a TV alone keeps its screen size
         // A round thing in a long, thin box fills its narrow side only; a
@@ -363,9 +374,15 @@ const FRONT = {
   // edge for a straight flight, the landing for an L or a U).
   stairs: (g, s, r) => {
     const sx = r.params.turn === "right" ? -1 : 1, f = Math.min(s.w, s.d) / 2;
-    const x = r.params.shape === "u" ? sx * s.w / 4 : r.params.shape === "l" ? sx * (s.w / 2 - f / 2) : 0;
+    // Two or three landings: the first flight up the side, f wide (stairFlights).
+    const fm = Math.min(1.1, r.params.shape === "l2" ? Math.min(s.w / 3, s.d / 2) : Math.min(s.w, s.d) / 3);
+    const x = r.params.shape === "u" ? sx * s.w / 4 : r.params.shape === "l" ? sx * (s.w / 2 - f / 2)
+      : r.params.shape === "l2" || r.params.shape === "l3" ? sx * (s.w / 2 - fm / 2) : 0;
     // (A rise under a metre is a step or two: never higher at the front.)
-    return topAt(g, x, s.d / 2 - 0.05) < topAt(g, x, -s.d / 2 + 0.05) - (s.h >= 1 ? 0.1 : -1e-3);
+    // Three landings: the last flight passes over the first one's front, so
+    // the front is looked at just behind it.
+    const zf = r.params.shape === "l3" ? s.d / 2 - fm - 0.05 : s.d / 2 - 0.05;
+    return topAt(g, x, zf) < topAt(g, x, -s.d / 2 + 0.05) - (s.h >= 1 ? 0.1 : -1e-3);
   },
   // A chair's back is at −z, as a sofa's; a stool has none and no front.
   chair: (g, s, r) => r.params.style === "stool" ? true
@@ -447,6 +464,80 @@ for (const kind of Object.keys(F.FURNITURE)) {
     }
   });
 }
+
+// Floating stairs stand on one spine down the middle and touch no wall:
+// no board anywhere (the Sides colour is never drawn), the spine (the Rail
+// colour, even with no rail) is the first thing met from below under every
+// flight's middle and every landing; Auto rails both sides, while treads
+// only keeps its board on the wall side and its rail on the open side.
+tryCase("build: floating stairs stand on a spine and touch no wall", () => {
+  const SIZES = { straight: [0.95, 3.6], l: [2.0, 3.0], u: [2.0, 2.9], l2: [2.8, 3.0], l3: [3.0, 3.0] };
+  const base = F.defaultRecipe("stairs"), col = ["#ff0000", "#000000", "#0000ff"];
+  const recipeOf = (params) => ({ ...base, width_m: SIZES[params.shape][0], depth_m: SIZES[params.shape][1], height_m: 2.8,
+    colors: col, params: { ...base.params, ...params } });
+  const fromBelow = (g, x, z) => { const h = hitFrom(g, new THREE.Vector3(x, -1, z), new THREE.Vector3(0, 1, 0)); return h ? h.object.material.color.getHexString() : null; };
+  for (const shape of F.STAIR_SHAPES) for (const turn of ["left", "right"]) for (const quality of ["low", "high"]) {
+    const params = { shape, turn, style: "floating", rail: "none" }, recipe = recipeOf(params), where = `${shape} ${turn} ${quality}`;
+    const g = F.buildPiece(THREE, recipe, { quality }), s = F.pieceSize(F.clampRecipe(recipe));
+    check("build: floating stairs stand on a spine and touch no wall", centreOfColour(g, "#000000") === null, { where, boards: true });
+    check("build: floating stairs stand on a spine and touch no wall", centreOfColour(g, "#0000ff") !== null, { where, spine: false });
+    const L0 = F.stairFlights({ w: s.w, d: s.d, h: s.h }, F.clampRecipe(recipe).params);
+    const spots = [...L0.flights.map((Fl) => [Fl.s[0] + Fl.d[0] * Fl.L / 2, Fl.s[1] + Fl.d[1] * Fl.L / 2]),
+      ...L0.landings.map((Lg) => [(Lg.x0 + Lg.x1) / 2, (Lg.z0 + Lg.z1) / 2])];
+    for (const [x, z] of spots) check("build: floating stairs stand on a spine and touch no wall", fromBelow(g, x, z) === "0000ff", { where, x, z, hit: fromBelow(g, x, z) });
+    F.disposePiece(g);
+  }
+  const S = { w: 2, d: 3, h: 2.8 }, n = (p) => F.stairFlights(S, p).rails.length;
+  check("build: floating stairs stand on a spine and touch no wall", n({ shape: "l", style: "floating" }) === n({ shape: "l", style: "floating", rail: "both" }), "auto rails both sides");
+  check("build: floating stairs stand on a spine and touch no wall", n({ shape: "l", style: "treads" }) < n({ shape: "l", style: "treads", rail: "both" }), "treads only: auto on the open side");
+  const g = F.buildPiece(THREE, recipeOf({ shape: "straight", style: "treads", rail: "none" }), { quality: "low" });
+  check("build: floating stairs stand on a spine and touch no wall", centreOfColour(g, "#000000") !== null, "treads only keeps its wall board");
+  F.disposePiece(g);
+});
+
+// Floating stairs from above and below, every shape, rises down to a few
+// steps: nothing of the spine's metal shows on top of a tread (a hanger
+// through it, a landing's beam over the last one), and under every tread,
+// something holds it within 0.12 m (the spine, a bracket, a post, a beam).
+tryCase("build: floating stairs, every tread held from below, nothing through it", () => {
+  const SIZES = { straight: [0.95, 3.6], l: [2.0, 3.0], u: [2.0, 2.9], l2: [2.8, 3.0], l3: [3.0, 3.0] };
+  const base = F.defaultRecipe("stairs"), col = ["#ff0000", "#000000", "#0000ff"], DOWN = new THREE.Vector3(0, -1, 0);
+  for (const shape of F.STAIR_SHAPES) for (const rise of [0.3, 0.55, 0.8, 1.0, 1.6, 2.8]) for (const quality of ["low", "high"]) {
+    const recipe = { ...base, width_m: SIZES[shape][0], depth_m: SIZES[shape][1], height_m: rise, colors: col,
+                     params: { ...base.params, shape, style: "floating", rail: "none" } };
+    const g = F.buildPiece(THREE, recipe, { quality }), s = F.pieceSize(F.clampRecipe(recipe));
+    const L0 = F.stairFlights({ w: s.w, d: s.d, h: s.h }, F.clampRecipe(recipe).params), T = Math.min(0.045, L0.riser * 0.35);
+    const where = `${shape} rise ${rise} ${quality}`;
+    for (const st of L0.steps) {
+      const cx = (st.x0 + st.x1) / 2, cz = (st.z0 + st.z1) / 2;
+      for (const f of [0.1, 0.5, 0.9]) {
+        const x = st.ax === "x" ? st.x0 + (st.x1 - st.x0) * f : cx, z = st.ax === "z" ? st.z0 + (st.z1 - st.z0) * f : cz;
+        const top = hitFrom(g, new THREE.Vector3(x, st.h + 6, z), DOWN);
+        const c = top ? top.object.material.color.getHexString() : null;
+        check("build: floating stairs, every tread held from below, nothing through it", c === "ff0000", { where, x, z, h: st.h, top: c, y: top && top.point.y });
+      }
+      // From inside the tread down (a bracket or post reaches into it): how far below its underside the first thing is.
+      const y = st.h - T / 2, under = hitFrom(g, new THREE.Vector3(cx, y, cz), DOWN), gap = Math.max(0, (st.h - T) - (under ? under.point.y : 0));
+      check("build: floating stairs, every tread held from below, nothing through it", gap <= 0.12, { where, cx, cz, h: st.h, gap });
+    }
+    F.disposePiece(g);
+  }
+});
+
+// Stairs are drawn at the width they are kept at (up to the 3D file's 8 m),
+// the width the floor above is cut at (live_aboard_storey.js footprint): an
+// L round a hall 4.09 m wide is drawn 4.09 m wide, not 4.
+tryCase("build: stairs are drawn as wide as they are kept, as wide as their opening", () => {
+  const base = F.defaultRecipe("stairs");
+  for (const [shape, w] of [["l2", 4.09], ["u", 5.5], ["straight", 8]]) {
+    const r = { ...base, width_m: w, depth_m: 3.0, height_m: 2.8, params: { ...base.params, shape } };
+    const g = F.buildPiece(THREE, r, { quality: "low" }), bb = boundsOf(g);
+    check("build: stairs are drawn as wide as they are kept, as wide as their opening",
+      Math.abs(F.pieceSize(F.clampRecipe(r)).w - w) < 1e-9 && bb.max.x - bb.min.x > w - 0.1 && bb.max.x - bb.min.x <= w + EPS,
+      { shape, w, size: F.pieceSize(F.clampRecipe(r)), x: [bb.min.x, bb.max.x] });
+    F.disposePiece(g);
+  }
+});
 
 // ── unknown ─────────────────────────────────────────────────────────────────
 tryCase("unknown: an unknown kind is a box of its size", () => {

@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.176";
-const RELEASE_BUILD_ID = "20261026T184412Z";
+const APP_VERSION = "0.38.199";
+const RELEASE_BUILD_ID = "20261029T215152Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -39,7 +39,7 @@ const BUILD_ID = (() => {
     return RELEASE_BUILD_ID;
   }
 })();
-const CHANNEL = "beta";
+const CHANNEL = "stable";
 
 // ── Editions and tiers ───────────────────────────────────────────────────────
 // Which surfaces this build shows (views/editions.js). Loaded with the same
@@ -184,6 +184,7 @@ const _VIEW_PATHS = {
   forensics:    "./views/forensics.js",
   sandbox:      "./views/sandbox.js",
   occupancy:    "./views/occupancy.js",
+  guests:       "./views/guests.js",
   installbase:  "./views/installbase.js",
 };
 
@@ -262,6 +263,7 @@ const MENU = [
   ["traceback","Traceback","mdi:history"],
   ["forensics","Forensics","mdi:magnify-scan"],
   ["occupancy","Occupancy","mdi:account-group-outline"],
+  ["guests","Guests","mdi:account-clock-outline"],
   ["health","Health","mdi:heart-pulse"],
   ["qa","QA","mdi:clipboard-check-outline"],
   ["sandbox","Sandbox","mdi:flask-outline"],
@@ -296,6 +298,7 @@ const MENU_COLORS = {
   training: "#4dd0e1",
   calibration: "#26a69a",
   occupancy: "#a78bfa",
+  guests: "#fbbf24",
   diagnostics: "#9575cd",
   debug: "#ef5350",
   traceback: "#fbbf24",
@@ -318,6 +321,7 @@ const MENU_ICONS = {
   overview:    '<rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/>',
   purelive:    '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
   follow:      '<path d="M21 3 3 10.5l7.5 3L14 21l7-18z"/>',
+  guests:      '<circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5 6-5s6 1.7 6 5"/><circle cx="17.5" cy="16.5" r="4"/><path d="M17.5 14.6v2l1.3 1"/>',
   occupancy:   '<circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5 6-5s6 1.7 6 5"/><path d="M16 5.6a3.2 3.2 0 0 1 0 6.1M17.2 20c0-2.6-.9-4.2-2.4-5"/>',
   maps:        '<path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5 9 4z"/><path d="M9 4v14M15 6.5v14"/>',
   calibration: '<circle cx="12" cy="12" r="8.4"/><circle cx="12" cy="12" r="3.6"/><path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3"/>',
@@ -340,7 +344,7 @@ const MENU_ICONS = {
 // id missing from this table still renders, under a trailing "More" heading, so
 // adding a tab without touching this file can never make it disappear.
 const MENU_GROUPS = [
-  ["Live",      ["overview","purelive","follow","occupancy"]],
+  ["Live",      ["overview","purelive","follow","occupancy","guests"]],
   ["Setup",     ["maps","calibration","training","manage","settings"]],
   ["Diagnose",  ["traceback","health","forensics","monitor"]],
   ["Internals", ["devices","bluetooth","presence","qa","sandbox","installbase"]],
@@ -1117,6 +1121,91 @@ class PadSpanHaApp extends HTMLElement {
     return !!(this._hass && this._hass.user && this._hass.user.is_admin);
   }
 
+  // ── Accuracy tips (setup_checks.py, 0.38.193) ─────────────────────────
+  // The opt-in reports found most multi-floor homes skip three setup steps:
+  // every floor at the default height, every receiver at one height, no plan
+  // with a real-world scale. Once setup is done or skipped, the Overview says
+  // so in one small card, to an administrator, never on a wall screen; the
+  // server decides which apply (padspan_bright/setup_tips, the report's own
+  // rules), each line goes to its fix or is hidden, and the card can go for good.
+  _accuracyTipsCard(){
+    if (!this.state.settings || this.state.kioskMode || wallScreen(false)) return null;
+    if (!this.state._dataModeKnown || this.state.dataMode !== "live") return null;
+    if (!(this._hass && this._hass.user && this._hass.user.is_admin)) return null;
+    const hidden = new Set(this.state.settings.accuracy_tips_hidden || []);
+    if (hidden.has("all")) return null;
+    const T = this._tips || (this._tips = { at: 0, list: null, busy: false, shown: new Set() });
+    if (!T.busy && Date.now() - T.at > 600000) {
+      T.busy = true;
+      this._callWS({ type: "padspan_bright/setup_tips" })
+        .then(r => { T.list = Array.isArray(r && r.tips) ? r.tips : []; })
+        .catch(() => { T.list = T.list || []; })
+        .finally(() => { T.at = Date.now(); T.busy = false; this._scheduleRender(); });
+    }
+    const WORDS = {
+      floor_heights: ["Give your floors their real heights",
+        "Every floor is at the default height, so PadSpan tells floors apart less well than it could.", "Floor Heights"],
+      receiver_heights: ["Say how high each receiver is mounted",
+        "They're all at one height, which makes it harder to tell which floor someone is on.", "Receiver heights"],
+      scale: ["Measure one distance on a floor plan",
+        "With no real-world scale, positions and distances on the map are guesses.", "Measure"],
+    };
+    const tips = (T.list || []).filter(t => WORDS[t] && !hidden.has(t));
+    if (!tips.length) return null;
+    const save = (list) => {
+      if (this.state.settings) this.state.settings.accuracy_tips_hidden = list;
+      this._callWS({ type: "padspan_bright/settings_set", accuracy_tips_hidden: list })
+        .then(res => { if (res && res.settings) this.state.settings = res.settings; }).catch(() => {});
+      this._scheduleRender();
+    };
+    const go = (t) => {
+      this._telemetryEvent("tip_opened:" + t);
+      if (t === "scale") {
+        const maps = (this.state.maps && this.state.maps.list) || [];
+        const id = (this.state.activeMapId && maps.some(m => m.id === this.state.activeMapId)) ? this.state.activeMapId : ((maps[0] && maps[0].id) || null);
+        this.state.view = "maps";
+        this.state._mapsWizard = { step: 2, mapId: id };
+      } else if (t === "floor_heights") {
+        this.state.view = "maps";
+        this.state.mapsTab = "stack";
+      } else {
+        if (this.state.complexity === "basic") {
+          this.state.complexity = "advanced";
+          try { localStorage.setItem("padspan_complexity", "advanced"); } catch(e) {}
+        }
+        this.state.view = "calibration";
+        if (this.state._calib) this.state._calib.tab = "tune";
+      }
+      this._renderNav();
+      if (!VIEWS[this.state.view] && _VIEW_PATHS[this.state.view]) _loadView(this.state.view).then(() => this._scheduleRender());
+      if (this.actions?.renderRooms) this.actions.renderRooms(); else this._scheduleRender();
+    };
+    const card = el("div", { "data-accuracy-tips": "card", style: "background:#0a1f14;border:1px solid #1a4228;border-radius:8px;padding:8px 12px;margin-bottom:12px" });
+    const hdr = el("div", { style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:4px" });
+    hdr.appendChild(el("div", { style: "font-weight:700;font-size:12px;color:#52b788" }, "Improve accuracy"));
+    const off = el("span", { "data-accuracy-tips": "off", style: "cursor:pointer;font-size:10px;color:#64748b;text-decoration:underline" }, "Hide these tips");
+    off.addEventListener("click", () => { this._telemetryEvent("tip_hidden:all"); save([...hidden, "all"]); });
+    hdr.appendChild(off);
+    card.appendChild(hdr);
+    for (const t of tips) {
+      if (!T.shown.has(t)) { T.shown.add(t); this._telemetryEvent("tip_shown:" + t); }
+      const [title, why, btnText] = WORDS[t];
+      const row = el("div", { "data-accuracy-tips": "tip-" + t, style: "display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;border-top:1px solid #12301f" });
+      row.appendChild(el("div", { style: "flex:1;min-width:0" }, [
+        el("span", { style: "color:#e2e8f0;font-weight:600" }, title + ". "),
+        el("span", { style: "color:#94a3b8" }, why),
+      ]));
+      const fix = el("button", { class: "btn inline", style: "font-size:11px;padding:2px 10px", title: "Go there" }, btnText);
+      fix.addEventListener("click", () => go(t));
+      const x = el("span", { style: "cursor:pointer;color:#64748b;font-size:13px;padding:0 4px", title: "Hide this tip", "aria-label": "Hide this tip", role: "button" }, "\u00d7");
+      x.addEventListener("click", () => { this._telemetryEvent("tip_hidden:" + t); save([...hidden, t]); });
+      row.appendChild(fix);
+      row.appendChild(x);
+      card.appendChild(row);
+    }
+    return card;
+  }
+
   _proInviteOverviewCard(){
     if (!this._proOffersAllowed()) return null;
     const v = this._proInviteView || (this._proInviteView = { visible: false, hidden: false });
@@ -1750,6 +1839,9 @@ class PadSpanHaApp extends HTMLElement {
     }
     if(this._pollInFlight) return;
     if(this.state.view === "maps") return;
+    // Optimize for scale: a page nobody can see (display off, tab in the
+    // background) asks for nothing; it catches up when it is shown again.
+    if(this.state.settings && this.state.settings.optimize_for_scale && document.visibilityState === "hidden") return;
 
     this._pollInFlight = true;
     this._pollStartedAt = performance.now();
@@ -2381,7 +2473,10 @@ class PadSpanHaApp extends HTMLElement {
       return;
     }
     try {
-      const res = await this._callWS({ type: "padspan_bright/live_snapshot" });
+      // Optimize for scale (Settings): the Overview draws people, so it asks
+      // for the slim snapshot; every other view gets the whole one.
+      const slim = !!(this.state.settings && this.state.settings.optimize_for_scale) && this.state.view === "overview";
+      const res = await this._callWS(slim ? { type: "padspan_bright/live_snapshot", slim: true } : { type: "padspan_bright/live_snapshot" });
       const snap = res?.snapshot;
       // Only replace the snapshot if we got a valid response.
       // Keep the last good snapshot on WS failure to prevent flickering.
@@ -2694,19 +2789,25 @@ class PadSpanHaApp extends HTMLElement {
     // Forensics is settings-gated in EVERY mode (including Dev): the tab only
     // exists while the opt-in forensics_enabled setting is on.
     const forensicsOn = this.state.settings?.forensics_enabled === true;
+    // Guests the same way: the tab exists only while guest tags are on
+    // (Settings → Presence → Guest tags), in every mode.
+    const guestsOn = this.state.settings?.guest_tags_enabled === true;
     let out;
     if (mode === "development") {
       out = new Set(MENU.map(x => x[0]));
       if (!forensicsOn) out.delete("forensics");
+      if (!guestsOn) out.delete("guests");
     } else if (mode === "basic") {
       out = new Set(BASIC_TABS);
       if (forensicsOn) out.add("forensics");
+      if (guestsOn) out.add("guests");
     } else {
       // Advanced: base + any user-opted extra tabs
       const extras = this.state.settings?.advanced_extra_tabs || [];
       out = new Set(ADVANCED_DEFAULT);
       for (const t of extras) out.add(t);
       if (forensicsOn) out.add("forensics");
+      if (guestsOn) out.add("guests");
     }
     // The EDITION decides last: a Bright build shows its lighting surfaces
     // (and the rest only behind the reveal switch). The full edition is
@@ -2728,6 +2829,7 @@ class PadSpanHaApp extends HTMLElement {
     if (!this._settingsLoaded) return true;
     const settings = this.state.settings || {};
     if (view === "forensics" && settings.forensics_enabled !== true) return false;
+    if (view === "guests" && settings.guest_tags_enabled !== true) return false;
     if (EDITIONS && EDITIONS.surfacesForEdition && !EDITIONS.surfacesForEdition([view], settings).length) return false;
     return true;
   }
@@ -3989,6 +4091,12 @@ class PadSpanHaApp extends HTMLElement {
   // but user interactions are sacred (never destroy mid-action).
   _renderCurrentView(fromPoll){
     if(this.state._factoryResetInProgress) return;
+    // Left the Overview holding a slim snapshot (Optimize for scale): fetch
+    // the whole one now, not at the next poll, so no view draws from it.
+    if(this.state.view !== "overview" && this.state.live && this.state.live.snapshot && this.state.live.snapshot.slim && !this._slimRefetch){
+      this._slimRefetch = true;
+      this._getLiveSnapshot().finally(()=>{ this._slimRefetch = false; this._scheduleRender(); });
+    }
     if(this.state.view === "calibration" && (this.state._calibTune?._dragging || this.state._calibBeacon?._dragging || this.state._calibTune?._confirming || this.state._calibBeacon?._confirming)) return;
     if(this.state.maps?._stackDragging || this.state.maps?._editDragging) return;
     if(this.state._traceback?.active && this.state.view === "traceback") return;
@@ -4308,8 +4416,8 @@ class PadSpanHaApp extends HTMLElement {
         try { _trialOffer = !!(TRIAL && TRIAL.trialOfferable(this.state.settings)); } catch(e) { /* no offer */ }
         if (TRIAL && (_trialOffer || this.state._gettingStartedTrialOpen)) {
           const row = el("div",{"data-getting-started":"step-trial",style:"display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:4px;font-size:12px;cursor:pointer;margin-top:2px;border-top:1px solid #1a4228"});
-          row.appendChild(el("span",{style:"font-size:14px"}, "💡"));
-          row.appendChild(el("span",{style:"color:#8ee5b4"}, "See your lights on your floor plan — 90-day free trial, no card"));
+          row.appendChild(el("span",{style:"font-size:14px"}, "✨"));
+          row.appendChild(el("span",{style:"color:#8ee5b4"}, "Try all of PadSpan Pro on your house — 90 days free, no card"));
           row.addEventListener("click", () => {
             this.state._gettingStartedTrialOpen = !this.state._gettingStartedTrialOpen;
             if (this.state._gettingStartedTrialOpen) this._telemetryEvent("getting_started_step:trial");
@@ -4348,6 +4456,8 @@ class PadSpanHaApp extends HTMLElement {
             const _ms = this._proInviteOverviewCard() || this._testerOverviewCard(_hasPositioned)
               || this._trialMilestoneCard(_hasPositioned);
             if (_ms) frag.appendChild(_ms);
+            // Last in line: the accuracy tips, only when no other card is up.
+            else { const _tips = this._accuracyTipsCard(); if (_tips) frag.appendChild(_tips); }
           } catch(e) { console.warn("PadSpan: trial milestone failed", e); }
         }
       }

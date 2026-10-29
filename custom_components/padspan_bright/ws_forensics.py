@@ -251,10 +251,11 @@ async def ws_forensics_license_activate(hass: HomeAssistant, connection, msg) ->
         from homeassistant.helpers.aiohttp_client import async_get_clientsession  # noqa: PLC0415
         from .licence_homes import home_params, homes_warning, machine_id  # noqa: PLC0415
         machine = await machine_id(hass)
-        # A different key starts this home afresh among that key's homes.
+        # A different key starts this home afresh among that key's homes, and
+        # so does a home removed from its key: it asks for a free place again.
         _hp = home_params(st.data)
         new_key = key != str(st.data.get("forensics_license_key") or "").strip().upper()
-        if new_key:
+        if new_key or st.data.get("license_home_status") == "removed":
             _hp["token"] = ""
         session = async_get_clientsession(hass)
         async with session.get(
@@ -268,6 +269,18 @@ async def ws_forensics_license_activate(hass: HomeAssistant, connection, msg) ->
         connection.send_error(msg["id"], "network",
             f"Could not reach the licence server ({err}). Check the internet connection and try again.")
         return
+    # A NEW free licence — a tester's two years — needs the usage report on,
+    # and keeps it on while it runs (Garry, 2026-10-27). A key already here,
+    # entered again, is not new.
+    _free_new = bool(data.get("valid")) and new_key and str(data.get("plan") or "") == "tester"
+    if _free_new:
+        from .telemetry import enabled as _report_on  # noqa: PLC0415
+        if not _report_on(hass):
+            connection.send_result(msg["id"], {"ok": False, "valid": False, "status": "report_off", "message":
+                "A tester key needs the usage report on (Settings → Presence → Usage report), and it stays on while "
+                "the key runs. Turn it on, then enter the key again."})
+            return
+    from .settings_store import licence_key_hash as _lk_hash  # noqa: PLC0415
     if data.get("valid"):
         from .licence import normalize_tier  # noqa: PLC0415
         # The server names the tier it sold ("pro" / "bright"). A server that
@@ -281,6 +294,8 @@ async def ws_forensics_license_activate(hass: HomeAssistant, connection, msg) ->
             license_is_trial=str(data.get("plan") or "") == "trial",
             forensics_enabled=True,
             license_home_status="",
+            # A new free licence holds the report on; any other new key lets go.
+            **({"report_locked_key": _lk_hash(key) if _free_new else ""} if new_key else {}),
             # Past two homes with a report off somewhere: the server's warning (or none).
             license_homes_warning=homes_warning(data),
             # A different key: a fresh home on it.
@@ -323,7 +338,7 @@ NEEDS_ALL_REPORTS_JOIN = ("To use this key on more than 2 homes, turn on the usa
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_trial_start(hass: HomeAssistant, connection, msg) -> None:
-    """Start the one-time 3-month PadSpan Bright Pro trial.
+    """Start the one-time 3-month PadSpan Pro trial (full Pro since 2026-10-27; it was Bright Pro before).
 
     Mints a real trial key server-side (same validate/activate path a
     purchase uses, so expiry/grace/the editing-only gate all just work) and
@@ -341,6 +356,12 @@ async def ws_trial_start(hass: HomeAssistant, connection, msg) -> None:
     st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
     if not st:
         connection.send_error(msg["id"], "not_ready", "Settings store not available")
+        return
+    # Every free offer needs the opt-in usage report on (Garry, 2026-10-27).
+    # The trial card asks for it in the same step (views/trial_offer.js).
+    from .telemetry import enabled as _report_on  # noqa: PLC0415
+    if not _report_on(hass):
+        connection.send_result(msg["id"], {"ok": False, "status": "report_off", "message": "The free trial needs the usage report on (Settings → Presence → Usage report), and it stays on until the trial ends. Turn it on, then start the trial."})
         return
     try:
         import json as _json  # noqa: PLC0415
@@ -365,11 +386,16 @@ async def ws_trial_start(hass: HomeAssistant, connection, msg) -> None:
         return
     if data.get("ok"):
         from .licence import normalize_tier  # noqa: PLC0415
+        from .settings_store import licence_key_hash  # noqa: PLC0415
         await st.async_set(
             forensics_license_key=str(data.get("key") or ""),
             forensics_license_expires=str(data.get("expires_at") or ""),
-            license_tier=normalize_tier(data.get("tier"), default="bright"),
+            # The server issues trials as Pro (2026-10-27) and says so; a reply
+            # with no tier reads as Pro, licence.py's own rule for a bare key.
+            license_tier=normalize_tier(data.get("tier"), default="pro"),
             license_is_trial=True,
+            # The usage report stays on until the trial ends (settings_store.report_locked_until).
+            report_locked_key=licence_key_hash(str(data.get("key") or "")),
             forensics_enabled=True,
             license_home_token="", license_homes_used=0, license_home_status="",
             license_homes_warning={},

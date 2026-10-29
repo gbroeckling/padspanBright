@@ -46,6 +46,8 @@ def test_every_case_in_the_harness_passes(harness) -> None:
 def test_the_overview_shows_it_only_before_any_room_is_drawn() -> None:
     ov = _src(_WWW / "views" / "overview.js")
     assert "const _noRoomsDrawn = !Object.keys((ctx.state.model || {}).room_geometry_m || {}).length;" in ov
+    # The fabric is the truth (test_photo_divorce): a room drawn only on a
+    # plan's photo (room_bounds) is deliberately not read here.
     assert 'const whosWhere = (dataMode === "live" && liveSnap && _noRoomsDrawn) ? whosWhereCard(ctx) : null;' in ov
     # Cleared on every render, so a house that has drawn its rooms polls nothing for it.
     assert ov.count("ctx.state._whosWhereUpdate = null;") == 1

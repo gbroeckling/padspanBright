@@ -32,6 +32,7 @@ for (const st of [
 const bright = proPitch({ tier: "bright", pro_has_key: true, pro_active: true });
 check("bright tier is pitched something", !!bright);
 check("bright pitch names Forensics", /Forensics/.test(bright.text));
+check("bright pitch names the 3D house and the wall screen", /3D house/.test(bright.text) && /wall screen/.test(bright.text), bright.text);
 check("bright pitch does NOT sell light placement back to them",
   !/light placement/i.test(bright.text), bright.text);
 
@@ -40,6 +41,7 @@ const free = proPitch({ tier: "free" });
 check("free tier is pitched something", !!free);
 check("free pitch names Forensics", /Forensics/.test(free.text));
 check("free pitch names light placement", /light placement/i.test(free.text));
+check("free pitch names the 3D house and the wall screen", /3D house/.test(free.text) && /wall screen/.test(free.text), free.text);
 check("free pitch carries the real price", free.cta.includes(PRO_PRICE), free.cta);
 check("free pitch links the purchase page", free.url === BUY_URL, free.url);
 
@@ -57,6 +59,12 @@ check("a lapsed licence gets the lapsed message", lapsed && lapsed.kind === "lap
 check("lapsed message says the work survives",
   /still here|still exportable/i.test(lapsed.text), lapsed.text);
 check("lapsed message offers renewal, not a first purchase", /Renew/.test(lapsed.cta), lapsed.cta);
+// Since 2026-10-28 Forensics stops recording when a licence lapses
+// (forensics_store._recording_enabled); what it recorded stays searchable.
+check("lapsed message says Forensics stopped recording", /Forensics has stopped recording/.test(lapsed.text), lapsed.text);
+const lapsedBright = proPitch({ tier: "bright", pro_has_key: true, pro_active: false, edition: "bright" });
+check("a lapsed Bright build is not told about Forensics", lapsedBright && lapsedBright.kind === "lapsed" && !/Forensics/.test(lapsedBright.text), lapsedBright && lapsedBright.text);
+check("the lapsed message says history lasts its retention period", /retention period/.test(lapsed.text), lapsed.text);
 check("lapsed beats tier: a lapsed pro key is not treated as pro",
   proPitch({ tier: "pro", pro_has_key: true, pro_active: false }) !== null);
 

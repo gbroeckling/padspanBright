@@ -195,6 +195,10 @@ def _get_settings(hass: HomeAssistant) -> dict:
     from .build_info import TIER_FLOOR as _floor  # noqa: PLC0415
     out["forensics_license_key"] = ""          # never leaves the backend
     out["license_home_token"] = ""             # nor this home's token (licence_homes.py)
+    # A free licence holding the usage report on: its end, never the key's hash.
+    from .settings_store import report_locked_until as _rlu  # noqa: PLC0415
+    out["report_locked"] = _rlu(st.data if st else {})
+    out.pop("report_locked_key", None)
     # Vacation Mode's learned patterns are backend-only and the biggest
     # thing in the store (hundreds of KiB): never sent on every settings
     # read and reply (round 6).
@@ -321,7 +325,8 @@ def _padspan_pro_active(hass: HomeAssistant) -> bool:
     features gate at `bright` — see _tier_at_least — because a Bright Pro key
     unlocks them and a Pro key is a superset. One ladder, one comparison.
 
-    Soft degrade by design: this gate governs Pro EDITING only. Data a user
+    Soft degrade by design: this gate governs Pro EDITING and Forensics
+    recording (forensics_store._recording_enabled) only. Data a user
     already created stays readable and exportable when a licence lapses —
     losing access to your own recorded history because a card expired is not
     something this product does.
@@ -671,6 +676,10 @@ class RadioDeviceIndex:
         self._by_slug: dict[str, list] = {}
         self._by_mac: dict[str, list] = {}
         self._by_shelly_bt: dict[str, list] = {}   # _shelly_bluetooth_mac
+        # How often the two Shelly rules (0.38.175 and 0.38.176) decided a
+        # radio, read by the snapshot for the opt-in report. Counts only.
+        self.shelly_matched = 0
+        self.area_from_via = 0
         self._by_id: dict[str, Any] = {}           # area_id_of's via device
         # Membership by id, beside each list: `dev not in bucket` compared
         # whole DeviceEntry objects, quadratic in devices sharing a name
@@ -723,8 +732,18 @@ class RadioDeviceIndex:
         area = getattr(dev, "area_id", None)
         if area:
             return area
+        # Only a scanner device Home Assistant's Bluetooth integration made
+        # (connections {("bluetooth", <its MAC>)}, via the proxy's device) takes
+        # its via device's area, as HA itself does at setup; any other device
+        # with no area stays without one (the stable review, 2026-10-29: the
+        # rule reached every device with a via device).
+        if not any(isinstance(c, (tuple, list)) and c and c[0] == "bluetooth" for c in (getattr(dev, "connections", None) or ())):
+            return None
         via = self._by_id.get(str(getattr(dev, "via_device_id", None) or ""))
-        return (getattr(via, "area_id", None) or None) if via is not None else None
+        area = (getattr(via, "area_id", None) or None) if via is not None else None
+        if area:
+            self.area_from_via += 1           # for the opt-in report (0.38.176's field signal)
+        return area
 
     @property
     def devices_n(self) -> int:
@@ -754,6 +773,7 @@ class RadioDeviceIndex:
             # list (_shelly_bluetooth_mac). Still a MAC, so still before names.
             found = self._result(self._by_shelly_bt.get(mac) or [], "mac")
             if found:
+                self.shelly_matched += 1      # for the opt-in report (0.38.175's field signal)
                 return found
 
         keys = {k for k in (radio_slug(source), radio_slug(name)) if k}

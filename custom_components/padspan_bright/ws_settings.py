@@ -546,6 +546,8 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("atlas_3d_people"): bool,
         vol.Optional("atlas_3d_tags"): bool,
         vol.Optional("atlas_3d_ai_task_entity"): vol.Any(str, None),
+        vol.Optional("ai_photos_enabled"): bool,
+        vol.Optional("ai_stairs_enabled"): bool,
         vol.Optional("atlas_3d_library"): bool,
         vol.Optional("atlas_3d_weather"): bool,
         vol.Optional("atlas_3d_showcase"): bool,
@@ -638,6 +640,9 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("mac_rotation_bridging"): bool,
         vol.Optional("apple_auto_classify"): bool,
         vol.Optional("low_memory_mode"): bool,
+        vol.Optional("optimize_for_scale"): bool,
+        vol.Optional("guest_tags_enabled"): bool,
+        vol.Optional("guest_retention_days"): vol.Coerce(int),
         vol.Optional("enhanced_security"): bool,              # admin only; ws_common.require_admin_if_enhanced
         vol.Optional("forensics_enabled"): bool,
         vol.Optional("license_tier_override"): str,
@@ -650,6 +655,8 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("occupancy_cluster_threshold"): vol.Coerce(float),
         vol.Optional("distance_stationary_devices"): list,
         vol.Optional("onboarding_completed"): bool,
+        # The Overview's accuracy tips hidden (setup_checks.TIPS), or "all": the card off.
+        vol.Optional("accuracy_tips_hidden"): list,
         # Radio map visualization parameters (clamped in handler below)
         vol.Optional("heatmap_gain"): vol.Coerce(int),        # -20 to +20 dB
         vol.Optional("heatmap_contrast"): vol.Coerce(int),    # -15 to +15
@@ -712,6 +719,13 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                 connection.send_error(msg["id"], "unauthorized", "Only an administrator can change the usage report")
                 return
             payload["telemetry_enabled"] = bool(msg.get("telemetry_enabled"))
+            from .settings_store import report_locked_until  # noqa: PLC0415
+            _locked = report_locked_until(st.data) if st is not None else ""
+            if not payload["telemetry_enabled"] and _locked:
+                connection.send_error(msg["id"], "report_locked",
+                    f"The usage report stays on while you use a free licence (until {_locked[:10]}). "
+                    "It can be turned off once it ends, or with a bought key.")
+                return
             if payload["telemetry_enabled"]:
                 # Mint the anonymous id at opt-in, so the Preview shows the
                 # real report from that moment on — and start the usage and
@@ -725,7 +739,8 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                 # Off: the run log on disk (starts, crashes, worst minutes) goes too.
                 from .perf_sampler import async_runs_opted_out  # noqa: PLC0415
                 await async_runs_opted_out(hass)
-        if "atlas_3d_library" in msg or "atlas_3d_ai_task_entity" in msg:
+        if ("atlas_3d_library" in msg or "atlas_3d_ai_task_entity" in msg or "ai_photos_enabled" in msg
+                or "ai_stairs_enabled" in msg):
             # Live Aboard's shared library and a cloud AI Task reading photos
             # both let data leave the house: an administrator's call, like the
             # usage report above.
@@ -1022,6 +1037,21 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                                          _vac_who if _vac_event == "off" else None))
         if "vacation_mode_intensity" in msg:
             payload["vacation_mode_intensity"] = max(5, min(100, int(msg["vacation_mode_intensity"])))
+        # Guest tags (guest_tags.py): admin only — they track a person.
+        if "guest_tags_enabled" in msg or "guest_retention_days" in msg:
+            _user = getattr(connection, "user", None)
+            if _user is not None and getattr(_user, "is_admin", True) is False:
+                connection.send_error(msg["id"], "unauthorized", "Only an administrator can change guest tags")
+                return
+            if "guest_tags_enabled" in msg:
+                payload["guest_tags_enabled"] = bool(msg["guest_tags_enabled"])
+            if "guest_retention_days" in msg:
+                from .guest_tags import RETENTION_CHOICES as _GRC  # noqa: PLC0415
+                _days = int(msg["guest_retention_days"])
+                if _days not in _GRC:
+                    connection.send_error(msg["id"], "invalid_format", "Keep finished stays for 0, 7, 30 or 90 days")
+                    return
+                payload["guest_retention_days"] = _days
         # The trip options (vacation_mode.OPTION_DEFAULTS): admin-only like
         # Vacation Mode itself — an end date or a pause can stop it.
         _vac_opts = ("vacation_mode_dark_only", "vacation_mode_dark_offset_min", "vacation_mode_end_at",
@@ -1155,7 +1185,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     "overview_atlas", "lights_panel_enabled", "atlas_emergency_button", "atlas_live_colours", "bermuda_ignore", "bright_reveal_presence",
                     "atlas_weather_enabled", "atlas_alert_pulse", "atlas_heatmap_enabled",
                     "atlas_3d_enabled", "atlas_3d_people", "atlas_3d_tags", "atlas_3d_library",
-                    "atlas_3d_weather", "atlas_3d_showcase",
+                    "atlas_3d_weather", "atlas_3d_showcase", "ai_photos_enabled", "ai_stairs_enabled",
                     "tags_room_events_enabled", "tags_nfc_identify_enabled",
                     "tags_phone_autolink_enabled", "quiet_mode", "light_theme", "day_theme", "theme_follow_sun", "wall_pixel_shift", "wall_fully",
                     "beacon_auto_calibrate", "overview_persistent_pins", "overview_show_walls",
@@ -1166,7 +1196,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     "roomplan_import_enabled", "vacuum_import_enabled",
                     "rssi_capture_enabled",
                     "phone_wizard_enabled", "iphone_irk_guide", "mac_rotation_bridging",
-                    "apple_auto_classify", "low_memory_mode"):
+                    "apple_auto_classify", "low_memory_mode", "optimize_for_scale"):
             if key in msg:
                 payload[key] = bool(msg[key])
         if "license_tier_override" in msg:
@@ -1210,6 +1240,10 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             payload["distance_stationary_devices"] = [str(x) for x in raw] if isinstance(raw, list) else []
         if "onboarding_completed" in msg:
             payload["onboarding_completed"] = bool(msg["onboarding_completed"])
+        if "accuracy_tips_hidden" in msg:
+            from .setup_checks import TIPS as _TIPS  # noqa: PLC0415
+            raw = msg["accuracy_tips_hidden"]
+            payload["accuracy_tips_hidden"] = sorted({str(x) for x in raw if str(x) in _TIPS or str(x) == "all"}) if isinstance(raw, list) else []
         if "espresense_companion_url" in msg:
             # Admin-only (Phase 2i security audit, 2026-09-19): this URL is
             # later fetched server-side, verbatim, by the admin-only
@@ -1321,6 +1355,11 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                                          "vacation_mode_bedtime", "vacation_mode_max_on_min")):
             from .vacation_mode import refresh_status  # noqa: PLC0415
             refresh_status(hass)
+
+        # ── Guest tags turned on or off: the guest-home entity and the panel follow.
+        if "guest_tags_enabled" in payload:
+            from .guest_tags import refresh as _guest_refresh  # noqa: PLC0415
+            _guest_refresh(hass)
 
         # ── Bright: presence revealed or hidden → it polls, or stops
         if "bright_reveal_presence" in payload:

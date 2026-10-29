@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.176";
-const BUILD_ID = "20261026T184412Z";
+const APP_VERSION = "0.38.199";
+const BUILD_ID = "20261029T215152Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -269,6 +269,8 @@ class PadSpanLightsApp extends HTMLElement {
 
   async _poll(){
     if(!this._hass) return;
+    // Optimize for scale (Settings): nothing while the page is hidden.
+    if(this.state._optimizeScale && document.visibilityState === "hidden") return;
     // Don't rebuild the DOM under the user's hands: a poll landing mid-drag on
     // a slider, or while a select is open, destroys the control being used.
     // (The Mapping tab's host has the same protection via _editDragging.)
@@ -436,6 +438,7 @@ class PadSpanLightsApp extends HTMLElement {
       // Vacation Mode's own state — read here too now that the banner lives
       // in the shared Atlas card (both hosts), not panel.js's global chrome.
       this.state._vacationModeEnabled = !!s.vacation_mode_enabled;
+      this.state._optimizeScale = !!s.optimize_for_scale;
       this.state._vacationModeResumed = !!s.vacation_mode_pattern_for;
       this.state._vacationSettings = s;
       this.state._vacationModeIntensity = Number.isFinite(Number(s.vacation_mode_intensity)) ? Number(s.vacation_mode_intensity) : 100;
@@ -454,7 +457,8 @@ class PadSpanLightsApp extends HTMLElement {
       // browser when it is (panel.js _telemetryEvent's rule).
       if (s.pro_has_key !== undefined) {
         this.state._trialSettings = { pro_has_key: s.pro_has_key, tier: s.tier,
-          edition: s.edition, bright_reveal_presence: s.bright_reveal_presence };
+          edition: s.edition, bright_reveal_presence: s.bright_reveal_presence,
+          telemetry_enabled: !!s.telemetry_enabled };
         this.state._telemetryOn = !!s.telemetry_enabled;
       }
       // Hidden-map ids are read only to stay consistent with the Mapping tab
@@ -1116,7 +1120,13 @@ class PadSpanLightsApp extends HTMLElement {
         // Show people (P6): this panel has no live snapshot of its own, so
         // the 3D view reads Overview's through here, only while Show people
         // is on and the view shows, never more often than Overview polls.
-        people: { read: ()=>this._hass.callWS({ type:"padspan_bright/live_snapshot" }).then(r=>(r && r.snapshot) || null),
+        // Optimize for scale: the slim snapshot (people only), and the last
+        // one again while the page is hidden.
+        people: { read: ()=>{
+            if(this.state._optimizeScale && document.visibilityState === "hidden" && this._lastPeople) return Promise.resolve(this._lastPeople);
+            const msg = this.state._optimizeScale ? { type:"padspan_bright/live_snapshot", slim:true } : { type:"padspan_bright/live_snapshot" };
+            return this._hass.callWS(msg).then(r=>{ const snap = (r && r.snapshot) || null; if(snap) this._lastPeople = snap; return snap; });
+          },
           everyMs: 1000 * (Number(this.state._house3d.presence_poll_interval_s) || 5) },
         // Trails: Traceback's own history (padspan_bright/traceback_get), read
         // by the view only while a screen has them on.
@@ -1404,6 +1414,11 @@ class PadSpanLightsApp extends HTMLElement {
         /* Wall mode (?kiosk=1): no header, the map card the whole screen,
            its controls scaled by --wall-ui (lv- rules in styles.css). */
         :host([data-wall]){overflow:clip}
+        /* A wall turned by its link (?wall_rotate): the page is laid out
+           as tall as the screen is wide and turned onto it. */
+        :host([data-wall][data-wall-rotate]){position:fixed;top:0;left:0;width:100vh;height:100vw;transform-origin:top left}
+        :host([data-wall][data-wall-rotate="90"]){transform:rotate(90deg) translateY(-100%)}
+        :host([data-wall][data-wall-rotate="270"]){transform:rotate(-90deg) translateX(-100%)}
         :host([data-wall]) #content{padding:0}
         :host([data-wall]) .lv-hero, :host([data-wall]) .lv-coach{display:none}
         /* The wall is the map: the lights' table under it stays on the desk's
@@ -1443,6 +1458,7 @@ class PadSpanLightsApp extends HTMLElement {
       // Also when a wall stops being one without a reload (the layout or
       // the tier changed elsewhere): nothing of the wall is left behind.
       this.removeAttribute("data-wall");
+      this.removeAttribute("data-wall-rotate");
       this._wallOff();
       this._wallNight(); this._wallShift(); this._wallCycle();
       return;
@@ -1450,13 +1466,19 @@ class PadSpanLightsApp extends HTMLElement {
     this.setAttribute("data-wall", "");
     const size = ()=>{
       const p = WALLS.wallParams(location.search, this.state?._wall);
-      const s = WALLS.wallScale(window.innerWidth, window.innerHeight, { ...p, dpr: window.devicePixelRatio || 1 });
+      // A screen hung on its side whose TV can't turn its picture
+      // (?wall_rotate=90|270): the page turns itself, and is sized for the
+      // picture as it hangs (width and height swapped).
+      const rot = p.rotate || 0;
+      if(rot) this.setAttribute("data-wall-rotate", String(rot)); else this.removeAttribute("data-wall-rotate");
+      const W = rot ? window.innerHeight : window.innerWidth, H = rot ? window.innerWidth : window.innerHeight;
+      const s = WALLS.wallScale(W, H, { ...p, dpr: window.devicePixelRatio || 1 });
       this.style.setProperty("--wall-ui", String(s));
-      // How much bigger the drawing itself is than on 1080p: the rain goes with it.
-      this._wallPx = Math.max(1, Math.min(window.innerWidth / 1920, window.innerHeight / 1080));
+      // How much bigger the drawing itself is than on 1080p, either way up: the rain goes with it.
+      this._wallPx = Math.max(1, WALLS.screenRatio ? WALLS.screenRatio(W, H) : Math.min(W / 1920, H / 1080));
       this.style.setProperty("--wall-px", String(Math.round(this._wallPx * 100) / 100));
       // The buttons stop at finger size (wall_scale.js controlScale).
-      this.style.setProperty("--wall-ctl", String(WALLS.controlScale(s, p.inches, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1)));
+      this.style.setProperty("--wall-ctl", String(WALLS.controlScale(s, p.inches, W, H, window.devicePixelRatio || 1)));
       this._wallUi = s;
       this._wallFit = p.inches > 0 ? "room" : "auto";
     };

@@ -177,6 +177,8 @@ const PREF_FPS = "fps";                    // the frame-rate readout on this scr
 // the wall tops show, and a fixture that is off darkens with the house.
 const NIGHT_FLOOR = 0.3, NIGHT_EDGE = 0.85, NIGHT_TOP = 0.42, NIGHT_GRID = 0.6;
 const NAME_PX = [12, 17];                  // a room's name on screen (px), never under / over
+// A split level's floor's walls this close to the level's own rooms stand round them (sizeNames).
+const OWN_WALL_M = 0.5;
 // On a wall (?kiosk=1, lights_panel.js _wallOn) the names and the controls
 // grow with the screen: --wall-ui is the screen against 1080p, never under 1.
 // The wall is the page (the Atlas element carries data-wall), not the card,
@@ -308,6 +310,11 @@ const CSS = `
   width:calc(100% - 44px * var(--wall-ctl,var(--wall-ui,1)));margin-left:calc(44px * var(--wall-ctl,var(--wall-ui,1)))}
 .lv-mapcard.lv-display.lv-wall > .lv-rail.hidden ~ .la3d{width:100%;margin-left:0}
 :host([data-wall]) .la3d-hud{zoom:var(--wall-ui,1)}
+/* The People and Motion chips (their row, or the Motion chip alone when the
+   people chip is not loaded), the motion colour key and the window-open-in-
+   the-rain line under them are read like the HUD, so they grow with it and
+   keep their gaps; on a 4K wall they used to stay 1080p-sized. */
+:host([data-wall]) .la3d-chiprow,:host([data-wall]) .la3d > .la3d-mchip,:host([data-wall]) .la3d-mkey,:host([data-wall]) .la3d-wet{zoom:var(--wall-ui,1)}
 :host([data-wall]) .la3d-bar,:host([data-wall]) .la3d-compass,:host([data-wall]) .la3d-north,
 :host([data-wall]) .la3d-menu,:host([data-wall]) .la3d-toast,:host([data-wall]) .la3d-solo,:host([data-wall]) .la3d-corner,
 :host([data-wall]) .la3d-dircard,:host([data-wall]) .la3d-sheet,:host([data-wall]) .la3d-card{zoom:var(--wall-ctl,var(--wall-ui,1))}
@@ -652,6 +659,10 @@ function createSlot(slotKey){
     if (failed) return;
     failed = HOUSE3D_FALLBACK_KINDS.includes(kind) ? kind : "error";
     HOUSE.countHouse3dOnce(`house3d_fallback:${failed}`, send);
+    // And how big the house is (telemetry.HOUSE_SIZE_BANDS), so a slow screen
+    // can be told from a very big house in the report.
+    const nRooms = Object.keys((lastP && lastP.model && lastP.model.room_geometry_m) || {}).length;
+    HOUSE.countHouse3dOnce(`house3d_fallback_size:${nRooms < 20 ? "lt20" : nRooms < 60 ? "20_60" : nRooms < 150 ? "60_150" : "gt150"}`, send);
     showFlat();
     teardown();
   }
@@ -1323,12 +1334,16 @@ function createSlot(slotKey){
     });
     // Furniture (P2): every piece drawn on its floor, in every view.
     layer = FURNISH.createPieceLayer({ THREE, PIECES, FURN: () => FURN, floors: () => floorsUi, blobTex: shared.blobTex,
-      canon: (fid) => (house && house.canon ? house.canon(fid) : String(fid)), quality: () => (profileOf().pbr ? "high" : "low"),
+      canon: (fid) => (house && house.canon ? house.canon(fid) : String(fid)),
+      canonAt: (fid, x, y) => (house && house.canonAt ? house.canonAt(fid, x, y) : (house && house.canon ? house.canon(fid) : String(fid))),
+      quality: () => (profileOf().pbr ? "high" : "low"),
       recipeOf: (p) => stairRecipe(p) });
     devices = DEVICES ? DEVICES.createDeviceLayer({ THREE, layer, FURN: () => FURN, halo: shared.haloMats.m,
       quality: () => (profileOf().pbr ? "high" : "low") }) : null;
     tracked = TRACKED ? TRACKED.createTrackedLayer({ THREE, FURN: () => FURN, floors: () => floorsUi, uiScale: () => wallUiOf(root),
-      canon: (fid) => (house && house.canon ? house.canon(fid) : String(fid)), quality: () => (profileOf().pbr ? "high" : "low"),
+      canon: (fid) => (house && house.canon ? house.canon(fid) : String(fid)),
+      canonAt: (fid, x, y) => (house && house.canonAt ? house.canonAt(fid, x, y) : (house && house.canon ? house.canon(fid) : String(fid))),
+      quality: () => (profileOf().pbr ? "high" : "low"),
       fadeOf: TRAILS ? TRAILS.fadeOf : null, colourOf: TRAILS ? TRAILS.trailColour : null }) : null;
     marks = MARKS ? MARKS.createMarkLayer({ THREE, quality: () => (profileOf().pbr ? "high" : "low") }) : null;
     // Under the roof while it shows is hidden too (a marker, a code).
@@ -1663,6 +1678,7 @@ function createSlot(slotKey){
     if ([...h.perFloor.values()].some(per => per.pieces.some(pc => pc.loftRail))) HOUSE.countHouse3dOnce("house3d_loft_rail", send);
     if (HOUSE.hasNestedFloor(h)) HOUSE.countHouse3dOnce("house3d_mezzanine", send);
     if ([...h.perFloor.values()].some(per => per.pieces.some(pc => pc.capped))) HOUSE.countHouse3dOnce("house3d_wall_capped", send);
+    countStairs(h);
     if (atlas) platesOf(h);
     // The ground and the sun, sized to the house.
     const cx = (houseBox.x0 + houseBox.x1) / 2, cy = (houseBox.y0 + houseBox.y1) / 2;
@@ -1701,9 +1717,37 @@ function createSlot(slotKey){
              fascia: hex(new THREE.Color(atlas ? atlas.floor : "#efe9df").lerp(new THREE.Color("#e2ddd4"), 0.5)) };
   }
   /** Stairs are drawn as high as the floor they reach is now (live_aboard_storey.js stairReach). */
+  /** The opt-in report on stairs (closed words, once per page load): that the
+   *  house has some, whether every flight lands in a room on the level it
+   *  reaches (PIECES.stairOutcome, Furnish's own rule), whether one reaches a
+   *  split level or is a few steps within a floor, and the shapes and styles
+   *  in use. Never where, how many or which. */
+  function countStairs(h){
+    if (!STOREY || !FURN || !PIECES.stairOutcome) return;
+    const list = Object.values((file && file.pieces) || {}).filter(q => STOREY.isStairs(q));
+    if (!list.length) return;
+    const floors = h.floors.map(f => ({ elev: f.elev, outdoor: f.outdoor, rooms: h.rooms.filter(r => r.floor === f) }));
+    let landing = 0, nofloor = 0, split = false, within = false;
+    for (const q of list) {
+      const r = STOREY.stairReach(h.canon ? h.canon(q.floor_id) : q.floor_id, q.recipe.params && q.recipe.params.to_floor, h.floors, STOREY.footprint(q));
+      const out = PIECES.stairOutcome(q, r, floors, FURN, HOUSE.inPoly);
+      if (out === "landing") landing++;
+      if (out === "nofloor") nofloor++;
+      if (r.within) within = true;
+      else if (r.to && r.to.parent) split = true;
+      const params = q.recipe.params || {};
+      if (HOUSE.STAIR_SHAPES.includes(params.shape)) HOUSE.countHouse3dOnce(`stairs_shape:${params.shape}`, send);
+      if (HOUSE.STAIR_STYLES.includes(params.style)) HOUSE.countHouse3dOnce(`stairs_style:${params.style}`, send);
+    }
+    HOUSE.countHouse3dOnce("stairs_drawn", send);
+    HOUSE.countHouse3dOnce(`stairs_outcome:${nofloor ? "some_nofloor" : landing ? "some_landing" : "all_ok"}`, send);
+    if (split) HOUSE.countHouse3dOnce("stairs_reach:split_level", send);
+    if (within) HOUSE.countHouse3dOnce("stairs_reach:within", send);
+  }
   function stairRecipe(p){
     if (!STOREY || !STOREY.isStairs(p) || !house) return p.recipe;
-    const r = STOREY.stairReach(house.canon ? house.canon(p.floor_id) : p.floor_id, p.recipe.params && p.recipe.params.to_floor, house.floors);
+    const r = STOREY.stairReach(house.canon ? house.canon(p.floor_id) : p.floor_id, p.recipe.params && p.recipe.params.to_floor, house.floors,
+                                STOREY.footprint(p));
     return { ...p.recipe, height_m: r.rise };
   }
   /** A band just inside each room's outline (EDGE_IN to EDGE_IN + EDGE_W in
@@ -2986,16 +3030,28 @@ function createSlot(slotKey){
     const mppAt = (v) => (persp ? c.position.distanceTo(v) * k : k);           // metres per px there
     // Drawn over the fixtures, a name must still not show through a wall
     // standing in front of it or a floor above it: one ray from the eye.
-    const walls = persp ? floorsUi.filter(G => G.group.visible && G.solid).map(G => G.solid) : [];
-    const above = (F) => (persp ? walls.concat(floorsUi.filter(G => G !== F && G.group.visible && !G.fl.outdoor && G.tiles
-                                                                  && G.fl.elev > F.fl.elev + 0.5).map(G => G.tiles)) : []);
-    const behind = (v, occ) => {
-      if (!occ.length) return false;
+    // A split level's own floor never hides its names with its floor (open
+    // over a sunken room), nor with its walls round the level's own rooms (a
+    // sunken garage's name stands just under Main's floor, among them); the
+    // floor's other walls still do (2026-10-29).
+    const walled = persp ? floorsUi.filter(G => G.group.visible && G.solid) : [];
+    const above = (F) => (persp ? walled.filter(G => G.fl.id !== F.fl.parent).map(G => G.solid)
+      .concat(floorsUi.filter(G => G !== F && G.group.visible && !G.fl.outdoor && G.tiles
+                              && G.fl.elev > F.fl.elev + 0.5 && G.fl.id !== F.fl.parent).map(G => G.tiles)) : []);
+    const parentWalls = (F) => (persp && F && F.fl.parent ? walled.filter(G => G.fl.id === F.fl.parent).map(G => G.solid) : []);
+    const ownEdge = (F, x, y) => F.rooms.some(r => Array.isArray(r.pts) && r.pts.some((a, i) => {
+      const b = r.pts[(i + 1) % r.pts.length];
+      return HOUSE.segDist(x, y, a[0], a[1], b[0], b[1])[0] <= OWN_WALL_M;
+    }));
+    const behind = (v, occ, F = null) => {
+      const pw = parentWalls(F);
+      if (!occ.length && !pw.length) return false;
       _v.copy(v).sub(c.position);
       const d = _v.length();
       _hit.set(c.position, _v.normalize());
       _hit.near = 0; _hit.far = Math.max(0, d - 0.05);
-      return _hit.intersectObjects(occ, false).length > 0;
+      if (occ.length && _hit.intersectObjects(occ, false).length > 0) return true;
+      return pw.length > 0 && _hit.intersectObjects(pw, false).some(hp => !ownEdge(F, hp.point.x, hp.point.z));
     };
     const wallK = wallUiOf(root);
     for (const F of floorsUi) {
@@ -3007,13 +3063,13 @@ function createSlot(slotKey){
         lbl.position.copy(u.home);
         const mpp = mppAt(lbl.position), roomPx = u.ext / mpp;
         const letters = Math.max(NAME_PX[0] * wallK, Math.min(NAME_PX[1] * wallK, roomPx / 9)), hPx = letters / u.letters, wPx = hPx * u.aspect;
-        if (persp) u.behind = !u.covered && (underRoof(F, lbl.position) || behind(lbl.position, occ));
+        if (persp) u.behind = !u.covered && (underRoof(F, lbl.position) || behind(lbl.position, occ, F));
         // Exploded, a storey above can hang over a room's middle while the
         // rest of it shows: the name moves toward a corner that is in view.
         if (persp && u.behind && xGapNow && F.rooms[li]) {
           for (const q of F.rooms[li].pts) {
             _v2.set(u.home.x + (q[0] - u.home.x) * 0.55, u.home.y, u.home.z + (q[1] - u.home.z) * 0.55);
-            if (!underRoof(F, _v2) && !behind(_v2, occ)) { lbl.position.copy(_v2); u.behind = false; break; }
+            if (!underRoof(F, _v2) && !behind(_v2, occ, F)) { lbl.position.copy(_v2); u.behind = false; break; }
           }
         }
         lbl.visible = !u.covered && !(persp && u.behind) && wPx - 28 * hPx / 68 <= roomPx * 1.15;   // the plan: no wall stands in front
@@ -3031,7 +3087,7 @@ function createSlot(slotKey){
       // Under the room's name (or where the name would be), clear of it.
       const nameH = C.label ? Math.max(C.label.userData.px, 18) : 0;
       C.sprite.center.set(0.5, C.label ? 0.5 + (nameH / 2 + 2 + hPx / 2) / hPx : 0.5);
-      if (persp && !C.label) C.behind = underRoof(C.F, C.sprite.position) || behind(C.sprite.position, above(C.F));
+      if (persp && !C.label) C.behind = underRoof(C.F, C.sprite.position) || behind(C.sprite.position, above(C.F), C.F);
       C.sprite.visible = !!C.parts && !(C.label ? C.label.userData.covered || (persp && C.label.userData.behind) : persp && C.behind);
     }
   }
@@ -3045,7 +3101,7 @@ function createSlot(slotKey){
         const at = F.rooms[i].spot;
         // Exploded, the floors stand apart: what covers a name is only what the eye's ray meets.
         lbl.userData.covered = !explodeGap() && shown.some(G => G !== F && !G.fl.outdoor && G.fl.elev > F.fl.elev + 0.5
-          && G.rooms.some(r => HOUSE.inPoly(at.x, at.y, r.pts)));
+          && G.fl.id !== F.fl.parent && G.rooms.some(r => HOUSE.inPoly(at.x, at.y, r.pts)));
       });
     }
   }
@@ -4033,7 +4089,9 @@ function createSlot(slotKey){
    *  starts from them: live_aboard_edit.js). A height written to the file
    *  for a device with no record is the newest it has from then on (fileZ).
    *  A host with no height command: all to the file, as before. */
-  async function editSave(ch, base){
+  async function editSave(ch0, base){
+    // A split level (HOUSE.splitLevels) is drawn, never stored: its floor's id goes to the file.
+    const ch = HOUSE.wholeFloors ? HOUSE.wholeFloors(ch0) : ch0;
     const p = lastP || {}, edit = p.edit, put = typeof p.heights === "function" ? p.heights : null;
     if (!put) return edit(ch);
     const split = DRAFT.splitSave(file || NO_FILE, ch, base, placedNow());
@@ -4523,6 +4581,8 @@ function createSlot(slotKey){
 
   // ── the slot ──────────────────────────────────────────────────────────────
   function update(p){
+    // A room raised above its floor is drawn as a level of its own (HOUSE.splitLevels).
+    if (p && p.model && HOUSE.splitLevels) p = { ...p, model: HOUSE.splitLevels(p.model) };
     lastP = p;
     applyLook(p);
     const setting = HOUSE.qualitySetting(p.quality);

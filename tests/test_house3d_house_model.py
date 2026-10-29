@@ -144,6 +144,29 @@ def test_stairs_are_kept_as_a_piece(shape, turn) -> None:
     assert p["recipe"]["height_m"] == 2.3 and p["floor_id"] == "main"
 
 
+@pytest.mark.parametrize("style", list(H.STAIR_STYLES))
+@pytest.mark.parametrize("rail", list(H.STAIR_RAILS))
+def test_stairs_keep_their_style_and_rail(style, rail) -> None:
+    """Closed, open, treads only or floating; a rail on both sides, the inside, the outside, none, or as drawn."""
+    out = H.apply_edit(H.empty(), _stairs(shape="l3", style=style, rail=rail))
+    assert out["pieces"]["fur_5a6b7c8d"]["recipe"]["params"] == {"shape": "l3", "turn": "left", "to_floor": "upper",
+                                                                  "style": style, "rail": rail}
+
+
+@pytest.mark.parametrize("style", ["glass", "spiral_cast", "x"])
+def test_a_newer_style_is_kept_never_refused(style) -> None:
+    """A style this version does not know (a newer version's: a short lowercase word) is kept, so a save
+    holding one is never refused, as 0.38.183 to 0.38.195 refuse a whole save holding a floating stair."""
+    out = H.apply_edit(H.empty(), _stairs(shape="straight", style=style))
+    assert out["pieces"]["fur_5a6b7c8d"]["recipe"]["params"]["style"] == style
+
+
+@pytest.mark.parametrize("style", ["Glass", "glass!", "g" * 25, "", 7, None, "2tone"])
+def test_a_style_that_is_no_word_is_refused(style) -> None:
+    with pytest.raises(H.EditError):
+        H.apply_edit(H.empty(), _stairs(shape="straight", style=style))
+
+
 def test_stairs_with_no_floor_named_reach_the_next_floor_up() -> None:
     p = copy.deepcopy(_STAIRS)
     del p["recipe"]["params"]["to_floor"]
@@ -152,8 +175,10 @@ def test_stairs_with_no_floor_named_reach_the_next_floor_up() -> None:
 
 
 @pytest.mark.parametrize("why,changes", [
-    ("a shape not straight, L or U", _stairs(shape="spiral")),
+    ("a shape not on the list", _stairs(shape="spiral")),
     ("a turn not left or right", _stairs(turn="up")),
+    ("a style that is no short lowercase word (a newer version's word is kept)", _stairs(style="Glass!")),
+    ("a rail not on the list", _stairs(rail="left")),
     ("a blank floor", _stairs(to_floor=" ")),
     ("a floor that is a number", _stairs(to_floor=3)),
     ("narrower than half a metre", _stairs_size(width_m=0.4)),

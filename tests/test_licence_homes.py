@@ -60,7 +60,7 @@ def test_both_server_calls_send_it_and_keep_the_answer():
 
 def test_the_token_never_leaves_the_backend_and_survives_a_reset():
     assert 'out["license_home_token"] = ""' in _src("ws_common.py")
-    assert '"license_home_token", "license_home_label", "license_homes_used")' in _src("ws_factory_reset.py"), \
+    assert '"license_home_token", "license_home_label", "license_homes_used", "report_locked_key")' in _src("ws_factory_reset.py"), \
         "a reset home is still the same home, not a copy"
 
 
@@ -110,7 +110,7 @@ def test_a_restore_a_new_key_or_a_bad_answer_never_costs_the_home_its_place():
     assert '_LICENCE_KEYS + ("license_home_token", "license_home_label", "license_homes_used")' in _src("bright_import.py")
     assert 'license_home_token="", license_homes_used=0, license_home_status="",' in _src("ws_forensics.py"), "a trial key: a fresh home"
     assert '"license_home_token": "", "license_homes_used": 0,' in _src("pro_invite.py"), "an invite key: a fresh home"
-    assert '"license_home_token", "license_home_label", "license_homes_used")' in _src("ws_factory_reset.py")
+    assert '"license_home_token", "license_home_label", "license_homes_used", "report_locked_key")' in _src("ws_factory_reset.py")
     assert "if resp.status >= 400:" in _src("licence_homes.py")
     assert '"homes_max": _n(data.get("homes_max"), 5)' in _src("ws_forensics.py"), "a malformed answer can't raise"
 
@@ -166,3 +166,14 @@ def test_a_different_key_starts_the_home_afresh(monkeypatch):
     assert data["license_home_token"] == "" and data["license_homes_used"] == 0
     data, _ = _activate(monkeypatch, stored, {"valid": True, "token": "c" * 32, "homes_used": "2"}, "PSPAN-BBBB")
     assert data["license_home_token"] == "c" * 32 and data["license_homes_used"] == 2
+
+
+def test_a_removed_home_asks_for_a_free_place_again_with_the_same_key(monkeypatch):
+    stored = {"forensics_license_key": "PSPAN-AAAA", "license_home_token": "a" * 32, "license_homes_used": 2,
+              "license_home_status": "removed"}
+    data, sent = _activate(monkeypatch, stored, {"valid": True, "token": "d" * 32, "homes_used": 2}, "PSPAN-AAAA")
+    assert sent["token"] == "", "the removed token would only be refused again"
+    assert data["license_home_token"] == "d" * 32 and data["license_home_status"] == ""
+    # Refused (no free place): the stored token is left as it was.
+    data, _ = _activate(monkeypatch, dict(stored), {"valid": False, "status": "activation_limit"}, "PSPAN-AAAA")
+    assert data["license_home_token"] == "a" * 32

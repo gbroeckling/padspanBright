@@ -1,5 +1,6 @@
 """The public demo (tools/demo): it builds from this checkout's panel files,
-and its house is fictional — nothing of a real house in a public page."""
+and its houses identify nobody — no names, entity ids or addresses of a real
+house in a public page."""
 
 from __future__ import annotations
 
@@ -22,11 +23,11 @@ import build as demo_build  # noqa: E402
 
 _WWW = _ROOT / "custom_components" / "padspan_bright" / "www" / "padspan-bright"
 # What the demo shows: its own files, and the panel's Sample mode data.
-_DEMO_DATA = [_DEMO / "fixture.js", _DEMO / "fake_hass.js", _DEMO / "index.html", _WWW / "sample_data.js"]
+_DEMO_DATA = [_DEMO / "fixture.js", _DEMO / "estate.js", _DEMO / "fake_hass.js", _DEMO / "index.html", _WWW / "sample_data.js"]
 _MAC = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")
 _IP = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
-_BANNER = "Demo — nothing here is a real house"
+_BANNER = "Demo — a sample house, made-up people and devices"
 
 
 def _text(p: Path) -> str:
@@ -34,7 +35,7 @@ def _text(p: Path) -> str:
 
 
 def test_the_demo_files_have_no_addresses_or_people():
-    for p in _DEMO_DATA[:3]:
+    for p in [p for p in _DEMO_DATA if p.parent == _DEMO]:
         t = _text(p)
         assert not _MAC.findall(t), p.name
         assert not _IP.findall(t), p.name
@@ -77,9 +78,42 @@ def test_writes_stay_in_the_page_and_the_banner_shows():
     assert "telemetry_enabled: false" in fake and "update_check_enabled: false" in fake
 
 
+def test_the_bar_shares_this_view_and_speaks_german():
+    """Share: a phone's share sheet, elsewhere the link copied; the link is this
+    view plus ref=share, which the site's logs count. A German browser (its
+    first language, or ?hl=de) gets the bar in German; the panel stays English."""
+    page = _text(_DEMO / "index.html")
+    assert 'id="demo-share"' in page and "navigator.clipboard.writeText(text)" in page and "navigator.share(" in page
+    assert 'u.searchParams.set("ref", "share")' in page
+    # ?lang= sets the site's language cookie for a year (site/.htaccess), ?hl= only
+    # shows a language: a shared link carries neither, the sharer's choice stays theirs.
+    assert "/^(utm_|fbclid$|gclid$|ref$|lang$|hl$)/" in page
+    assert 'String(q.get("hl") || q.get("lang") || (navigator.languages && navigator.languages[0])' in page
+    for de in ("Demo – Beispielhaus, fiktive Personen und Geräte", "Wanddisplay", '"Teilen"', '"Kopiert"',
+               "Kostenlos installieren", '"https://padspan.traks.ca/de/#install"', '"Jetzt: "', '"zwischen zwei Räumen"', '"Gast"'):
+        assert de in page, de
+    # The guides, linked from the page search engines crawl most (Anleitungen in German).
+    assert 'id="demo-guides" href="/guides/"' in page and '"Anleitungen"' in page
+    # The German words go in after Share is wired up, so a missing element can't break it.
+    assert page.index('share.addEventListener("click"') < page.index("  if (de) {")
+    # Still nothing sent from the page.
+    assert "fetch(" not in page and "sendBeacon" not in page and "WebSocket" not in page
+
+
+def test_german_guides_open_the_demo_in_german_without_switching_the_site():
+    """?hl=de shows the bar in German; ?lang=de would also send the reader's
+    front page to /de/ for a year."""
+    guides = sorted((_ROOT / "site" / "guides").glob("*/de/index.html"))
+    assert guides
+    for g in guides:
+        t = _text(g)
+        assert 'href="/demo/?hl=de"' in t, g.parent.parent.name
+        assert not re.search(r'href="/demo/(\?lang=[^"]*)?"', t), g.parent.parent.name
+
+
 def test_the_build_copies_this_checkout(tmp_path):
     out = demo_build.build(tmp_path / "dist")
-    for name in ("index.html", "fake_hass.js", "fixture.js", "demo_settings.json"):
+    for name in ("index.html", "fake_hass.js", "fixture.js", "estate.js", "demo_settings.json"):
         assert (out / name).is_file(), name
     copied = out / "padspan_bright_static" / "padspan-bright"
     src_files = sorted(p.relative_to(_WWW) for p in _WWW.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
@@ -98,6 +132,44 @@ def test_the_build_copies_this_checkout(tmp_path):
     manifest = json.loads((_ROOT / "custom_components" / "padspan_bright" / "manifest.json").read_text(encoding="utf-8"))
     assert built["version"]["version"] == manifest["version"]
     assert not _IP.findall(json.dumps(built)) and not _EMAIL.findall(json.dumps(built))
+
+
+def _const(text: str, name: str):
+    """One of estate.js's data blocks (const NAME = {...};), as Python."""
+    m = re.search(r"^const " + name + r" = (.*);$", text, re.M)
+    assert m, name
+    return json.loads(m.group(1))
+
+
+def test_the_estate_is_the_main_house():
+    """The demo opens on the estate: three floors, furnished, stairs between
+    them, two residents and a guest wearing a tag lent for the stay (Guest
+    tags: the snapshot's tag carries guest = {name, session}). The classic
+    house stays for ?house=classic and a new install's first minutes (?fresh=)."""
+    est = _text(_DEMO / "estate.js")
+    assert "export function estateFixture(q)" in est
+    rooms = _const(est, "ROOMS")
+    floors = {g["floor_id"] for g in rooms.values()}
+    assert floors == {"lower", "main", "upper"} and len(rooms) >= 20
+    assert any(len(g["points_m"]) > 6 for g in rooms.values()), "more than boxes"
+    pieces = _const(est, "PIECES")
+    assert len(pieces) >= 100
+    assert all(re.fullmatch(r"fur_[0-9a-f]{8}", k) and v["id"] == k for k, v in pieces.items())
+    assert all(v["floor_id"] in floors for v in pieces.values())
+    stairs = [v for v in pieces.values() if v["recipe"]["kind"] == "stairs"]
+    assert {(s["floor_id"], s["recipe"]["params"]["to_floor"]) for s in stairs} >= {("lower", "main"), ("main", "upper")}
+    walkers = _const(est, "WALKERS")
+    people = {w["person"] for w in walkers if w.get("person")}
+    assert people == {"person.alex", "person.sam"}
+    guest = next(w for w in walkers if w.get("guest"))
+    assert guest["kind"] == "ble" and "person" not in guest and guest["guest"]["name"]
+    assert any(len(p) == 4 for w in walkers for p in w["loop"]), "someone stays somewhere a while"
+    assert all({p[0] for p in w["loop"]} <= floors for w in walkers)
+    assert len({p[0] for w in walkers for p in w["loop"]}) == 3, "someone goes up and someone goes down"
+    fake = _text(_DEMO / "fake_hass.js")
+    assert 'import { estateFixture } from "./estate.js";' in fake
+    assert 'const classic = fresh || q.get("house") === "classic";' in fake
+    assert "...(w.guest ? { guest: clone(w.guest) } : {})" in fake
 
 
 # Words any house has (rooms, devices, Home Assistant's own): a name made only

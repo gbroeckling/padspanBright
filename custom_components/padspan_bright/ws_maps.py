@@ -10,6 +10,7 @@ Split out of websocket.py; registration stays there.
 from __future__ import annotations
 
 import logging
+from typing import Any
 import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
@@ -389,6 +390,8 @@ async def ws_maps_delete(hass: HomeAssistant, connection, msg) -> None:
         cal = hass.data.get(DOMAIN, {}).get(DATA_CALIBRATION)
         if cal:
             await cal.async_clear_map(map_id)
+            from .ws_calibration import _note_points_seen  # noqa: PLC0415
+            await _note_points_seen(hass, cal)
     except Exception:
         pass
 
@@ -418,7 +421,27 @@ async def ws_maps_delete(hass: HomeAssistant, connection, msg) -> None:
         pass
 
     await ms.async_delete_map(map_id)
+    _note_map_deleted(hass, ms, migrated=False)
     connection.send_result(msg["id"], {"ok": True})
+
+
+def _note_map_deleted(hass: HomeAssistant, ms: Any, migrated: bool) -> None:
+    """A map deleted on purpose (0.38.177): counted, and the report's marker
+    follows, so the next report does not read it as a map lost
+    (telemetry health.maps_vanished)."""
+    try:
+        from .telemetry import bump  # noqa: PLC0415
+        if migrated:
+            bump(hass, "map_deleted_migrated")
+        else:
+            bump(hass, "map_deleted")
+        _st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
+        if _st is not None and isinstance(_st.data, dict):
+            _n = len((ms.data or {}).get("maps") or [])
+            _st.data["maps_seen"] = _n                       # this run's report reads it at once
+            hass.async_create_task(_st.async_set(maps_seen=_n))   # and a restart keeps it
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("map delete not noted: %s", err)
 
 
 @websocket_api.websocket_command(
@@ -696,6 +719,7 @@ async def ws_maps_delete_migrate(hass: HomeAssistant, connection, msg) -> None:
 
     # --- Delete the source map ---
     await ms.async_delete_map(src_id)
+    _note_map_deleted(hass, ms, migrated=True)
 
     connection.send_result(msg["id"], {
         "ok": True,

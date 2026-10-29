@@ -154,7 +154,7 @@ await check("a licensed house gets no card at all", () => {
 await check("the card says what it is, in the agreed words", () => {
   const { host } = makeHost();
   const card = T.trialOfferCard(host, "atlas");
-  assert(/90-day free trial, no card/.test(card.textContent), "title");
+  assert(/PadSpan Pro free for 90 days, no card/.test(card.textContent), "title");
   assert(find(card, "start").textContent === "Start 90-day free trial", "button: " + find(card, "start").textContent);
   assert(find(card, "note").textContent === "Your email is only used to send your key; one trial per home.", "note");
   assert(find(card, "buy") && /PadSpan Pro/.test(find(card, "buy").textContent), "buy link missing");
@@ -217,7 +217,7 @@ await check("success: one call, counted, settings handed back, then the started 
   assert(h.calls.length === 1 && h.calls[0].type === "padspan_bright/trial_start", JSON.stringify(h.calls));
   assert(h.calls[0].email === "someone@example.com", "email not trimmed: " + h.calls[0].email);
   assert(h.started() === 1, "onStarted not called");
-  assert(h.toasts.some(t => !t.e && /90-day free trial has started/.test(t.m)), JSON.stringify(h.toasts));
+  assert(h.toasts.some(t => !t.e && /90-day PadSpan Pro trial has started/.test(t.m)), JSON.stringify(h.toasts));
   // Even though the house is now licensed, this surface says it worked.
   h.host.settings = { tier: "bright", pro_has_key: true };
   const after = T.trialOfferCard(h.host, "maps");
@@ -274,9 +274,43 @@ await check("Not now is offered only where the host asks for it", () => {
   assert(hidden === 1, "onDismiss not called");
 });
 
-await check("a Pro gate's pitch does not promise the Pro feature", () => {
+await check("the started card gives the launch price before Nov 30 and drops it after", async () => {
+  const h = makeHost({ answer: { ok: true, days_left: 90, settings: { tier: "pro", pro_has_key: true } } });
+  const card = T.trialOfferCard(h.host, "maps");
+  type(card, "someone@example.com");
+  find(card, "start").click();
+  await settle();
+  h.host.settings = { tier: "pro", pro_has_key: true };
+  const realNow = Date.now;
+  try {
+    Date.now = () => Date.parse("2026-11-15T12:00:00Z");
+    const before = T.trialOfferCard(h.host, "maps").textContent;
+    assert(/PadSpan Pro trial has started/.test(before), before);
+    assert(/for life is \$\d+ CAD, once, until November 30/.test(before) && before.includes(T.trialLaunchLine()), "no launch line: " + before);
+    Date.now = () => Date.parse("2026-12-02T12:00:00Z");
+    const after = T.trialOfferCard(h.host, "maps").textContent;
+    assert(T.trialLaunchLine() === "" && !/for life/.test(after), "launch line after the launch price ended: " + after);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+await check("the card sells all of Pro, and a Bright build's card leaves out Forensics", () => {
+  const full = T.trialOfferCard(makeHost({ answer: { ok: true } }).host, "maps");
+  const fullPitch = find(full, "pitch").textContent;
+  assert(/all of PadSpan Pro/.test(fullPitch) && /3D house/.test(fullPitch) && /Forensics/.test(fullPitch), fullPitch);
+  const h = makeHost({ answer: { ok: true } });
+  h.host.settings = { ...h.host.settings, edition: "bright" };
+  const bright = T.trialOfferCard(h.host, "atlas");
+  const brightPitch = find(bright, "pitch").textContent;
+  assert(/every light/.test(brightPitch) && /3D house/.test(brightPitch) && !/Forensics/.test(brightPitch), brightPitch);
+  const s = T.trialPitch("settings");
+  assert(/all of PadSpan Pro/.test(s) && /nothing you set up is deleted/i.test(s) && !/editing just goes back/.test(s), s);
+});
+
+await check("a Pro gate's pitch says the trial unlocks that feature", () => {
   const p = T.trialPitch("locate", "Locate");
-  assert(/The trial doesn't unlock Locate/.test(p) && /lighting/.test(p), p);
+  assert(/The trial unlocks Locate/.test(p) && /PadSpan Pro/.test(p), p);
   // The gate right above already says Locate needs Pro; the card must not
   // say it a second time.
   assert(!/needs a PadSpan Pro key/.test(p), "the gate's own line, repeated: " + p);
@@ -284,9 +318,10 @@ await check("a Pro gate's pitch does not promise the Pro feature", () => {
 
 await check("the update banner's trial line is news once, never on a kiosk or after an answer", () => {
   const s = { ...FREE, trial_nudge_done: false };
-  assert(T.trialNewsDue(s, "0.38.86", false) === true, "the update that brought the trial");
+  assert(T.trialNewsDue(s, "0.38.185", false) === true, "the update that made the trial all of Pro");
+  assert(T.trialNewsDue(s, "0.38.86", false) === true, "an install from before the first trial");
   assert(T.trialNewsDue(s, "0.9.3", false) === true, "an older install updating straight past it");
-  for (const seen of ["0.38.87", "0.38.88", "0.39.0", "1.0.0"]) {
+  for (const seen of ["0.38.186", "0.38.187", "0.39.0", "1.0.0"]) {
     assert(T.trialNewsDue(s, seen, false) === false, "said again in the banner from " + seen);
   }
   assert(T.trialNewsDue(s, "", false) === false, "no previous version: no banner, no line");
@@ -337,7 +372,7 @@ await check("Locate and Busy Times gates carry the trial card with their own sur
     const root = mod.render(ctx, {});
     const card = root.querySelector("[data-trial=card]");
     assert(card && card.getAttribute("data-surface") === surface, `${surface}: no trial card`);
-    assert(new RegExp("The trial doesn't unlock " + word).test(card.textContent), `${surface}: pitch`);
+    assert(new RegExp("The trial unlocks " + word).test(card.textContent), `${surface}: pitch`);
     assert(!/3-month/.test(root.textContent), `${surface}: old 3-month wording`);
     const keyed = mod.render(viewCtx({ tier: "bright", pro_has_key: true }).ctx, {});
     assert(!keyed.querySelector("[data-trial=card]"), `${surface}: offered with a key`);
@@ -385,6 +420,42 @@ await check("the card's dismiss and done are persisted, not optional-chained int
   assert(/padspan_bright\/settings_set", onboarding_completed: true/.test(block), "onboarding_completed is never saved");
   assert(/"getting_started_dismissed"/.test(block) && /"getting_started_shown"/.test(block) && /"getting_started_step:"/.test(block),
     "a Getting started event is not fired");
+});
+
+// Every free offer needs the opt-in usage report on (Garry, 2026-10-27).
+await check("report off: the card asks in the same step, and refuses without the tick", async () => {
+  T._resetTrialOffer();
+  const h = makeHost({ settings: { tier: "free", pro_has_key: false, telemetry_enabled: false },
+                       answer: { ok: true, days_left: 90 } });
+  const card = T.trialOfferCard(h.host, "overview");
+  assert(find(card, "optin-row") && find(card, "optin"), "no opt-in box with the report off");
+  type(card, "someone@example.com");
+  find(card, "start").click();
+  await settle();
+  assert(h.calls.length === 0, "a trial was asked for without the opt-in: " + JSON.stringify(h.calls));
+  const again = T.trialOfferCard(h.host, "overview");
+  assert(/needs the usage report on/.test(find(again, "error").textContent), "no reason shown");
+});
+await check("report off and ticked: the report goes on first, then the trial", async () => {
+  T._resetTrialOffer();
+  const h = makeHost({ settings: { tier: "free", pro_has_key: false, telemetry_enabled: false },
+                       answer: { ok: true, days_left: 90 } });
+  const card = T.trialOfferCard(h.host, "overview");
+  type(card, "someone@example.com");
+  const box = find(card, "optin");
+  box.checked = true;
+  box.dispatchEvent({ type: "change" });
+  find(card, "start").click();
+  await settle();
+  assert(h.calls.length === 2 && h.calls[0].type === "padspan_bright/settings_set" && h.calls[0].telemetry_enabled === true
+    && h.calls[1].type === "padspan_bright/trial_start", JSON.stringify(h.calls));
+  assert(h.events.includes("trial_optin:overview"), JSON.stringify(h.events));
+});
+await check("report already on: no box, one call", () => {
+  T._resetTrialOffer();
+  const h = makeHost();
+  const card = T.trialOfferCard(h.host, "overview");
+  assert(!find(card, "optin-row"), "the box shows with the report already on");
 });
 
 // The step ids, for the wrapper to hold equal to telemetry.py's.

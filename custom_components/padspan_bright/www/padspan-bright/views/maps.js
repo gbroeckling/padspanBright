@@ -1710,7 +1710,11 @@ function _edit(ctx, map, allMaps){
     ctx.state.maps._draftMapId = map.id;
     ctx.state.maps._draftImageSha = _draftImgSha;
     ctx.state.maps._selectedRxId = null;
-    ctx.state.maps._mode = "receivers"; // receivers | rooms | barriers
+    // receivers | rooms | barriers | measure. _openMode: a one-shot tool to
+    // open in, set by a link from another tab (Calibration's "Measure this
+    // floor"), so loading the plan does not put it back on Radios.
+    ctx.state.maps._mode = ctx.state.maps._openMode || "receivers";
+    ctx.state.maps._openMode = null;
     ctx.state.maps._selectedRoom = "";
     ctx.state.maps._drawing = null; // {room, points:[]} or barrier drawing
     ctx.state.maps._selectedBarrierId = null;
@@ -6896,6 +6900,8 @@ function _stack(ctx, maps, helpBtn){
       if(!staleCount){ cleanLbl.textContent = "All clean"; setTimeout(()=>{ cleanLbl.textContent = ""; }, 2000); return; }
       ctx.state.maps._staleListOpen = !ctx.state.maps._staleListOpen;
       staleBox.style.display = ctx.state.maps._staleListOpen ? "" : "none";
+      // Opt-in report: the honest list (0.38.170) opened. Never which receivers.
+      if (ctx.state.maps._staleListOpen && ctx.actions.telemetryEvent) ctx.actions.telemetryEvent("stale_receivers_listed");
     }
   }, staleCount > 0 ? `${staleCount} stale` : "No stale");
 
@@ -9525,6 +9531,9 @@ function _lightsTab(ctx, maps, active) {
       label: o.user_label || o.private_ble_name || o.name || "",
       x_m: o.x_m, y_m: o.y_m,
       floor_id: o.floor_id || null,
+      // A tag lent to a guest (o.guest, only while Guest tags are on): the
+      // guest's name on its label and an amber ring (iso_lights.js).
+      ...(o.guest && o.guest.name ? { label: `${o.guest.name} · Guest`, guest: true } : {}),
     }));
   // Live Aboard (P6): a beacon with a look (a tag made in Furnish → People &
   // devices) wears a small drawing of it — only while Show beacons is on and
@@ -11847,6 +11856,31 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
             ctx.actions.renderRooms();
           } catch (err) { ctx.toast("Height not saved: " + (err.message || err), true); }
         } }, "Set height"));
+        // A split level (Live Aboard, 0.38.190): this room's floor higher than
+        // its floor's, for a house whose upstairs is not one level (or lower:
+        // a step-down living room). Most houses
+        // never need it, so it stays behind a quiet link until it is used.
+        const curR = ctx.state.model?.room_meta?.[only]?.floor_raise_m;
+        const rIn = el("input", { type: "number", min: "-1.5", max: "3", step: "0.05", value: curR != null ? String(curR) : "", placeholder: "0",
+          title: "For a split level: how far this room's floor sits above the rest of its floor (an office up a longer flight than the bedrooms beside it), or below it with a minus (a step-down living room). Live Aboard draws the room that much higher or lower, and stairs reaching it climb that much further. Blank or 0: level with its floor.",
+          style: "width:72px;background:#0a150e;color:#e2e8f0;border:1px solid #2d5a3d;border-radius:4px;padding:3px 6px" });
+        const rSet = el("button", { class: "btn inline", onclick: async () => {
+          const raw = String(rIn.value || "").trim(), v = raw === "" ? null : parseFloat(raw);
+          if (v !== null && !(isFinite(v) && v >= -1.5 && v <= 3)) { ctx.toast("Enter how far up in metres (up to 3, or down to -1.5), or leave it blank", true); return; }
+          const off = v !== null && Math.abs(v) >= 0.05;
+          try {
+            await ctx.actions.wsCall("padspan_bright/room_height_set", { room: only, floor_raise_m: off ? v : null });
+            ctx.toast(off ? `"${only}" sits ${Math.abs(v)} m ${v > 0 ? "above" : "below"} the rest of its floor` : `"${only}" is level with its floor`);
+            await ctx.actions.modelRefresh();
+            ctx.actions.renderRooms();
+          } catch (err) { ctx.toast("Not saved: " + (err.message || err), true); }
+        } }, "Set");
+        const rRow = el("label", { style: `display:${curR ? "flex" : "none"};gap:6px;align-items:center;color:#94a3b8` }, ["Floor up (+) or down (−), m", rIn, rSet]);
+        const rLink = el("button", { class: "btn inline", title: "Only for a split-level house: this room's floor higher or lower than the rest of its floor",
+          style: `display:${curR ? "none" : ""};background:none;border:none;color:#64748b;font-size:11px;padding:2px 4px;text-decoration:underline`,
+          onclick: () => { rRow.style.display = "flex"; rLink.style.display = "none"; } }, "Split level…");
+        tools.appendChild(rLink);
+        tools.appendChild(rRow);
         tools.appendChild(el("button", {
           class: "btn inline", style: "color:#f87171;border-color:#f8717140",
           onclick: async () => {

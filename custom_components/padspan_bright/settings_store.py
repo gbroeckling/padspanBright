@@ -35,6 +35,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "data_mode": "sample",  # "sample" | "live"
     "cpu_mode": "shared",  # "shared" | "single" | "dedicated" — see PresenceCoordinator
     "low_memory_mode": False,  # caps for a 2 GB machine — see low_memory.py
+    "report_locked_key": "",       # sha256 of a FREE licence key granted from 0.38.181 (trial, tester, free year): the usage report stays on while that key is here and unexpired (report_locked_until)
+    "guest_tags_enabled": False,   # guest tags (guest_tags.py): off until chosen in Settings; nothing runs while off
+    "guest_retention_days": 30,    # a finished guest stay's report is kept this long: 0, 7, 30 or 90
+    "optimize_for_scale": False,  # several wall screens: a slim snapshot for Overview and the 3D people, a longer shared cache, no polls while a page is hidden — snapshot_builder.slim_snapshot
     # Enhanced security (ws_common.require_admin_if_enhanced): off = every
     # command as before; on = only an admin changes the home's shared setup.
     # Only an admin turns it on or off.
@@ -53,6 +57,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # load of this version, so its 7 days count from the update, not from
     # when it was really installed — nobody is told on update day.
     "first_seen_ts": 0,
+    "calibration_points_seen": 0,  # backend-only: calibration points in the last report sent, or after the last clear (telemetry health.calibration_points_vanished)
+    "maps_seen": 0,                # backend-only: floor plans in the last report sent, or after the last delete (telemetry health.maps_vanished)
     # The Overview's one-time trial milestone card was answered: "No thanks",
     # its ✕, or a trial started from it. Per install; it never shows again.
     "trial_nudge_done": False,
@@ -183,7 +189,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # (m) set the size, text at wall_text_arcmin of visual angle (control-room
     # practice: 16 minimum, 20-22 preferred). A screen's own link can override
     # all three (?wall_in=&wall_m=&wall_text=).
-    "wall_screen_in": 0.0,                # 0 or 15-120
+    "wall_screen_in": 0.0,                # 0 or 10-120
     "wall_distance_m": 2.5,               # 0.3-10
     "wall_text_arcmin": 20.0,             # 14-36
     "wall_night_dim": 0.0,                # 0-0.7: how much darker after sunset
@@ -197,6 +203,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "atlas_3d_people": False,             # the people layer
     "atlas_3d_tags": False,               # tags and scanners: every placed tag with its name, every scanner at its height
     "atlas_3d_ai_task_entity": "",        # ai_task.* that reads photos; "" = none (the photo button explains)
+    "ai_stairs_enabled": False,           # Settings → AI: stairs read off the floor plans by the AI Task (0.38.188), off until chosen
+    "ai_photos_enabled": True,            # Settings → AI: furniture (tags, receivers, people's figures) from a photo; on as it always was
     "atlas_3d_library": False,            # the shared furniture library
     "atlas_3d_weather": True,             # rain and snow in Live Aboard: follows Outdoor weather (atlas_weather_*), which must be on too
     "atlas_3d_showcase": False,           # older switch (old backups, Bright): kept valid, decides nothing once atlas_3d_look is there
@@ -264,7 +272,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Helps with HA 2026.4+ where habluetooth dedup suppresses repeat callbacks.
     "aggressive_ble_reseed": False,
     # Presence poll interval (seconds).  How often the smoothing pipeline runs.
-    # Lower = faster room transitions but higher CPU.  Default 10s.
+    # Lower = faster room transitions but higher CPU.  Default 5 s (installs
+    # from before 0.21 may still hold the old 10 s).
     "presence_poll_interval_s": 5,
     # BLE reseed interval (seconds).  How often bluetooth_live re-fetches from
     # HA's discovered-service-info API.  Essential for passive proxy scanners
@@ -318,7 +327,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "forensics_license_key": "",
     "forensics_license_expires": "",
     # True only for a key minted by padspan_bright/trial_start (the one-time 3-month
-    # Bright Pro trial). Display-only — licence.py's tier ladder does not read
+    # PadSpan Pro trial; Bright Pro before 2026-10-27). Display-only — licence.py's tier ladder does not read
     # it, a trial key gates identically to a purchased one.
     "license_is_trial": False,
     # This home among the key's homes (licence_homes.py): the token the
@@ -533,3 +542,31 @@ class SettingsStore:
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
+
+
+
+
+def licence_key_hash(key: str) -> str:
+    import hashlib  # noqa: PLC0415
+    return hashlib.sha256(str(key or "").strip().upper().encode()).hexdigest() if str(key or "").strip() else ""
+
+
+def report_locked_until(data: dict) -> str:
+    """The free licence's end ("" when nothing holds the usage report on).
+    Every new free licence (the 90-day trial, a tester's two years, a free
+    year of Pro) needs the report on, and it stays on until that licence ends
+    (Garry, 2026-10-27). The lock is the key it was given with
+    (report_locked_key, a hash): a bought key in its place, or the licence's
+    end, lets it go; a free licence from before the rule never had one."""
+    from datetime import datetime, timezone  # noqa: PLC0415
+    locked = str(data.get("report_locked_key") or "")
+    if not locked or locked != licence_key_hash(data.get("forensics_license_key") or ""):
+        return ""
+    end = str(data.get("forensics_license_expires") or "").strip()
+    try:
+        exp = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return end or "the end of the free licence"
+    return end if exp > datetime.now(timezone.utc) else ""

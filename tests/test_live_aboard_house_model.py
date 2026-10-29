@@ -125,7 +125,15 @@ def test_the_limits_are_the_servers() -> None:
     m = re.search(r"export const STAIR_RISE_M = \[([\d.]+), ([\d.]+)\];", src)
     assert m and (float(m[1]), float(m[2])) == HS.STAIR_RISE_M
     fur = (_VIEWS / "live_aboard_furniture.js").read_text(encoding="utf-8")
-    assert 'choice("shape", "Shape", ["straight", "l", "u"]' in fur and HS.STAIR_SHAPES == ("straight", "l", "u")
+    assert 'choice("shape", "Shape", ["straight", "l", "u", "l2", "l3"]' in fur and HS.STAIR_SHAPES == ("straight", "l", "u", "l2", "l3")
+    assert 'choice("style", "Style", ["closed", "open", "treads", "floating"]' in fur and HS.STAIR_STYLES == ("closed", "open", "treads", "floating")
+    # The usage report's stair styles (0.38.194) and the view's count of them are the stored list too.
+    from custom_components.padspan_bright import setup_checks as SC, telemetry as T  # noqa: PLC0415
+    house = (_VIEWS / "live_aboard_house.js").read_text(encoding="utf-8")
+    assert T.STAIR_STYLES == HS.STAIR_STYLES and 'export const STAIR_STYLES = ["closed", "open", "treads", "floating"];' in house
+    summary = SC.stairs_summary({f"fur_{i}": {"recipe": {"kind": "stairs", "params": {"style": s}}} for i, s in enumerate(HS.STAIR_STYLES)})
+    assert all(summary.get(f"style_{s}") == 1 for s in HS.STAIR_STYLES)
+    assert 'choice("rail", "Rail", ["auto", "both", "inner", "outer", "none"]' in fur and HS.STAIR_RAILS == ("auto", "both", "inner", "outer", "none")
     assert 'choice("turn", "Turns", ["left", "right"]' in fur and HS.STAIR_TURNS == ("left", "right")
 
 
@@ -133,7 +141,7 @@ def test_the_new_words_are_plain_and_never_say_3d() -> None:
     """New text says Live Aboard, never "3D" (the lead renames the old labels)."""
     for name, words in (("live_aboard.js", ("Roof: Auto", "Roof: Off", "The roof shows when you look at the house from outside")),
                         ("live_aboard_edit.js", ("Doorway", "an opening with no door in it", "It opens and shuts with its sensor.")),
-                        ("live_aboard_furnish.js", ("Stairs up to the floor above: straight, L or U", "There is no floor above it to go up to."))):
+                        ("live_aboard_furnish.js", ("Stairs up to the floor above: straight, L, U, or round two or three landings", "Stairs in stair rooms", "There is no floor above it to go up to."))):
         src = (_VIEWS / name).read_text(encoding="utf-8")
         for w in words:
             assert w in src, (name, w)

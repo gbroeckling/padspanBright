@@ -37,6 +37,13 @@ let _cache = null;            // last stats payload, so a re-render is not a ref
 let _loading = false, _error = null;
 let _stamp = "";              // "generated …" line, so a re-render keeps it
 const _tables = new Set();    // cards showing their table instead of the chart (kept across re-renders)
+// Sections open (the rest fold to one line with their headline) and lists
+// showing every row, both kept across re-renders. Summary first, the rest on
+// demand: only Reach and Needs attention start open.
+const _open = new Set(["Reach", "Needs attention"]);
+const _more = new Set();
+const SHORT = 6;              // a ranked list shows its top SHORT until "Show all"
+const SHORT_ROWS = 8;         // a long table shows its first SHORT_ROWS until "Show all"
 
 function isUnlocked() {
   if (_unlocked) return true;
@@ -94,7 +101,7 @@ function renderUnlocked(ctx, root) {
   root.appendChild(el("header", { class: "ib-hero" }, [
     el("div", { class: "ib-kicker" }, "PadSpan opt-in reports"),
     el("div", { class: "ib-title-row" }, [el("h1", { class: "ib-h1" }, "Install Base"), helpBtn("installbase")]),
-    el("p", { class: "ib-lede" }, "What the opt-in reports add up to. Every figure is a count over other people's installs; the only per-install handle is the first eight characters of a random id."),
+    el("p", { class: "ib-lede" }, "What the usage reports add up to, from installs that turned the report on (Settings → Presence). Every figure is a count across homes; nothing here says who or where anyone is. Hover a row to see the report's own name for it."),
   ]));
 
   if (String(settings.tier || "") !== "pro") {
@@ -148,43 +155,99 @@ function renderUnlocked(ctx, root) {
     const n = Object.values(dist.version || {}).reduce((a, b) => a + (Number(b) || 0), 0) || ins.reporting_window || 1;
     const W = s.window_days;
     const sections = [];
-    const section = (title, lede, children) => {
+    // A section folds to one line: its number, title and headline (the few
+    // figures that matter); open, its explanation and cards.
+    const section = (title, lede, children, headline = "") => {
       const num = String(sections.length + 1).padStart(2, "0");
-      const sec = el("section", { class: "ib-sec" }, [
-        el("div", { class: "ib-sec-head" }, [el("span", { class: "ib-num" }, num), el("h2", { class: "ib-h" }, title)]),
-        el("p", { class: "ib-lede" }, lede),
-        ...children,
+      const sec = el("details", { class: "ib-sec", ...(_open.has(title) ? { open: "" } : {}) }, [
+        el("summary", { class: "ib-sec-head" }, [
+          el("span", { class: "ib-chev", "aria-hidden": "true" }, "▸"),
+          el("span", { class: "ib-num" }, num), el("h2", { class: "ib-h" }, title),
+          headline ? el("span", { class: "ib-headline" }, headline) : null,
+        ]),
+        el("div", { class: "ib-sec-body" }, [lede ? el("p", { class: "ib-lede" }, lede) : null, ...children]),
       ]);
-      sections.push([num, title, sec]);
+      sec.addEventListener("toggle", () => { if (sec.open) _open.add(title); else _open.delete(title); });
+      sections.push([num, title, sec, headline]);
       return sec;
     };
+    const top = (map, field = null) => {
+      let best = null;
+      // "?" and "–" (not known) never lead a headline.
+      for (const [k, v] of Object.entries(map || {})) { const x = Number(field ? v && v[field] : v) || 0; if (k !== "?" && k !== "–" && (!best || x > best[1])) best = [k, x]; }
+      return best;
+    };
     const grid = (cards, wide) => el("div", { class: "ib-grid" + (wide ? " ib-grid-wide" : "") }, cards);
+    const jump = (title) => {
+      const hit = sections.find(x => x[1] === title);
+      if (!hit) return;
+      hit[2].open = true;
+      hit[2].scrollIntoView({ behavior: "smooth", block: "start" });
+    };
 
     // ── 01 reach ──────────────────────────────────────────────────────────
     // Today's figure is the honest one: a caller is a distinct IP, and IPv6
     // privacy addresses rotate, so the 30-day figure counts some installs
     // more than once.
     const tiles = el("div", { class: "ib-tiles" }, [
-      tile(el, "Pinging today", pg.distinct_today ?? "–", `distinct update-check callers · ${fmt(pg.distinct_window ?? 0)} over ${W}d (IPv6 rotation overcounts)`),
-      tile(el, "Active", ins.active ?? 0, `reported within ${s.active_days}d`),
-      tile(el, "Lifetime", ins.lifetime ?? 0, "distinct ids ever seen (ledger)"),
-      tile(el, "New", ins.new_window ?? 0, `first seen within ${W}d`),
-      tile(el, "Lapsed", ins.lapsed ?? 0, `silent ${s.lapsed_days}d+`),
-      tile(el, "Pro", ins.pro ?? 0, `Bright ${fmt(ins.bright ?? 0)}`),
+      tile(el, "Running today", pg.distinct_today ?? "–", `installs that checked for an update so far today, opted in or not · ${fmt(pg.distinct_window ?? 0)} over ${W} days (some counted twice when their address changes)`),
+      tile(el, "Active", ins.active ?? 0, `sent a usage report in the last ${s.active_days} days`),
+      tile(el, "Ever reported", ins.lifetime ?? 0, "installs that have ever sent a usage report"),
+      tile(el, "New", ins.new_window ?? 0, `first report in the last ${W} days`),
+      tile(el, "Gone quiet", ins.lapsed ?? 0, `no report for ${s.lapsed_days}+ days`),
+      tile(el, "Pro", ins.pro ?? 0, `on a Pro licence · Bright (Atlas only) ${fmt(ins.bright ?? 0)}`),
     ]);
     const hero = el("div", { class: "ib-card ib-herofig" }, [
-      el("div", { class: "ib-tile-label" }, "Reporting installs"),
+      el("div", { class: "ib-tile-label" }, "Installs sharing a report"),
       el("div", { class: "ib-herofig-value" }, fmt(ins.reporting_window ?? 0)),
-      el("div", { class: "ib-tile-sub" }, `opted in and reported within ${W}d.`),
+      el("div", { class: "ib-tile-sub" }, `turned the usage report on and sent one in the last ${W} days.`),
     ]);
     const days = s.per_day || [];
-    section("Reach", "Who is out there. A ping is an update check from any install; a report comes only from installs that opted in.", [
+    section("Reach", "How many homes run PadSpan. Every install checks for updates (a ping), which is how all of them are counted; only the ones that turned the usage report on say anything more.", [
       el("div", { class: "ib-figs" }, [hero, tiles]),
       grid([
-        columnCard(el, "Pinging installs per day", "Distinct update-check callers each day", days, d => d.pings, d => d.day),
-        columnCard(el, "Reporting installs per day", "Opted-in installs that sent a report each day", days, d => d.installs, d => d.day),
+        columnCard(el, "Installs running, per day", "Installs that checked for an update that day (all installs)", days, d => d.pings, d => d.day),
+        columnCard(el, "Installs reporting, per day", "Installs that sent a usage report that day (opted in only)", days, d => d.installs, d => d.day),
       ], true),
-    ]);
+    ], `${fmt(ins.reporting_window ?? 0)} sharing · ${fmt(pg.distinct_today ?? 0)} running today · ${fmt(ins.new_window ?? 0)} new · ${fmt(ins.lapsed ?? 0)} gone quiet`);
+
+    // ── needs attention ──
+    // What a reader should look at first, worked out from the numbers below:
+    // a setup problem in a fifth of homes or more, warnings and errors, the 3D
+    // view falling back, how many run the newest PadSpan. Each opens its section.
+    const att = [];
+    const flagN = (k) => Number((s.flags || {})[k]) || 0;
+    const many = (x, one, more) => `${fmt(x)} ${Number(x) === 1 ? one : more}`;
+    for (const k of Object.keys(s.flags || {}).sort((a, b) => flagN(b) - flagN(a))) {
+      if (flagN(k) / n >= 0.2) att.push({ sev: /crypto|callback|faulted|desync|silent/.test(k) ? "bad" : "warn", text: word("flag", k),
+                                          fig: `${many(flagN(k), "home", "homes")} · ${pctOf(flagN(k), n)}`, go: "Health", name: k });
+    }
+    const sumOf = (m, f) => Object.values(m || {}).reduce((a, v) => a + (Number(f ? v && v[f] : v) || 0), 0);
+    const maxOf = (m, f) => Math.max(0, ...Object.values(m || {}).map(v => Number(v && v[f]) || 0));
+    const logLines = sumOf(s.errors, "lines");
+    if (logLines) att.push({ sev: "warn", text: "Warnings PadSpan wrote to the Home Assistant log", fig: `${many(logLines, "line", "lines")} · up to ${many(maxOf(s.errors, "installs"), "home", "homes")}`, go: "Usage" });
+    const uiErr = sumOf(s.ui_errors);
+    if (uiErr) att.push({ sev: "warn", text: "Errors caught in the PadSpan panel", fig: many(uiErr, "error", "errors"), go: "Usage" });
+    const fb = Object.fromEntries(Object.entries(s.usage || {}).filter(([k]) => /^house3d_fallback/.test(k)));
+    if (Object.keys(fb).length) att.push({ sev: "warn", text: "The 3D house couldn't show, and the flat Atlas did instead", fig: `${many(sumOf(fb, "count"), "time", "times")} · up to ${many(maxOf(fb, "installs"), "home", "homes")}`, go: "Usage" });
+    if (ins.lapsed) att.push({ sev: "info", text: `Installs gone quiet (no report for ${s.lapsed_days}+ days)`, fig: fmt(ins.lapsed), go: "Installs" });
+    const semver = (v) => String(v).split(".").map(Number);
+    const vers = Object.keys(dist.version || {}).filter(v => /^\d+(\.\d+)*$/.test(v))
+      .sort((a, b) => { const x = semver(a), y = semver(b); for (let i = 0; i < Math.max(x.length, y.length); i++) if ((y[i] || 0) !== (x[i] || 0)) return (y[i] || 0) - (x[i] || 0); return 0; });
+    if (vers.length) att.push({ sev: "info", text: `On the newest PadSpan that reports (${vers[0]})`, fig: `${fmt(dist.version[vers[0]])} · ${pctOf(dist.version[vers[0]], n)}`, go: "Versions" });
+    const nBad = att.filter(a => a.sev === "bad").length, nWarn = att.filter(a => a.sev === "warn").length;
+    const attList = el("div", { class: "ib-att" }, att.length ? att.map(a => {
+      const row = el("button", { class: `ib-att-row ib-att-${a.sev}`, type: "button", title: `Open ${a.go}` + (a.name ? `\nreport name: ${a.name}` : "") }, [
+        el("span", { class: "ib-att-dot", "aria-hidden": "true" }),
+        el("span", { class: "ib-att-text" }, a.text),
+        el("span", { class: "ib-att-fig" }, a.fig),
+        el("span", { class: "ib-att-go", "aria-hidden": "true" }, "→"),
+      ]);
+      row.addEventListener("click", () => jump(a.go));
+      return row;
+    }) : [el("div", { class: "ib-ok" }, "✓ Nothing stands out")]);
+    section("Needs attention", "", [attList],
+      nBad || nWarn ? [nBad ? `${nBad} serious` : null, nWarn ? `${nWarn} to look at` : null].filter(Boolean).join(" · ") : "nothing stands out");
 
     // ── new installs ──────────────────────────────────────────────────────
     const ni = s.new_installs;
@@ -192,43 +255,51 @@ function renderUnlocked(ctx, root) {
       const fr = (h, of) => (of ? `${h}/${of}` : "–");
       const st = ni.stages || {};
       const stageWords = ["none", "map", "rooms", "receivers", "calibrated"];
-      section("New installs", "By the week each install first reported, from the whole history. Really new: the first report said the install was under a week old (PadSpan 0.38.173+; – before). Still reporting: a report in the last 2 days. Day 7 and day 30 count only installs old enough.", [
+      section("New installs", "Do new people stick with it? Each install is counted in the week it first sent a report. \"Brand new\" means that first report came from an install under a week old, not an old one that just turned reporting on (known from PadSpan 0.38.173; – before). \"Still here\" means it reported in the last 2 days. Day 7 and day 30 count only installs old enough to have got there.", [
         grid([
-          cardShell(el, "By first week", "new · really new · still reporting · reached day 7 · day 30 · one report only", () =>
-            dataTable(el, ["week of", "new", "really new", "still", "day 7", "day 30", "1 report"],
-              ni.weeks.map(w => [w.week, w.new, fr(w.really_new, w.age_known), w.still, fr(w.d7, w.d7_of), fr(w.d30, w.d30_of), w.one]))),
-          cardShell(el, "How far setup got", "The last 30 days' new installs, by the furthest step in their latest report", () =>
-            dataTable(el, ["", ...stageWords],
-              [["still reporting", ...stageWords.map(w => (st.still || {})[w] || 0)],
-               ["gone quiet", ...stageWords.map(w => (st.quiet || {})[w] || 0)]])),
+          cardShell(el, "By the week they started", "New installs that week, and how many are still running PadSpan", () =>
+            dataTable(el, ["week of", "new", "brand new", "still here", "still at day 7", "still at day 30", "only 1 report"],
+              ni.weeks.slice().reverse().map(w => [w.week, w.new, fr(w.really_new, w.age_known), w.still, fr(w.d7, w.d7_of), fr(w.d30, w.d30_of), w.one]), "weeks")),
+          cardShell(el, "How far they got with setup", "New installs from the last 30 days, by the furthest setup step they reached", () =>
+            dataTable(el, ["", ...stageWords.map(w => word("stage", w))],
+              [["still here", ...stageWords.map(w => (st.still || {})[w] || 0)],
+               ["stopped reporting", ...stageWords.map(w => (st.quiet || {})[w] || 0)]])),
         ], true),
-        cardShell(el, `Gone quiet (${(ni.quiet || []).length})`, "First report in the last 60 days, none for 7+ days: where each one stopped", () =>
-          dataTable(el, ["id", "first", "last", "reports", "version", "reached", "age"],
-            (ni.quiet || []).map(q => [q.id, q.first, q.last, q.days, q.version, q.stage, q.age || "–"]))),
-      ]);
+        cardShell(el, `Stopped reporting (${(ni.quiet || []).length})`, "Started in the last 60 days, then nothing for 7+ days: where each one stopped", () =>
+          dataTable(el, ["install", "first report", "last report", "days reported", "version", "got as far as", "age at first report"],
+            (ni.quiet || []).map(q => [q.id, q.first, q.last, q.days, q.version, word("stage", q.stage), q.age || "–"]), "quiet")),
+      ], (() => {
+        const w4 = ni.weeks.slice(-4), nNew = w4.reduce((a, w) => a + (Number(w.new) || 0), 0), still = w4.reduce((a, w) => a + (Number(w.still) || 0), 0);
+        return `${fmt(nNew)} new in the last 4 weeks · ${fmt(still)} of them still here · ${fmt((ni.quiet || []).length)} stopped`;
+      })());
     }
 
     // ── 02 versions ───────────────────────────────────────────────────────
-    section("Versions", `What people run, from each install's latest report. Shares on this page are of the ${fmt(n)} installs with a report on file unless they say otherwise.`, [
+    section("Versions", `What people run, from each install's latest report. Percentages on this page are of the ${fmt(n)} installs that have ever sent a report, unless a card says otherwise.`, [
       grid([
-        barCard(el, { title: "Version", ask: "PadSpan version", map: dist.version, total: n }),
-        barCard(el, { title: "Home Assistant", ask: "Home Assistant version", map: dist.ha_version, total: n }),
-        barCard(el, { title: "Edition / tier", ask: "Edition and licence tier", map: dist.tier, total: n }),
-        barCard(el, { title: "Country", ask: "Country set in Home Assistant (? = not set, or before 0.38.148)", map: dist.country, total: n }),
-        barCard(el, { title: "Language", ask: "Language set in Home Assistant (? = before 0.38.148)", map: dist.language, total: n }),
-        barCard(el, { title: "Pinging by version", ask: `Update-check callers over ${W}d, by version`, map: pg.by_version, total: pg.distinct_window || 1, unit: "callers", limit: 8 }),
+        barCard(el, { title: "PadSpan version", ask: "Which PadSpan each install runs", map: dist.version, total: n }),
+        barCard(el, { title: "Home Assistant version", ask: "Which Home Assistant each install runs", map: dist.ha_version, total: n }),
+        barCard(el, { title: "Licence", ask: "Free, Pro, or Bright (the Atlas-only edition)", map: dist.tier, total: n, kind: "tier" }),
+        barCard(el, { title: "Country", ask: "The country set in Home Assistant (? = not set, or PadSpan older than 0.38.148)", map: dist.country, total: n }),
+        barCard(el, { title: "Language", ask: "Home Assistant's language (? = PadSpan older than 0.38.148)", map: dist.language, total: n }),
+        barCard(el, { title: "Running, by version", ask: `Every install that checked for an update in ${W} days, opted in or not (– = too old to say)`, map: pg.by_version, total: pg.distinct_window || 1, unit: "installs", limit: 8 }),
       ]),
-    ]);
+    ], (() => {
+      const v = top(dist.version), h = top(dist.ha_version), c = top(dist.country);
+      return [v && `most on PadSpan ${v[0]} (${pctOf(v[1], n)})`, h && `HA ${h[0]} (${pctOf(h[1], n)})`, c && `most in ${c[0]}`].filter(Boolean).join(" · ");
+    })());
 
     // ── 03 homes ──────────────────────────────────────────────────────────
-    const homeCards = [barCard(el, { title: "Integrations present", ask: "Installs with each integration loaded", map: s.integrations, total: n })];
-    for (const [k, label, ask] of [["scanners", "Scanners", "Bluetooth scanners"], ["floors", "Floors", "Floors"], ["rooms", "Rooms", "Rooms"],
-                                   ["maps", "Maps", "Floor-plan maps"], ["calibration_points", "Calibration points", "Calibration points saved"],
-                                   ["irks", "IRKs", "Phone keys (IRKs) registered"], ["walls", "Walls", "Walls drawn"],
-                                   ["placed_lights", "Placed lights", "Lights placed on a map"], ["objects_total", "Objects stored", "Objects PadSpan holds"]]) {
-      homeCards.push(barCard(el, { title: label, ask: `${ask}, bucketed`, map: orderBuckets(dist[k]), total: n, ranked: false }));
+    const homeCards = [barCard(el, { title: "Other Home Assistant add-ons", ask: "Installs that also run each of these", map: s.integrations, total: n, kind: "integration" })];
+    for (const [k, label, ask] of [["scanners", "Bluetooth receivers", "Bluetooth receivers (proxies) in the house"], ["floors", "Floors", "Floors in Home Assistant"], ["rooms", "Rooms", "Rooms (areas) in Home Assistant"],
+                                   ["maps", "Floor plans", "Floor plans added in PadSpan"], ["calibration_points", "Calibration points", "Spots measured during calibration"],
+                                   ["irks", "Phone keys", "iPhones and others added by their key (IRK), so they can be followed"], ["walls", "Walls", "Walls drawn on the plans"],
+                                   ["placed_lights", "Lights on the map", "Lights placed on a floor plan"], ["objects_total", "Devices seen", "Bluetooth devices PadSpan has seen (most are neighbours' and passers-by)"]]) {
+      homeCards.push(barCard(el, { title: label, ask: `${ask}, grouped (≤ 4 means up to 4)`, map: orderBuckets(dist[k]), total: n, ranked: false }));
     }
-    section("Homes", "How big the houses are and what else runs in them, bucketed from each install's latest report.", [grid(homeCards)]);
+    const most = (k) => { const t = top(dist[k]); return t ? t[0].replace("<=", "≤").replace(">=", "≥") : "?"; };
+    section("Homes", "How big the houses are and what else runs in them, from each install's latest report. Numbers are grouped, never exact.", [grid(homeCards)],
+      `most have ${most("rooms")} rooms · ${most("scanners")} receivers · ${most("floors")} floors`);
 
     // ── 04 radios ─────────────────────────────────────────────────────────
     // HA 2026.6 changed the default for every ESPHome proxy from active to
@@ -242,85 +313,166 @@ function renderUnlocked(ctx, root) {
       const radios = (m) => Object.values(m || {}).reduce((a, b) => a + (Number(b) || 0), 0);
       const nWith = (smi.any_active || 0) + (smi.all_auto || 0) + (smi.any_passive_pinned || 0);
       const kids = [grid([
-        barCard(el, { title: "Scan mode chosen (radios)", ask: "What each radio was set to", map: s.scan_modes_requested, total: radios(s.scan_modes_requested), unit: "radios" }),
-        barCard(el, { title: "Scan mode right now (radios)", ask: "What each radio is doing at report time", map: s.scan_modes, total: radios(s.scan_modes), unit: "radios" }),
-        kvCard(el, "Who pinned a mode (installs)", "Installs, by what they deliberately pinned", [
-          ["Pinned at least one ACTIVE", smi.any_active || 0, n],
-          ["Pinned at least one PASSIVE", smi.any_passive_pinned || 0, n],
-          ["Left everything on auto", smi.all_auto || 0, n],
-          ["Too old to report it", smi.no_data || 0, n],
+        barCard(el, { title: "How receivers are set to scan", ask: "Every receiver, by the scan mode it was set to", map: s.scan_modes_requested, total: radios(s.scan_modes_requested), unit: "receivers", kind: "scan" }),
+        barCard(el, { title: "How receivers are scanning now", ask: "Every receiver, by what it was doing when the report was sent", map: s.scan_modes, total: radios(s.scan_modes), unit: "receivers", kind: "scan" }),
+        kvCard(el, "Who chose a scan mode (installs)", "Installs, by what they set on purpose", [
+          ["Set at least one receiver to Active", smi.any_active || 0, n],
+          ["Set at least one receiver to Passive", smi.any_passive_pinned || 0, n],
+          ["Left every receiver on Auto", smi.all_auto || 0, n],
+          ["PadSpan too old to say", smi.no_data || 0, n],
         ]),
       ])];
       if (nWith) {
         kids.push(el("div", { class: "ib-callout" }, [
           el("span", { class: "ib-callout-fig" }, `${Math.round(100 * (smi.all_auto || 0) / nWith)}%`),
-          el("span", {}, "of installs that can report it have left every radio on auto — HA's 2026.6 default, which scans passively except in short promoted windows."),
+          el("span", {}, "of installs that can say have left every receiver on Auto. That's Home Assistant's default since 2026.6: it mostly just listens, and only asks devices to answer for short spells."),
         ]));
       }
-      section("Radios", "How the Bluetooth fleet scans: per radio for the fleet, per install for what people chose.", kids);
+      section("Receivers", "How the Bluetooth receivers listen. Active asks devices to answer (faster, more readings); passive only listens. Counted per receiver, and per install for what people chose.", kids,
+        nWith ? `${Math.round(100 * (smi.all_auto || 0) / nWith)}% left every receiver on Auto` : "");
     }
 
     // ── 05 health ─────────────────────────────────────────────────────────
     const idn = s.identity || {}, geo = s.geometry || {};
-    section("Health", "What's going wrong. A flag counts only where the report carries the field, so zero means none bad among installs that can say.", [
+    section("Health", "What's going wrong in people's setups. A problem is counted only where the install's PadSpan is new enough to check it, so zero means none found among those that can say.", [
       grid([
         flagsCard(el, s.flags || {}, n),
-        kvCard(el, "Identity", "Phone keys and Private BLE Device", [
-          ["Installs with IRKs registered", idn.with_irks, n],
-          ["…resolving something", idn.resolving, idn.with_irks],
-          ["…silent (keys that never match)", idn.silent, idn.with_irks],
-          ["Installs with Private BLE Device", idn.private_ble_device, n],
+        kvCard(el, "Following phones", "Phones added by their key (IRK), and Home Assistant's Private BLE Device", [
+          ["Installs with phone keys added", idn.with_irks, n],
+          ["…recognising a phone with them", idn.resolving, idn.with_irks],
+          ["…whose keys never match anything", idn.silent, idn.with_irks],
+          ["Installs using Private BLE Device", idn.private_ble_device, n],
         ]),
-        kvCard(el, "Geometry", "Map and height set-up", [
-          ["Multi-floor installs", geo.multi_floor, n],
-          ["Maps geometry-faulted", geo.faulted, n],
-          ["Anchor faulted", geo.anchor_faulted, n],
-          ["No metre anchor", `${fmt(geo.no_anchor ?? 0)} of ${fmt(geo.no_anchor_known ?? 0)} that can say`, null],
-          ["Floors all default height", geo.floors_default, n],
-          ["Scanner Z uniform", geo.z_uniform, n],
+        kvCard(el, "Floor plans and heights", "Whether the plans and floors are set up well enough to place devices", [
+          ["Homes with more than one floor", geo.multi_floor, n],
+          ["A plan's shape or scale doesn't add up", geo.faulted, n],
+          ["The plan used for scale is itself wrong", geo.anchor_faulted, n],
+          ["No plan has a real-world scale", `${fmt(geo.no_anchor ?? 0)} of ${fmt(geo.no_anchor_known ?? 0)} that can say`, null],
+          ["Floors left at the default height", geo.floors_default, n],
+          ["Every receiver at the same height", geo.z_uniform, n],
           ["Calibration points with no floor", geo.cal_no_floor, n],
         ]),
       ]),
-    ]);
+    ], (() => {
+      const ks = Object.keys(s.flags || {}).sort((a, b) => flagN(b) - flagN(a));
+      return ks.length ? `${ks.length} kinds of problem · the most common: ${word("flag", ks[0])} (${pctOf(flagN(ks[0]), n)})` : "no problems found";
+    })());
 
     // ── 06 usage ──────────────────────────────────────────────────────────
     const ad = s.adoption || {};
     const tok = s.type_override_kinds || {};
-    section("Usage", `What gets used over the last ${W} days. Counts are events; the person icon is how many installs produced them.`, [
+    // The AI Task people chose for photos (env.ai, 0.38.187): local or cloud.
+    const aiMap = s.ai || {};
+    // The Overview card's two kinds of row: settings changed (counted per
+    // install) and what each screen showed (counted per screen, homes with 2+).
+    const ovMap = s.overview || {};
+    const ovSettings = Object.fromEntries(Object.entries(ovMap).filter(([k]) => !/^screens?(_listed)?:/.test(k)));
+    const ovScreens = Object.fromEntries(Object.entries(ovMap).filter(([k]) => /^screens?(_listed)?:/.test(k)));
+    // Things people did, things PadSpan did by itself, and what the panel saw of its screen.
+    const _auto = /^(irk_resolved|irk_unresolved_rpa|irk_cache_cleared|scan_mode_flip|lost_and_found|tagged_(arrived|departed)|findmy_|mqtt_publish_failed|proxy_rate_drops|vacation_resumed|bermuda_history_purged|house3d_fallback|map_placement_refused|weather_note|weather_source|weather_shown|wall_reload|view_link|ui_error_while)/;
+    const _screen = /^(client_|wall_screen:|overview_shown:)/;
+    const usePeople = {}, useAuto = {}, useScreen = {};
+    for (const [k, v] of Object.entries(s.usage || {})) (_screen.test(k) ? useScreen : _auto.test(k) ? useAuto : usePeople)[k] = v;
+    section("Usage", `What people actually use, over the last ${W} days. The first number is how many times; the person icon is how many installs.`, [
       grid([
-        pairCard(el, `Tabs opened (${W}d)`, "Tab opens", s.tabs, "count"),
-        pairCard(el, `Tools used (${W}d)`, "Tool and action events", s.usage, "count"),
-        barCard(el, { title: "Features on (installs)", ask: "Installs with each feature switched on", map: s.features, total: n, limit: 40 }),
-        // 0.38.162: Overview settings changed from default (ov_*), each listed
-        // screen's words (screen:*, only houses with 2+ screens), Pro switches below Pro.
-        ...(s.overview && Object.keys(s.overview).length ? [barCard(el, { title: "Overview and screens", ask: "ov_*: installs with a setting changed; screen:*: screens (houses with 2+); below_pro:*: installs", map: s.overview, total: n, limit: 40 })] : []),
-        kvCard(el, "Advanced feature adoption (installs)", "Installs that placed or used at least one", [
+        pairCard(el, `Tabs opened (${W} days)`, "Which parts of PadSpan people open", s.tabs, "count", 12, "tab"),
+        pairCard(el, `Things people did (${W} days)`, "Actions, wizard steps and offers seen", usePeople, "count", 15, "usage"),
+        pairCard(el, `What PadSpan did by itself (${W} days)`, "Background work: recognising phones, tidying, receivers changing mode, arrivals", useAuto, "count", 15, "usage"),
+        pairCard(el, `The screens it runs on (${W} days)`, "What the panel noticed about each browser: smoothness, memory, screen size", useScreen, "count", 15, "usage"),
+        barCard(el, { title: "Settings switched on", ask: "Installs with each setting on (some are on by default)", map: s.features, total: n, limit: 40, kind: "feature" }),
+        ...(Object.keys(ovSettings).length ? [barCard(el, { title: "Overview and Atlas: changed from default", ask: "Installs that changed how the Overview, Atlas or 3D house looks", map: ovSettings, total: n, limit: 40, kind: "overview" })] : []),
+        ...(Object.keys(ovScreens).length ? [barCard(el, { title: "Screens, in homes with two or more", ask: "Each screen PadSpan is open on, by what it is and what it shows (counted per screen)", map: ovScreens, unit: "screens", limit: 40, kind: "overview" })] : []),
+        ...(Object.keys(aiMap).length ? [barCard(el, { title: "AI chosen for photos", ask: "Installs that picked an AI Task in Settings → AI, by where it runs", map: aiMap, total: n,
+          kind: "ai" })] : []),
+        kvCard(el, "Extra things placed on the map (installs)", "Installs that placed or used at least one", [
           ["Placed a motion sensor", ad.motion_sensors, n],
           ["Placed a temperature sensor", ad.temp_sensors, n],
           ["Placed a fan", ad.fans, n],
-          ["Used a light type override (pro)", ad.type_overrides, n],
-          ...Object.keys(tok).sort().map(k => [`  ↳ ${k}`, tok[k], null]),
+          ["Changed what kind of light something is (Pro)", ad.type_overrides, n],
+          ...Object.keys(tok).sort().map(k => [`  ↳ as a ${k === "wled" ? "WLED strip" : k}`, tok[k], null]),
         ]),
-        pairCard(el, "Warnings by module", "Warning log lines", s.errors, "lines"),
-        barCard(el, { title: "Panel errors by view", ask: "Panel errors caught in each view", map: s.ui_errors, unit: "errors", limit: 12 }),
+        ...((s.stairs && s.stairs.installs) ? [kvCard(el, "Stairs in the 3D house", "Homes with stairs in Live Aboard, and what kind", [
+          ["Homes with stairs", s.stairs.installs, n],
+          ["Stairs in all", s.stairs.total, null],
+          ["  ↳ read off a plan by AI, still there", s.stairs.ai_kept, s.stairs.total],
+          ["  ↳ a few steps within one floor", s.stairs.within, s.stairs.total],
+        ])] : []),
+        ...(Object.keys(s.usage || {}).some(k => /^stairs_/.test(k)) ? [pairCard(el, "Stairs at work (page loads)", "Each time Live Aboard drew a house with stairs: whether they land in a room, what they reach, their shapes and styles",
+          Object.fromEntries(Object.entries(s.usage || {}).filter(([k]) => /^stairs_/.test(k))), "count", 12, "usage")] : []),
+        ...(s.fixes ? [kvCard(el, "Recent fixes at work (installs)", "Homes where a fix from the last betas made a difference", [
+          ["A Shelly's scanner found by its MAC (0.38.175)", s.fixes.shelly_mac, n],
+          ["A scanner's room taken from its Shelly (0.38.176)", s.fixes.shelly_area_via, n],
+          ["Forensics on", s.fixes.forensics_on, n],
+          ["  ↳ paused: the licence no longer reaches Pro (0.38.191)", s.fixes.forensics_paused_licence, s.fixes.forensics_on],
+        ])] : []),
+        pairCard(el, "Warnings in the Home Assistant log", "Warning lines PadSpan wrote, by the part of PadSpan that wrote them", s.errors, "lines", 12, "module"),
+        barCard(el, { title: "Panel errors, by tab", ask: "Errors the PadSpan panel caught in each tab", map: s.ui_errors, unit: "errors", limit: 12, kind: "view" }),
       ]),
-    ]);
+    ], (() => {
+      const t = top(s.tabs, "count"), a = top(usePeople, "count");
+      return [t && `most opened: ${word("tab", t[0])}`, a && `most done: ${word("usage", a[0])}`].filter(Boolean).join(" · ");
+    })());
+
+    // ── everything else in the reports ────────────────────────────────────
+    // Every env/health field the cards above don't show (stats.php fields),
+    // one row each: what it is, how many homes sent it, and what they said.
+    // A field added to the report later turns up here by itself.
+    const shownElsewhere = new Set(["scanners", "floors", "rooms", "maps", "calibration_points", "irks", "walls", "placed_lights",
+      "objects_total", "integrations", "scanner_kinds", "scan_modes", "scan_modes_requested", "scan_mode_installs", "ai", "screens",
+      "stairs", "calibration_no_floor", "install_age", "setup_stage", "country", "language",
+      "crypto_ok", "ble_callback_active", "ble_diag_ok", "maps_geometry_faulted", "geometry_anchor_faulted", "stack_desync", "irks_silent",
+      "has_metre_anchor", "floors_all_default", "scanner_z_uniform", "radios_ambiguous", "radios_unresolved", "calibration_points_vanished",
+      "maps_vanished", "rooms_overlap", "radios_shelly_mac", "radios_area_via", "forensics_paused_licence", "irk_devices_resolving"]);
+    const fieldRows = [];
+    for (const [sec, map] of Object.entries((s.fields) || {})) {
+      for (const [k, f] of Object.entries(map || {})) {
+        if (shownElsewhere.has(k) || !f || !f.installs) continue;
+        const bits = [];
+        if (f.above_zero || f.sum) bits.push(`above zero in ${fmt(f.above_zero)} · sum ${fmt(Math.round(f.sum * 10) / 10)}`);
+        const vals = Object.entries(f.values || {}), sums = Object.entries(f.sums || {});
+        if (vals.length) bits.push(vals.slice(0, 6).map(([v, c]) => `${v} ${fmt(c)}`).join(" · ") + (vals.length > 6 ? ` · +${vals.length - 6}` : ""));
+        if (sums.length) bits.push(sums.slice(0, 6).map(([v, c]) => `${v} Σ${fmt(Math.round(c * 10) / 10)}`).join(" · ") + (sums.length > 6 ? ` · +${sums.length - 6}` : ""));
+        fieldRows.push([word("field", k), sec, fmt(f.installs), bits.join("  |  ") || "–", `${sec}.${k}`]);
+      }
+    }
+    fieldRows.sort((a, b) => Number(String(b[2]).replace(/\D/g, "")) - Number(String(a[2]).replace(/\D/g, "")));
+    if (fieldRows.length) {
+      const q = el("input", { class: "ib-filter", type: "search", placeholder: "Filter fields…", "aria-label": "Filter fields" });
+      const holder = el("div");
+      const paint = () => {
+        const f = String(q.value || "").trim().toLowerCase();
+        const hit = f ? fieldRows.filter(r => r.join(" ").toLowerCase().includes(f)) : fieldRows;
+        holder.replaceChildren(dataTable(el, ["field", "part", "homes", "what they said"], hit.map(r => [r[0] + "  ·  " + r[4], r[1], r[2], r[3]]), "fields"));
+      };
+      q.addEventListener("input", paint);
+      paint();
+      section("Everything else in the reports", "Every other field in the usage reports, from each install's latest report: how many homes sent it, and what they said (counts of each answer, sums, or how many were above zero). New fields appear here by themselves.",
+        [el("div", { class: "ib-card" }, [el("div", { class: "ib-card-head" }, [el("div", { class: "ib-card-title" }, `Fields (${fieldRows.length})`), q]), holder])],
+        `${fmt(fieldRows.length)} more fields`);
+    }
 
     // ── 07 installs ───────────────────────────────────────────────────────
     const rows = s.table || [];
-    section("Installs", `One row per install with a report on file, latest report first. ids are the first eight characters of a random id.`, [
+    section("Installs", `One row per install that has sent a report, latest first. The install column is the start of a random id: it says nothing about who or where.`, [
       installsTable(el, rows),
       el("div", { class: "ib-note" },
-        `Spool from ${s.spool_first_day || "?"}; pings log from ${pg.first_day || "?"}. A flag counts only where the report carries the field.`),
-    ]);
+        `Reports kept from ${s.spool_first_day || "?"}; update checks from ${pg.first_day || "?"}. Hover a column name for what it means.`),
+    ], `${fmt(rows.length)} installs · ${fmt(rows.filter(r => r.flags && r.flags.length).length)} with a setup problem`);
 
     // section chips: jump within the page
     const nav = el("nav", { class: "ib-nav" });
-    for (const [num, title, sec] of sections) {
+    for (const [num, title] of sections) {
       const chip = el("button", { class: "ib-chip", type: "button" }, [el("b", {}, num), title]);
-      chip.addEventListener("click", () => sec.scrollIntoView({ behavior: "smooth", block: "start" }));
+      chip.addEventListener("click", () => jump(title));
       nav.appendChild(chip);
     }
+    // Open or close every section at once.
+    const all = (on) => { for (const [, , sec] of sections) sec.open = on; };
+    const bOpen = el("button", { class: "ib-chip ib-chip-act", type: "button" }, "Open all");
+    const bClose = el("button", { class: "ib-chip ib-chip-act", type: "button" }, "Close all");
+    bOpen.addEventListener("click", () => all(true));
+    bClose.addEventListener("click", () => all(false));
+    nav.append(el("span", { class: "ib-nav-gap" }), bOpen, bClose);
     body.appendChild(nav);
     for (const [, , sec] of sections) body.appendChild(sec);
   };
@@ -328,6 +480,309 @@ function renderUnlocked(ctx, root) {
   draw();
   if (!_cache) load(false);
   return root;
+}
+
+// ── Words: what each report name means, for the person reading the page ─────
+// The report's own names (setting keys, event names, module names) stay in
+// each row's hover text; the row itself says what it is in plain words.
+// A name missing here is shown tidied up (underscores to spaces), never blank.
+const W_FEATURE = {
+  beacon_profiling_enabled: "Beacon profiling (learns fixed beacons)",
+  ha_entity_tracker_enabled: "Home Assistant: a tracker per device",
+  update_check_enabled: "Checks for PadSpan updates",
+  ha_entity_area_enabled: "Home Assistant: a room sensor per device",
+  ha_entity_distance_enabled: "Home Assistant: a distance sensor per device",
+  beacon_auto_calibrate: "Calibrates itself from pinned beacons",
+  ha_entity_scanner_distance_enabled: "Home Assistant: distance to each receiver",
+  lights_panel_enabled: "Atlas in the Home Assistant sidebar",
+  onboarding_completed: "Finished the first-run setup",
+  apple_auto_classify: "Sorts Apple devices by type",
+  radio_map_enabled: "Radio Map tab",
+  walk_to_identify_enabled: "Spots who just walked in",
+  mac_rotation_bridging: "Follows phones whose address changes",
+  phone_wizard_enabled: "Phone setup wizard",
+  quiet_mode: "Quiet mode (hides unnamed devices)",
+  forensics_enabled: "Forensics (Pro)",
+  adaptive_floor_detection: "Learns how much each floor blocks signal",
+  distortion_map_enabled: "Distortion Map tab",
+  bermuda_ignore: "Ignores Bermuda's data",
+  overview_2d_mode: "Overview drawn flat (2D)",
+  ha_entity_occupancy_enabled: "Home Assistant: a sensor per room that says if it's occupied",
+  tags_room_events_enabled: "Tags: an event on each room change",
+  rssi_capture_enabled: "Records raw signal for replay",
+  aggressive_ble_reseed: "Re-reads Bluetooth every 5 s (passive proxies)",
+  espresense_mqtt_enabled: "ESPresense receivers over MQTT",
+  lights_show_beacons: "Atlas shows beacons",
+  overview_persistent_pins: "Overview keeps device pins shown",
+  mqtt_publish_enabled: "Publishes rooms to MQTT",
+  overview_show_outdoor: "Overview shows the outdoors",
+  overview_show_walls: "Overview draws walls",
+  tags_nfc_identify_enabled: "Tags: identify by NFC tap",
+  tags_phone_autolink_enabled: "Tags: an NFC tap starts tracking a phone",
+  low_memory_mode: "Low-memory mode (2 GB machines)",
+  lights_showcase: "Atlas presentation look",
+  lights_hide_device_codes: "Atlas hides device codes",
+  lights_hide_untouched: "Atlas draws only lights that were set up",
+  lights_automorph_enabled: "Atlas room-alignment glow",
+  lights_fit_rooms: "Atlas keeps each light inside its room",
+  lights_isolux: "Atlas light-spread contours",
+  light_theme: "Light colour theme",
+  atlas_3d_enabled: "3D house (Live Aboard)",
+  overview_atlas: "Atlas as the Overview",
+  room_reason: "Says why a device is in its room",
+  room_hold: "Holds the room through a short gap",
+  pick_better: "Picks the better of two room guesses (positioning)",
+  unsure: "Marks a device unsure instead of guessing",
+  live_colours: "Atlas lights in their live colours", alert_pulse: "Atlas pulses rooms with an alert",
+  heatmap: "Atlas heat map", subzones: "Zones inside rooms", plan_scan_import: "Imports a phone room scan",
+  wall_fully: "Wall screen: Fully Kiosk support", wall_floor_cycle: "Wall screen: cycles through floors",
+  director: "3D house: camera flies to events", scale: "Optimize for several wall screens",
+  guest_tags: "Guest tags", room_walk: "Calibration: Walk a room", day_theme: "Day colour theme (Pro)",
+  fusion: "Combines position and signal for the room",
+  tasmota_ble_enabled: "Tasmota Bluetooth receivers",
+  occupancy_hybrid_enabled: "Occupancy from motion + Bluetooth",
+  enhanced_security: "Enhanced security",
+};
+const W_TAB = {
+  overview: "Overview", maps: "Maps", calibration: "Calibration", follow: "Follow", purelive: "Pure Live",
+  settings: "Settings", manage: "Manage", training: "Training", devices: "Devices", occupancy: "Occupancy",
+  health: "Health", bluetooth: "Bluetooth", monitor: "Monitor", traceback: "Traceback", presence: "Presence",
+  qa: "QA", installbase: "Install Base (this page)", sandbox: "Sandbox", forensics: "Forensics", insights: "Insights",
+  "maps/edit": "Maps › Edit", "maps/rooms": "Maps › Rooms", "maps/stack": "Maps › Floor stack",
+  "maps/library": "Maps › Library", "maps/upload": "Maps › Upload a plan", "maps/lights": "Maps › Lights",
+  "maps/export": "Maps › Export", "maps/help": "Maps › Help",
+  "bluetooth/scanners": "Bluetooth › Receivers", "bluetooth/monitor": "Bluetooth › Monitor",
+  "bluetooth/irk_panel": "Bluetooth › Phone keys", "bluetooth/esphome_configs": "Bluetooth › ESPHome configs",
+  "bluetooth/visualization": "Bluetooth › Visualisation",
+};
+const W_FLAG = {
+  floors_all_default: "Floors left at the default height (multi-floor homes)",
+  scanner_z_uniform: "Every receiver at the same height (multi-floor homes)",
+  no_metre_anchor: "No map has a real-world scale (metres)",
+  irks_silent: "Phone keys added that never match a phone",
+  geometry_faulted: "A map's shape or scale doesn't add up",
+  radios_ambiguous: "Two receivers' names overlap, so one can't be matched",
+  calibration_no_floor: "Calibration points with no floor",
+  radios_unresolved: "A receiver with no Home Assistant device",
+  rooms_overlap: "Rooms on one floor drawn over each other",
+};
+const W_INTEGRATION = {
+  bluetooth: "Bluetooth", mobile_app: "Home Assistant phone app", mqtt: "MQTT", ibeacon: "iBeacon tracker",
+  esphome: "ESPHome", bermuda: "Bermuda", private_ble_device: "Private BLE Device",
+};
+const W_MODULE = {
+  ws_notify: "Notifications", __init__: "Start-up", ws_calibration: "Calibration",
+  ws_companion: "Phone app (Companion)", device_registry: "Home Assistant device list",
+};
+const W_VIEW = { overview: "Overview", calibration: "Calibration", sandbox: "Sandbox", devices: "Devices" };
+const W_STAGE = {
+  none: "Nothing set up", map: "Added a floor plan", rooms: "Drew rooms",
+  receivers: "Placed receivers", calibrated: "Calibrated",
+};
+const W_TIER = { "full/free": "Free", "full/pro": "Pro", "full/bright": "Bright (Atlas only)" };
+const W_SCAN = { active: "Active (asks devices to answer)", passive: "Passive (only listens)", auto: "Auto (HA decides)", unknown: "Not known" };
+const W_OVERVIEW = {
+  "ov_house:gap_tight": "Overview: floors stacked closer together",
+  "ov_house:gap_wide": "Overview: floors spread further apart",
+  "ov_house:gap_custom": "Overview: floor spacing changed a little",
+  "ov_house:offset": "Overview: floors shifted sideways",
+  "ov_house:one_floor": "Overview: opens on one floor, not all",
+  "ov_house:trails": "Overview: movement trails on",
+  "ov_atlas:zoom_lt1": "Atlas: zoomed out",
+  "ov_atlas:zoom_1_2": "Atlas: zoomed in (up to 2×)",
+  "ov_atlas:zoom_gt2": "Atlas: zoomed in past 2×",
+  "ov_atlas:classic": "Atlas: kept the old layout",
+  "ov_atlas:no_emergency": "Atlas: emergency button hidden",
+  "ov_atlas:no_weather": "Atlas: weather off",
+  "ov_atlas:weather_lt1": "Atlas: weather toned down",
+  "ov_atlas:weather_gt1": "Atlas: weather turned up",
+  "ov_3d:q_low": "3D house: low quality",
+  "ov_3d:q_high": "3D house: high quality",
+  "ov_3d:people": "3D house: people shown",
+  "ov_3d:tags": "3D house: tags shown",
+  "ov_3d:library": "3D house: furniture library",
+  "ov_3d:no_weather": "3D house: weather off",
+  "ov_3d:look_own": "3D house: own colours",
+  "ov_3d:look_studio": "3D house: studio look",
+  "below_pro:overview_atlas": "Atlas as Overview switched on without Pro",
+  "below_pro:atlas_3d_enabled": "3D house switched on without Pro",
+};
+// What one screen showed or is (screen:<word>, homes with two or more screens).
+const W_SCREEN = {
+  house: "Overview: the house drawing", house_empty: "Overview: house with no floors yet",
+  floor_plan: "Overview: a floor plan", room_grid: "Overview: a grid of rooms", flat: "Overview: flat (2D)",
+  atlas: "Overview: the Atlas", atlas_3d: "Overview: the 3D house", basic: "Overview in Basic mode",
+  res_lt720: "Smaller than 720p", res_720: "720p screen", res_1080: "1080p screen", res_1440: "1440p screen",
+  res_4k: "4K screen", res_5k_up: "5K or bigger screen",
+  kind_phone: "A phone", kind_tablet: "A tablet", kind_desktop: "A computer", kind_large: "A big screen or TV",
+  panel_kiosk: "Panel as a wall screen (kiosk link)", panel_fullscreen_idle: "Panel full screen, left alone (a wall)",
+  panel_fullscreen_used: "Panel full screen, in use", panel_windowed: "Panel in a window",
+  atlaspage_kiosk: "Sidebar Atlas as a wall screen (kiosk link)", atlaspage_fullscreen_idle: "Sidebar Atlas full screen, left alone",
+  atlaspage_fullscreen_used: "Sidebar Atlas full screen, in use", atlaspage_windowed: "Sidebar Atlas in a window",
+};
+const W_VIEWS_PERF = { atlas: "the Atlas", sim: "the 3D house", other: "other tabs" };
+const W_BUCKET = {
+  lt10: "under 10 fps", "10_24": "10–24 fps", "24_45": "24–45 fps", "45up": "45 fps or more",
+  lt128m: "under 128 MB", "128_256m": "128–256 MB", "256_512m": "256–512 MB", "512m_1g": "512 MB–1 GB", "1g_up": "over 1 GB",
+};
+const W_DEV = {
+  mem_lt1g: "Device memory: under 1 GB", mem_1g: "Device memory: 1 GB", mem_2g: "Device memory: 2 GB",
+  mem_4g: "Device memory: 4 GB", mem_8g_up: "Device memory: 8 GB or more", mem_unknown: "Device memory: browser won't say",
+  cores_1_2: "Processor: 1–2 cores", cores_3_4: "Processor: 3–4 cores", cores_5_8: "Processor: 5–8 cores",
+  cores_9_up: "Processor: 9+ cores", cores_unknown: "Processor: browser won't say",
+  webgl2_yes: "3D graphics supported", webgl2_no: "No 3D graphics (WebGL 2)",
+  touch_yes: "Touch screen", touch_no: "No touch screen",
+  lastrep_yes: "Sensor freshness reaches the panel", lastrep_no: "Sensor freshness doesn't reach the panel",
+};
+const W_CLIENT_SCREEN = {
+  ...Object.fromEntries(Object.entries(W_SCREEN).filter(([k]) => /^(res|kind)_/.test(k))),
+  orient_land: "Landscape", orient_port: "Portrait",
+  dpr_1: "Standard pixel density", dpr_1_5: "1.5× pixel density", dpr_2: "2× (high-DPI) screen", dpr_3_up: "3× or more (phone-class) screen",
+  screens_1: "One monitor", screens_2up: "Two or more monitors", screens_unknown: "Monitors: browser won't say",
+};
+const W_SURFACE = {
+  atlas: "the Atlas", busy_times: "Busy times", locate: "Locate", maps: "Maps", milestone: "a setup milestone",
+  settings: "Settings", sidebar: "the sidebar", update_banner: "the update banner", overview: "the Overview",
+};
+const W_EVENT = {
+  stale_receivers_listed: "Opened the stale-receiver list (Mapping › 3D Stack)",
+  backup_created: "Made a backup", beacon_tune_saved: "Saved a beacon position (Beacon Tune)",
+  bermuda_history_purged: "Cleared Bermuda's old history", calibration_point_added: "Added a calibration point",
+  client_screen_seen: "Screens seen", companion_tx_sent: "Phone app set to broadcast (setup wizard)",
+  findmy_linked: "Find My tag linked to its owner", findmy_linked_slow: "Find My tag linked, but slowly",
+  findmy_missed_ambiguous: "Find My tag not linked: two possible owners",
+  findmy_missed_elsewhere: "Find My tag not linked: owner elsewhere",
+  findmy_missed_no_candidate: "Find My tag not linked: no owner nearby",
+  findmy_back_on_day_key: "Find My tag back on its daily key",
+  findmy_moved_back: "Find My tag went back to an earlier address",
+  findmy_moved_back_addrs: "Links undone when a Find My tag went back",
+  forensics_query: "Ran a Forensics search", free_pro_card_shown: "Saw the free-Pro card",
+  getting_started_shown: "Saw the Getting Started card", house3d_opened: "Opened the 3D house",
+  "house3d_fallback:context_lost": "3D house fell back: the browser dropped 3D graphics",
+  irk_added: "Added a phone key (IRK)", irk_cache_cleared: "Phone keys reloaded after a change",
+  irk_resolved: "A phone's changing address recognised", irk_unresolved_rpa: "A changing address no key recognised",
+  irk_validate: "Checked a phone key", light_placed: "Placed a light", lights_tour_opened: "Opened the Atlas tour",
+  lights_tour_completed: "Finished the Atlas tour", lights_tour_dismissed_early: "Left the Atlas tour early",
+  lost_and_found_pruned: "Old unknown devices tidied away", map_placement_committed: "Placed a floor plan",
+  map_placement_refused: "A floor plan placement was refused", mqtt_publish_failed: "MQTT publish failed",
+  point_align_applied: "Lined up a map by points", pro_invite_later: "Free Pro year: chose Later",
+  scan_mode_flip_auto: "A receiver switched to auto scanning", scan_mode_flip_pinned: "A receiver's scan mode pinned",
+  tagged_arrived: "Tagged device arrived home", tagged_departed: "Tagged device left home",
+  vacation_resumed: "Vacation Mode resumed after a restart", wall_placed: "Drew a wall", wall_removed: "Removed a wall",
+  "view_link:kept": "A ?view= link opened its tab", "view_link:forensics_off": "A ?view= link went to the menu (Forensics off)",
+  "view_link:edition": "A ?view= link went to the menu (not in this edition)",
+  "ha_sidebar:hidden": "Hid Home Assistant's sidebar", "ha_sidebar:shown": "Brought the sidebar back",
+  "weather_note:warning_ignored": "Weather: a leak sensor chosen as the warning, ignored",
+  "weather_note:sensor_overruled": "Weather: a wet rain sensor under clear sky, ignored",
+  wizard_calib_step_setup: "Calibration wizard: setup", wizard_calib_step_model: "Calibration wizard: house model",
+  wizard_calib_step_roam: "Calibration wizard: walk around", wizard_calib_step_tune: "Calibration wizard: tune",
+  wizard_calib_step_finish: "Calibration wizard: finished", wizard_calib_exited_early: "Calibration wizard: left early",
+  wizard_maps_step_upload: "Maps wizard: upload a plan", wizard_maps_step_scale: "Maps wizard: set the scale",
+  wizard_maps_step_rooms: "Maps wizard: rooms", wizard_maps_step_scanners: "Maps wizard: receivers",
+  wizard_maps_step_finish: "Maps wizard: finished", wizard_maps_exited_early: "Maps wizard: left early",
+  wizard_tiers_step_free: "Editions tour: Free", wizard_tiers_step_ladder: "Editions tour: compare",
+  wizard_tiers_step_upgrade: "Editions tour: upgrade", wizard_tiers_completed: "Editions tour: finished",
+  wizard_la_opened: "3D house setup: opened", wizard_la_finished: "3D house setup: finished",
+};
+const W_GS_STEP = { upload: "add a floor plan", scale: "set the scale", rooms: "draw rooms", scanners: "place receivers",
+                    calibrate: "calibrate", positioned: "see devices placed" };
+const W_WEATHER = { still: "nothing falling", light_rain: "light rain", heavy_rain: "heavy rain", light_snow: "light snow",
+                    heavy_snow: "heavy snow", condition: "the weather's condition", rain_sensor: "a rain sensor", none: "no weather source" };
+const W_WALL_KIND = { kiosk: "as a wall screen (kiosk link)", fullscreen_idle: "full screen, left alone (a wall)",
+                      fullscreen_used: "full screen, in use", windowed: "in a window", fullscreen: "full screen", stuck: "stuck on the old version" };
+
+function tidy(k) {
+  const s = String(k).replace(/[_:/]+/g, " ").trim();
+  return s ? s[0].toUpperCase() + s.slice(1) : String(k);
+}
+
+/** What a report name means, in words. `kind` says which list it comes from. */
+// What each report field is, for "Everything else in the reports" (a field
+// missing here shows its own name, tidied).
+const W_FIELD = {
+  beacon_positions: "Beacons placed on a plan", scanner_positions: "Receivers placed on a plan",
+  ble_max_age_s: "Oldest advert the live view takes (s)", object_history_days: "Days an unknown device stays in history",
+  calibration_auto_points: "Calibration points PadSpan added itself", coverage_floor_active: "A weakest-signal floor is set",
+  floors_with_height: "Floors given a real height", rooms_with_height: "Rooms given their own height", scanners_with_z: "Receivers given a mounting height",
+  geometry_fault_unplaced: "Plans with no placement", geometry_fault_unreadable: "Plans whose placement can't be read",
+  geometry_no_world_frame: "Placements on disk but no scale to draw them", maps_divergent: "Plans whose two room records disagree",
+  room_footprint_oversized: "Rooms bigger than their plan", room_footprint_undersized: "Rooms smaller than their plan",
+  guest: "Guest tags", vacation: "Vacation Mode", room_walk: "Calibration: Walk a room", heldout: "Held-out accuracy (calibration)",
+  has_any_identity: "Any phone identity set up", irks_total: "Phone keys in all", irks_by_source: "Phone keys, by where they came from",
+  irks_resolving_by_source: "Phone keys that work, by where they came from", rpas_seen: "Rotating Bluetooth addresses on the air",
+  rpas_resolved: "Rotating addresses recognised", resolver_errors: "Phone-key errors", followed: "Devices followed",
+  findmy: "Find My tags on the air", objects_by_kind: "Devices, by kind", outside_now: "Followed devices outside now",
+  positioned_now: "Followed devices placed on the map now", presence_cfg: "Room timing changed from the default",
+  quiet_hidden: "Share hidden by quiet mode", scanner_floors: "Receivers with a minimum signal set",
+  scanner_names: "Where receivers' names come from", scanner_state: "Receivers lost, off or left out",
+  split_levels: "Split levels (rooms raised or sunk)", temp_fresh: "Temperature sensors reporting on time",
+  hw: "The machine Home Assistant runs on", maps_www: "Plans moved out of the public folder",
+  cal_points_phantom_room_n: "Calibration points in a room that isn't there", entity_dup_n: "PadSpan entities duplicated (_2, _3…)",
+  pinned_movers_n: "Followed devices pinned in place", usage_dropped: "Usage counts left out to fit the report",
+  perf: "How hard PadSpan works the machine", runs: "PadSpan's background jobs",
+};
+function word(kind, k) {
+  const key = String(k);
+  const [a, b, c] = key.split(":");
+  switch (kind) {
+    case "feature": return W_FEATURE[key] || tidy(key.replace(/_enabled$/, ""));
+    case "field": return W_FIELD[key] || tidy(key);
+    case "tab": return W_TAB[key] || tidy(key);
+    case "flag": return W_FLAG[key] || tidy(key);
+    case "integration": return W_INTEGRATION[key] || tidy(key);
+    case "module": return W_MODULE[b || a] ? `${W_MODULE[b || a]}${b && a !== "WARNING" ? ` (${a.toLowerCase()})` : ""}` : tidy(b || a);
+    case "view": return W_VIEW[key] || W_TAB[key] || tidy(key);
+    case "stage": return W_STAGE[key] || tidy(key);
+    case "tier": return W_TIER[key] || tidy(key);
+    case "scan": return W_SCAN[key] || tidy(key);
+    case "ai": return { local: "Local (stays in the house)", cloud: "Cloud (leaves the house)", unknown: "Another AI integration",
+                        unready: "Chosen, but not ready" }[key] || tidy(key);
+    case "overview":
+      if (W_OVERVIEW[key]) return W_OVERVIEW[key];
+      if (a === "screen") return W_SCREEN[b] || tidy(b);
+      if (a === "screens_listed") return `Homes listing ${b} screens`;
+      return tidy(key);
+    case "usage": {
+      if (W_EVENT[key]) return W_EVENT[key];
+      if (a === "client_fps") return `Smoothness on ${W_VIEWS_PERF[b] || b}: ${W_BUCKET[c] || c}`;
+      if (a === "client_heap") return `Browser memory on ${W_VIEWS_PERF[b] || b}: ${W_BUCKET[c] || c}`;
+      if (a === "client_dev") return W_DEV[b] || tidy(b);
+      if (a === "client_screen") return W_CLIENT_SCREEN[b] || tidy(b);
+      if (a === "overview_shown") return (W_SCREEN[b] || tidy(b)) + " (drawn)";
+      if (a === "trial_offer_shown") return `Free trial offered on ${W_SURFACE[b] || b}`;
+      if (a === "trial_started") return `Free trial started from ${W_SURFACE[b] || b}`;
+      if (a === "trial_failed") return `Free trial failed to start (${W_SURFACE[b] || b})`;
+      if (a === "pro_invite_shown") return `Free Pro year offered on ${W_SURFACE[b] || b}`;
+      if (a === "getting_started_step") return `Getting Started: ${W_GS_STEP[b] || b}`;
+      if (a === "weather_shown") return `Atlas weather shown: ${W_WEATHER[b] || b}`;
+      if (a === "weather_source") return `Atlas weather from ${W_WEATHER[b] || b}`;
+      if (a === "wall_screen") return `${b === "atlas" ? "Sidebar Atlas" : "Panel"} ${W_WALL_KIND[c] || c}`;
+      if (a === "wall_reload") return `${b === "atlas" ? "Sidebar Atlas" : "Panel"} reloaded itself after an update (${W_WALL_KIND[c] || c})`;
+      if (a === "ui_error_while") return `Panel error while in ${W_TAB[b] || b}`;
+      if (a === "first_room") return `First room drawn (${b === "lt15m" ? "within 15 min" : b})`;
+      if (a === "photo_read") return { ok: "AI read a photo", no_ai_task: "AI photo refused: no AI Task set up",
+                                        bad_answer: "AI answered with nothing usable", error: "AI photo read failed" }[b] || tidy(key);
+      if (a === "stair_read") return { found: "AI found stairs on a floor plan", none: "AI found no stairs on a plan",
+                                        bad_answer: "AI's stair answer unreadable", error: "AI stair read failed",
+                                        no_ai_task: "AI stair read refused: no AI Task" }[b] || tidy(key);
+      if (a === "photo_subject") return `AI read a photo of ${{ furniture: "furniture", tag: "a tag", scanner: "a receiver", person: "a person" }[b] || b}`;
+      if (a === "photo_secs") return `AI took ${{ lt5: "under 5 s", "5_15": "5–15 s", "15_45": "15–45 s", gt45: "over 45 s" }[b] || b} to answer`;
+      if (a === "stairs_outcome") return { all_ok: "Stairs: every flight lands in a room", some_landing: "Stairs: one lands in no room (check where)",
+                                            some_nofloor: "Stairs: one has no floor above to reach" }[b] || tidy(key);
+      if (a === "stairs_reach") return { split_level: "Stairs: one reaches a raised or sunken room", within: "Stairs: a few steps within one floor" }[b] || tidy(key);
+      if (a === "stairs_shape") return `Stairs shaped ${{ straight: "straight", l: "L", u: "U", l2: "with two landings", l3: "with three landings" }[b] || b}`;
+      if (a === "stairs_style") return `Stairs: ${{ closed: "closed", open: "open risers", treads: "treads only", floating: "floating (on a spine)" }[b] || b}`;
+      if (a === "stair_secs") return `AI took ${{ lt5: "under 5 s", "5_15": "5–15 s", "15_45": "15–45 s", gt45: "over 45 s" }[b] || b} to read a floor plan`;
+      if (a === "house3d_fallback_size") return `3D house fell back, in a house of ${{ lt20: "under 20", "20_60": "20–60", "60_150": "60–150", gt150: "over 150" }[b] || b} rooms`;
+      if (a === "tip_shown" || a === "tip_opened" || a === "tip_hidden") {
+        const tip = { floor_heights: "floor heights", receiver_heights: "receiver heights", scale: "a real-world scale", all: "all of them" }[b] || b;
+        return `Accuracy tip ${{ tip_shown: "shown", tip_opened: "followed to its fix", tip_hidden: "hidden" }[a]}: ${tip}`;
+      }
+      if (a === "proxy_rate_drops") return `A receiver's reading rate dropped (${b} a day)`;
+      return tidy(key);
+    }
+  }
+  return tidy(key);
 }
 
 // ── pieces ───────────────────────────────────────────────────────────────────
@@ -390,11 +845,33 @@ function cardShell(el, title, ask, chart, table) {
 
 function empty(el) { return el("div", { class: "ib-empty" }, "–"); }
 
-function dataTable(el, cols, rows) {
-  const t = el("table", { class: "ib-table" });
-  t.appendChild(el("tr", {}, cols.map((c, i) => el("th", { class: i ? "num" : "" }, c))));
-  for (const r of rows) t.appendChild(el("tr", {}, r.map((v, i) => el("td", { class: i ? "num" : "" }, String(v)))));
-  return el("div", { class: "ib-scroll" }, [t]);
+/** `build(limit)` drawn with the first `short` of `count` rows, and under it
+ *  a "Show all" that draws every row (kept per `key` across re-renders). */
+function expandable(el, key, count, short, build) {
+  const out = el("div");
+  const paint = () => {
+    const all = _more.has(key) || count <= short;
+    const kids = [build(all ? count : short)];
+    if (count > short) {
+      const b = el("button", { class: "ib-more", type: "button", "aria-expanded": String(all) }, all ? "Show fewer ▴" : `Show all ${fmt(count)} ▾`);
+      b.addEventListener("click", () => { if (_more.has(key)) _more.delete(key); else _more.add(key); paint(); });
+      kids.push(b);
+    }
+    out.replaceChildren(...kids);
+  };
+  paint();
+  return out;
+}
+
+/** A table; with `key`, a long one shows its first SHORT_ROWS until "Show all". */
+function dataTable(el, cols, rows, key = null) {
+  const draw = (limit) => {
+    const t = el("table", { class: "ib-table" });
+    t.appendChild(el("tr", {}, cols.map((c, i) => el("th", { class: i ? "num" : "" }, c))));
+    for (const r of rows.slice(0, limit)) t.appendChild(el("tr", {}, r.map((v, i) => el("td", { class: i ? "num" : "" }, String(v)))));
+    return el("div", { class: "ib-scroll" }, [t]);
+  };
+  return key ? expandable(el, "rows:" + key, rows.length, SHORT_ROWS, draw) : draw(rows.length);
 }
 
 /**
@@ -404,17 +881,20 @@ function dataTable(el, cols, rows) {
  * `ranked` numbers the rows (a list sorted by count); bucketed distributions
  * keep their natural order and go unnumbered.
  */
-function barCard(el, { title, ask, map, total = null, unit = "installs", limit = 10, ranked = true }) {
+function barCard(el, { title, ask, map, total = null, unit = "installs", limit = 10, ranked = true, kind = null }) {
+  const name = (k) => kind ? word(kind, k) : k;
   const entries = Object.entries(map || {}).map(([k, v]) => [k, Number(v) || 0]);
   if (ranked) entries.sort((a, b) => b[1] - a[1]);
   const person = unit === "installs";
-  const chart = () => {
+  // A ranked list shows its top few; a grouped one (sizes) is short and shows whole.
+  const short = ranked ? Math.min(limit, SHORT) : entries.length;
+  const chart = () => expandable(el, title, entries.length, short, (limit) => {
     if (!entries.length) return empty(el);
     const shown = entries.slice(0, limit);
     const max = Math.max(...shown.map(e => e[1]), 1);
     const scale = total || max;
     const cw = Math.max(...shown.map(e => fmt(e[1]).length)) + (person ? 4 : 2);
-    const cols = `${ranked ? "18px " : ""}minmax(60px,34%) minmax(0,1fr) ${cw}ch`;
+    const cols = `${ranked ? "18px " : ""}minmax(90px,48%) minmax(0,1fr) ${cw}ch`;
     const wrap = el("div", { class: "ib-rows" + (total ? " ib-scaled" : ""), style: `--ib-cols:${cols}` });
     shown.forEach(([k, v], i) => {
       const w = Math.min(100, (v / scale) * 100);
@@ -422,9 +902,10 @@ function barCard(el, { title, ask, map, total = null, unit = "installs", limit =
       const inside = p && w >= 70;
       const fill = el("div", { class: "ib-fill", style: `width:${w.toFixed(2)}%${v > 0 ? ";min-width:2px" : ""}` },
         inside ? [el("span", { class: "ib-pct-in" }, p)] : []);
-      wrap.appendChild(el("div", { class: "ib-row", title: total ? `${k}: ${fmt(v)} of ${fmt(total)} ${unit} (${p})` : `${k}: ${fmt(v)} ${unit}` }, [
+      const hover = (total ? `${name(k)}: ${fmt(v)} of ${fmt(total)} ${unit} (${p})` : `${name(k)}: ${fmt(v)} ${unit}`) + (kind ? `\nreport name: ${k}` : "");
+      wrap.appendChild(el("div", { class: "ib-row", title: hover }, [
         ranked ? el("span", { class: "ib-rank" }, String(i + 1)) : null,
-        el("span", { class: "ib-label" }, k),
+        el("span", { class: "ib-label" }, name(k)),
         el("div", { class: "ib-track" }, [fill, p && !inside ? el("span", { class: "ib-pct" }, p) : null]),
         el("span", { class: "ib-count" }, [person ? PERSON() : null, fmt(v)]),
       ]));
@@ -437,38 +918,38 @@ function barCard(el, { title, ask, map, total = null, unit = "installs", limit =
       ]));
     }
     const foot = [el("span", { class: "ib-foot-item" }, total ? [person ? PERSON() : null, `${fmt(total)} ${unit}`] : `${unit} · scaled to the largest`)];
-    if (entries.length > limit) foot.push(el("span", { class: "ib-foot-item" }, `+${entries.length - limit} more in the table`));
     return el("div", {}, [wrap, el("div", { class: "ib-foot" }, foot)]);
-  };
+  });
   const table = entries.length ? () => dataTable(el, total ? ["", unit, "share"] : ["", unit],
-    entries.map(([k, v]) => total ? [k, fmt(v), pctOf(v, total)] : [k, fmt(v)])) : null;
+    entries.map(([k, v]) => total ? [name(k), fmt(v), pctOf(v, total)] : [name(k), fmt(v)])) : null;
   return cardShell(el, title, ask, chart, table);
 }
 
 /** Bars for values shaped {count|lines, installs}: events, with the installs that produced them. */
-function pairCard(el, title, ask, map, field, limit = 12) {
+function pairCard(el, title, ask, map, field, limit = 12, kind = null) {
+  const name = (k) => kind ? word(kind, k) : k;
+  const what = field === "lines" ? "lines" : "times";
   const entries = Object.entries(map || {}).map(([k, v]) => [k, Number(v && v[field]) || 0, Number(v && v.installs) || 0]);
   entries.sort((a, b) => b[1] - a[1]);
-  const chart = () => {
+  const chart = () => expandable(el, title, entries.length, Math.min(limit, SHORT), (limit) => {
     if (!entries.length) return empty(el);
     const shown = entries.slice(0, limit);
     const max = Math.max(...shown.map(e => e[1]), 1);
     const cw = Math.max(...shown.map(e => (fmt(e[1]) + fmt(e[2])).length)) + 6;
-    const wrap = el("div", { class: "ib-rows", style: `--ib-cols:18px minmax(60px,34%) minmax(0,1fr) ${cw}ch` });
+    const wrap = el("div", { class: "ib-rows", style: `--ib-cols:18px minmax(90px,48%) minmax(0,1fr) ${cw}ch` });
     shown.forEach(([k, v, inst], i) => {
       const w = (v / max) * 100;
-      wrap.appendChild(el("div", { class: "ib-row", title: `${k}: ${fmt(v)} ${field} from ${fmt(inst)} installs` }, [
+      wrap.appendChild(el("div", { class: "ib-row", title: `${name(k)}: ${fmt(v)} ${what} from ${fmt(inst)} installs` + (kind ? `\nreport name: ${k}` : "") }, [
         el("span", { class: "ib-rank" }, String(i + 1)),
-        el("span", { class: "ib-label" }, k),
+        el("span", { class: "ib-label" }, name(k)),
         el("div", { class: "ib-track" }, [el("div", { class: "ib-fill", style: `width:${w.toFixed(2)}%${v > 0 ? ";min-width:2px" : ""}` })]),
         el("span", { class: "ib-count" }, [fmt(v), el("span", { class: "ib-sep" }, "·"), PERSON(), fmt(inst)]),
       ]));
     });
-    const foot = [el("span", { class: "ib-foot-item" }, `${field} · scaled to the largest`)];
-    if (entries.length > limit) foot.push(el("span", { class: "ib-foot-item" }, `+${entries.length - limit} more in the table`));
+    const foot = [el("span", { class: "ib-foot-item" }, `${what} · bars scaled to the largest`)];
     return el("div", {}, [wrap, el("div", { class: "ib-foot" }, foot)]);
-  };
-  const table = entries.length ? () => dataTable(el, ["", field, "installs"], entries.map(([k, v, inst]) => [k, fmt(v), fmt(inst)])) : null;
+  });
+  const table = entries.length ? () => dataTable(el, ["", what, "installs"], entries.map(([k, v, inst]) => [name(k), fmt(v), fmt(inst)])) : null;
   return cardShell(el, title, ask, chart, table);
 }
 
@@ -486,13 +967,14 @@ function kvCard(el, title, ask, triples) {
 
 function flagsCard(el, flags, n) {
   const keys = Object.keys(flags);
-  return cardShell(el, "Health flags (installs affected)", "Installs where a health check reads bad", () => {
-    if (!keys.length) return el("div", { class: "ib-ok" }, "✓ none raised among installs that report them");
+  return cardShell(el, "Problems found (installs)", "Installs where a setup check found something wrong", () => {
+    if (!keys.length) return el("div", { class: "ib-ok" }, "✓ none found among installs that can check");
     return el("div", { class: "ib-kv" }, keys.map(k => {
       const sev = /crypto|callback|faulted|desync|silent/.test(k) ? "bad" : "warn";
       return el("div", { class: "ib-kv-row" }, [
         el("span", { class: "ib-kv-label ib-flag" }, [
-          el("span", { class: `ib-sev ib-sev-${sev}`, title: sev === "bad" ? "serious" : "warning" }, sev === "bad" ? "✖" : "⚠"), k,
+          el("span", { class: `ib-sev ib-sev-${sev}`, title: sev === "bad" ? "serious" : "warning" }, sev === "bad" ? "✖" : "⚠"),
+          el("span", { title: `report name: ${k}` }, word("flag", k)),
         ]),
         el("span", { class: "ib-kv-value" }, fmt(flags[k])),
         el("span", { class: "ib-kv-pct" }, pctOf(flags[k], n) || ""),
@@ -508,19 +990,48 @@ function installsTable(el, rows) {
   const t = el("table", { class: "ib-table ib-installs" });
   const cols = ["id", "first", "last", "days", "stage", "version", "ha", "tier", "scanners", "floors", "rooms", "maps", "cal", "irks", "irks_resolving", "objects", "identified", "pbd", "uptime", "flags"];
   const numeric = new Set(["days", "scanners", "floors", "rooms", "maps", "cal", "irks", "irks_resolving", "objects", "identified"]);
-  t.appendChild(el("tr", {}, cols.map(c => el("th", { class: numeric.has(c) ? "num" : "" }, c))));
+  const HEAD = {
+    id: ["install", "The start of a random id. Says nothing about who or where."],
+    first: ["first report", "Day of the first usage report"], last: ["last report", "Day of the latest usage report"],
+    days: ["days", "Days it has sent a report"], stage: ["setup", "The furthest setup step reached"],
+    version: ["PadSpan", "PadSpan version"], ha: ["HA", "Home Assistant version"], tier: ["licence", "Free, Pro or Bright"],
+    scanners: ["receivers", "Bluetooth receivers"], floors: ["floors", "Floors"], rooms: ["rooms", "Rooms"],
+    maps: ["plans", "Floor plans"], cal: ["cal. points", "Calibration points"], irks: ["phone keys", "Phones added by their key (IRK)"],
+    irks_resolving: ["keys working", "Phone keys that recognised a phone"], objects: ["devices seen", "Bluetooth devices PadSpan holds"],
+    identified: ["named", "Devices given a name or identified"], pbd: ["Private BLE", "Home Assistant Private BLE Device entries (+Bermuda: Bermuda also runs)"],
+    uptime: ["up for", "Time since Home Assistant last started"], flags: ["problems", "Setup checks that found something wrong"],
+  };
+  const headRow = el("tr", {}, cols.map(c => el("th", { class: numeric.has(c) ? "num" : "", title: (HEAD[c] || [c, ""])[1] }, (HEAD[c] || [c])[0])));
+  const trs = [];
   for (const r of rows) {
     const tr = el("tr");
     for (const c of cols) {
       let v = r[c];
-      if (c === "flags") v = (v || []).join(", ") || "–";
-      if (c === "pbd") v = r.bermuda ? `${v} +bermuda` : String(v);
+      if (c === "flags") v = (v || []).map(f => word("flag", f)).join("; ") || "–";
+      if (c === "stage") v = v ? word("stage", v) : "–";
+      if (c === "tier") v = word("tier", v);
+      if (c === "pbd") v = r.bermuda ? `${v} +Bermuda` : String(v);
       const cls = [numeric.has(c) ? "num" : "", c === "id" ? "mono" : "", c === "flags" && r.flags && r.flags.length ? "ib-flagged" : ""].filter(Boolean).join(" ");
       tr.appendChild(el("td", { class: cls }, numeric.has(c) ? fmt(v ?? "") : String(v ?? "")));
     }
-    t.appendChild(tr);
+    trs.push(tr);
   }
-  card.appendChild(el("div", { class: "ib-scroll" }, [t]));
+  // A filter over every column (an id, a version, a problem), then the first
+  // SHORT_ROWS of what matches until "Show all".
+  const q = el("input", { class: "ib-filter", type: "search", placeholder: "Filter: an id, a version, a problem…", "aria-label": "Filter installs" });
+  const holder = el("div");
+  const paint = () => {
+    const f = String(q.value || "").trim().toLowerCase();
+    const hit = f ? trs.filter(tr => tr.textContent.toLowerCase().includes(f)) : trs;
+    holder.replaceChildren(expandable(el, "rows:installs", hit.length, SHORT_ROWS, (limit) => {
+      t.replaceChildren(headRow, ...hit.slice(0, limit));
+      return el("div", { class: "ib-scroll" }, [t]);
+    }));
+  };
+  q.addEventListener("input", paint);
+  card.querySelector(".ib-card-head").appendChild(q);
+  paint();
+  card.appendChild(holder);
   return card;
 }
 
@@ -616,30 +1127,52 @@ function styleEl() {
 #installbase .ib-lede{margin:10px 0 0;max-width:76ch;font-size:13px;line-height:1.65;color:var(--ib-ink2)}
 #installbase .ib-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:16px 0 0}
 #installbase .ib-status{font-size:11px;color:var(--ib-ink3)}
-#installbase .ib-nav{display:flex;flex-wrap:wrap;gap:6px;margin:18px 0 0;padding:12px 0;border-top:1px dashed var(--ib-line);border-bottom:1px dashed var(--ib-line)}
+#installbase .ib-nav{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 0;padding:8px 0;border-bottom:1px solid var(--ib-line);position:sticky;top:0;z-index:5;background:var(--bg,#0a150e)}
+#installbase .ib-nav-gap{flex:1}
+#installbase .ib-chip-act{border-style:solid;color:var(--ib-ink3)}
 #installbase .ib-chip{width:auto;margin:0;background:transparent;border:1px dashed rgba(120,190,155,.38);border-radius:999px;padding:5px 11px;color:var(--ib-ink2);font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;cursor:pointer}
 #installbase .ib-chip b{font-family:var(--ib-mono);color:var(--ib-accent);margin-right:6px}
 #installbase .ib-chip:hover{color:var(--ib-ink);border-style:solid;background:rgba(120,190,155,.08)}
-#installbase .ib-sec{padding:38px 0 0;scroll-margin-top:10px}
-#installbase .ib-sec-head{display:flex;align-items:baseline;gap:12px}
-#installbase .ib-num{font:700 14px/1 var(--ib-mono);color:var(--ib-accent)}
-#installbase .ib-h{margin:0;font-size:clamp(24px,3.8vw,34px);line-height:1;font-weight:800;letter-spacing:-.01em;text-transform:uppercase}
-#installbase .ib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr));gap:14px;margin-top:18px}
+#installbase .ib-sec{margin:0;border-bottom:1px solid var(--ib-line);scroll-margin-top:52px}
+#installbase .ib-sec-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 12px;padding:14px 4px;cursor:pointer;list-style:none;border-radius:8px}
+#installbase .ib-sec-head::-webkit-details-marker{display:none}
+#installbase .ib-sec-head:hover{background:rgba(120,190,155,.06)}
+#installbase .ib-sec-head:focus-visible{outline:2px solid var(--ib-accent);outline-offset:2px}
+#installbase .ib-chev{color:var(--ib-accent);font-size:12px;width:12px;display:inline-block;transition:transform .15s}
+#installbase .ib-sec[open] > .ib-sec-head .ib-chev{transform:rotate(90deg)}
+#installbase .ib-num{font:700 12px/1 var(--ib-mono);color:var(--ib-accent)}
+#installbase .ib-h{margin:0;font-size:18px;line-height:1.1;font-weight:800;letter-spacing:.01em;text-transform:uppercase}
+#installbase .ib-headline{font-size:12px;color:var(--ib-ink2);font-variant-numeric:tabular-nums}
+#installbase .ib-sec-body{padding:0 0 22px}
+#installbase .ib-sec-body > .ib-lede{margin-top:0;font-size:12px;color:var(--ib-ink3)}
+#installbase .ib-att{display:flex;flex-direction:column;gap:4px;margin-top:4px}
+#installbase .ib-att-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto 14px;gap:10px;align-items:center;width:100%;margin:0;padding:8px 12px;border-radius:10px;border:1px solid var(--ib-line);background:var(--ib-surface);color:var(--ib-ink);font-size:13px;text-align:left;cursor:pointer}
+#installbase .ib-att-row:hover{border-color:var(--ib-accent)}
+#installbase .ib-att-dot{width:8px;height:8px;border-radius:50%;background:var(--ib-ink3)}
+#installbase .ib-att-bad .ib-att-dot{background:var(--ib-bad)}
+#installbase .ib-att-warn .ib-att-dot{background:var(--ib-warn)}
+#installbase .ib-att-info .ib-att-dot{background:var(--ib-accent)}
+#installbase .ib-att-fig{color:var(--ib-ink2);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
+#installbase .ib-att-go{color:var(--ib-ink3)}
+#installbase .ib-more{width:auto;margin:8px 0 0;padding:4px 12px;border-radius:999px;background:transparent;border:1px solid var(--ib-line);color:var(--ib-accent);font-size:11px;font-weight:600;cursor:pointer}
+#installbase .ib-more:hover{border-color:var(--ib-accent)}
+#installbase .ib-filter{width:min(100%,260px);margin:0;padding:5px 10px;border-radius:8px;border:1px solid var(--ib-line);background:#0a150e;color:var(--ib-ink);font-size:12px}
+#installbase .ib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr));gap:12px;margin-top:12px}
 #installbase .ib-grid-wide{grid-template-columns:repeat(auto-fill,minmax(min(100%,460px),1fr))}
-#installbase .ib-card{background:var(--ib-surface);border:1px solid var(--ib-line);border-radius:14px;padding:16px 16px 12px;min-width:0;position:relative}
+#installbase .ib-card{background:var(--ib-surface);border:1px solid var(--ib-line);border-radius:12px;padding:12px 14px 10px;min-width:0;position:relative}
 #installbase .ib-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 #installbase .ib-card-title{font-size:14px;font-weight:700;color:var(--ib-ink);min-width:0}
 #installbase .ib-toggle{width:auto;margin:0;padding:3px 10px;border-radius:999px;background:transparent;border:1px solid var(--ib-line);color:var(--ib-ink2);font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;cursor:pointer;flex-shrink:0}
 #installbase .ib-toggle:hover{border-color:var(--ib-accent);color:var(--ib-ink)}
 #installbase .ib-toggle[aria-pressed="true"]{border-color:var(--ib-accent);color:var(--ib-ink);background:rgba(69,168,120,.12)}
-#installbase .ib-q{margin:10px 0 12px;padding:7px 12px;border-radius:999px;background:rgba(120,190,155,.07);font-size:11px;color:var(--ib-ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#installbase .ib-q{margin:4px 0 8px;font-size:11px;line-height:1.4;color:var(--ib-ink3)}
 #installbase .ib-rows{display:flex;flex-direction:column}
 #installbase .ib-row,#installbase .ib-axis{display:grid;grid-template-columns:var(--ib-cols);column-gap:10px;align-items:center;padding:0 6px;font-size:12px}
-#installbase .ib-row{min-height:30px;border-radius:6px}
+#installbase .ib-row{min-height:26px;border-radius:6px}
 #installbase .ib-row:nth-child(odd){background:var(--ib-stripe)}
 #installbase .ib-row:hover{background:rgba(120,190,155,.13)}
 #installbase .ib-rank{color:var(--ib-ink3);font:500 11px/1 var(--ib-mono);text-align:right}
-#installbase .ib-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ib-ink)}
+#installbase .ib-label{color:var(--ib-ink);line-height:1.3;padding:5px 0;overflow-wrap:anywhere}
 #installbase .ib-track{align-self:stretch;display:flex;align-items:center;min-width:0}
 #installbase .ib-scaled .ib-track{background:linear-gradient(90deg,var(--ib-grid) 1px,transparent 1px) 0 0/25% 100% repeat-x;box-shadow:inset -1px 0 0 var(--ib-grid)}
 #installbase .ib-fill{position:relative;height:14px;background:var(--ib-accent);border-radius:0 4px 4px 0}
@@ -663,17 +1196,17 @@ function styleEl() {
 #installbase .ib-kv-label{color:var(--ib-ink);white-space:pre-wrap;min-width:0}
 #installbase .ib-kv-value{color:var(--ib-ink);font-weight:600;font-variant-numeric:tabular-nums;text-align:right}
 #installbase .ib-kv-pct{color:var(--ib-ink3);font-size:10px;font-variant-numeric:tabular-nums;text-align:right}
-#installbase .ib-flag{display:flex;align-items:center;gap:8px;font-family:var(--ib-mono);font-size:11px}
+#installbase .ib-flag{display:flex;align-items:center;gap:8px;font-size:12px}
 #installbase .ib-sev{font-weight:700;width:14px;text-align:center;font-family:inherit}
 #installbase .ib-sev-warn{color:var(--ib-warn)}
 #installbase .ib-sev-bad{color:var(--ib-bad)}
-#installbase .ib-figs{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2.2fr);gap:14px;margin-top:18px}
+#installbase .ib-figs{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2.2fr);gap:12px;margin-top:8px}
 #installbase .ib-herofig{display:flex;flex-direction:column;justify-content:center;background:linear-gradient(160deg,rgba(69,168,120,.16),rgba(15,26,18,1) 70%);border-color:rgba(69,168,120,.35)}
-#installbase .ib-herofig-value{font-size:64px;line-height:1;font-weight:800;letter-spacing:-.02em;margin:8px 0 10px;color:var(--ib-ink)}
-#installbase .ib-tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
-#installbase .ib-tile{padding:14px}
+#installbase .ib-herofig-value{font-size:48px;line-height:1;font-weight:800;letter-spacing:-.02em;margin:6px 0 8px;color:var(--ib-ink)}
+#installbase .ib-tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+#installbase .ib-tile{padding:10px 12px}
 #installbase .ib-tile-label{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ib-ink2)}
-#installbase .ib-tile-value{font-size:28px;line-height:1.1;font-weight:700;margin-top:6px;color:var(--ib-ink)}
+#installbase .ib-tile-value{font-size:24px;line-height:1.1;font-weight:700;margin-top:4px;color:var(--ib-ink)}
 #installbase .ib-tile-sub{font-size:10px;line-height:1.45;margin-top:4px;color:var(--ib-ink3)}
 #installbase .ib-cols-chart{position:relative}
 #installbase .ib-tip{position:absolute;top:-6px;display:none;pointer-events:none;background:#0a150e;border:1px solid var(--ib-line);border-radius:8px;padding:5px 9px;font-size:11px;color:var(--ib-ink);white-space:nowrap;box-shadow:0 6px 18px rgba(0,0,0,.4)}
@@ -704,7 +1237,7 @@ function styleEl() {
   #installbase .ib-tiles{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
   #installbase .ib-herofig-value{font-size:52px}
   #installbase .ib-card{padding:14px 12px 10px}
-  #installbase .ib-sec{padding-top:30px}
+  #installbase .ib-headline{flex-basis:100%;padding-left:24px}
   #installbase .ib-axis-track span:nth-child(2n){display:none}
 }`;
   return st;

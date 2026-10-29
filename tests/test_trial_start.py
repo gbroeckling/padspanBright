@@ -1,4 +1,4 @@
-"""The one-time 3-month PadSpan Bright Pro trial.
+"""The one-time 3-month PadSpan Pro trial (the lighting half, Bright Pro, until 2026-10-27).
 
 It must mint a real key through the same slot a purchase uses (so expiry,
 grace and the editing-only gate all apply with zero new logic in licence.py),
@@ -60,6 +60,8 @@ def test_trial_start_calls_the_same_licence_server_as_a_purchase() -> None:
     assert "forensics_license_key=" in handler
     assert "forensics_license_expires=" in handler
     assert "license_tier=normalize_tier(" in handler
+    # A reply without a tier counts as Pro: the server issues trials as Pro (2026-10-27).
+    assert 'license_tier=normalize_tier(data.get("tier"), default="pro")' in handler
     assert "license_is_trial=True" in handler
 
 
@@ -81,7 +83,7 @@ def test_licence_card_offers_the_trial_with_no_card_language() -> None:
     offer = _read(_VIEWS / "trial_offer.js")
     assert "padspan_bright/trial_start" in offer
     assert '"Start 90-day free trial"' in offer
-    assert '"90-day free trial, no card"' in offer, "the trial CTA must say no payment info is needed"
+    assert '"PadSpan Pro free for 90 days, no card"' in offer, "the trial CTA must say no payment info is needed"
 
 
 def test_the_free_forever_claim_still_holds_and_the_trial_is_disclosed() -> None:
@@ -90,7 +92,67 @@ def test_the_free_forever_claim_still_holds_and_the_trial_is_disclosed() -> None
     still promise the free tier is not time-limited, and now also disclose
     the trial rather than contradict it."""
     s = _read(_VIEWS / "settings.js")
-    i = s.index("A key only ever unlocks two things beyond that")
+    i = s.index("The free tier above is not a trial of anything")
     para = s[i:i + 700]
     assert "not a trial" in para or "stays free" in para, "the free-forever promise was dropped, not reworded"
     assert "90-day" in para, "the tiers wizard does not disclose the trial that contradicts its old claim"
+
+
+def test_the_trial_needs_the_usage_report_on() -> None:
+    """Every free offer needs the opt-in usage report on (Garry, 2026-10-27):
+    refused before anything goes to the licence server; the card asks in the
+    same step (tests/js/trial_offer.mjs)."""
+    s = _read(_CC / "ws_forensics.py")
+    handler = s[s.index("async def ws_trial_start("):]
+    gate = handler.index("if not _report_on(hass):")
+    assert gate < handler.index("https://traks.ca/license/"), "the report is checked after the licence server is asked"
+    assert '"status": "report_off"' in handler
+
+
+def test_a_new_free_licence_holds_the_usage_report_on_until_it_ends() -> None:
+    """Garry, 2026-10-27: the opt-in can't be turned off during a free trial,
+    nor the new free years of Pro (a tester's two, an invite's one). The lock
+    is the key it came with: a bought key in its place, or the end, lets it go;
+    a free licence from before the rule never had one."""
+    from custom_components.padspan_bright.settings_store import licence_key_hash as H, report_locked_until as L
+    new = {"report_locked_key": H("PSPAN-T"), "forensics_license_key": "PSPAN-T",
+           "forensics_license_expires": "2099-01-01 00:00:00"}
+    assert L(new).startswith("2099-01-01")
+    assert L({**new, "forensics_license_expires": "2001-01-01 00:00:00"}) == "", "it ended"
+    assert L({**new, "forensics_license_key": "PSPAN-BOUGHT"}) == "", "a bought key replaced it"
+    assert L({**new, "report_locked_key": ""}) == "", "a free licence from before the rule"
+    assert H("pspan-t ") == H("PSPAN-T") and H("") == ""
+    s = _read(_CC / "ws_forensics.py")
+    assert 'report_locked_key=licence_key_hash(str(data.get("key") or "")),' in s[s.index("async def ws_trial_start("):]
+    # A tester key typed in: refused with the report off, locked when new.
+    act = s[:s.index("async def ws_trial_start(")]
+    assert '_free_new = bool(data.get("valid")) and new_key and str(data.get("plan") or "") == "tester"' in act
+    assert '"report_locked_key": _lk_hash(key) if _free_new else ""' in act
+    # The panel sees only the end date, never the hash.
+    common = _read(_CC / "ws_common.py")
+    assert 'out["report_locked"] = _rlu(st.data if st else {})' in common and 'out.pop("report_locked_key", None)' in common
+
+
+def test_the_report_cannot_be_turned_off_during_a_new_free_licence() -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from custom_components.padspan_bright import ws_settings as WS
+    from custom_components.padspan_bright.const import DATA_SETTINGS, DOMAIN
+    from custom_components.padspan_bright.settings_store import licence_key_hash as H
+    data = {"telemetry_enabled": True, "report_locked_key": H("PSPAN-T"),
+            "forensics_license_key": "PSPAN-T", "forensics_license_expires": "2099-01-01 00:00:00"}
+    st = SimpleNamespace(data=data)
+
+    async def _set(**kw):
+        data.update(kw)
+    st.async_set = _set
+    hass = MagicMock()
+    hass.data = {DOMAIN: {DATA_SETTINGS: st}}
+    conn = MagicMock()
+    conn.user = MagicMock(is_admin=True)
+    asyncio.new_event_loop().run_until_complete(WS.ws_settings_set(hass, conn, {"id": 1, "telemetry_enabled": False}))
+    conn.send_error.assert_called_once()
+    assert conn.send_error.call_args.args[1] == "report_locked" and data["telemetry_enabled"] is True
+    card = _read(_VIEWS / "trial_offer.js")
+    assert "can't be turned off until the trial ends" in card

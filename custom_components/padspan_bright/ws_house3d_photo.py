@@ -51,6 +51,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,8 @@ _CLOUD = frozenset({"openai_conversation", "google_generative_ai_conversation", 
                     "open_router", "openrouter", "mistral_ai", "azure_openai_conversation", "groq", "xai"})
 
 NO_AI_CODE = "no_ai_task"
+PHOTOS_OFF_CODE = "ai_photos_off"
+PHOTOS_OFF_MESSAGE = "Reading photos is off: turn on Furniture from a photo in Settings → AI."
 _SETTINGS_PATH = "Settings → UI Structure → Atlas → Live Aboard"
 NO_AI_CHOSEN = (f"No AI Task is chosen to read photos. It needs Home Assistant 2025.8 or newer with an AI "
                 f"Task (from an AI integration such as Ollama, OpenAI or Google), chosen in {_SETTINGS_PATH}.")
@@ -227,7 +230,8 @@ _PROMPT = {
         "piece (the one nearest the middle of the photo) so PadSpan can draw a simple 3D model of it from "
         "a few settings. Answer every field from what you can see.{kind} Colours: up to three main colours "
         "as #rrggbb, the largest area first. Sizes are in metres: width_m across the front from side to "
-        "side, depth_m from front to back, height_m from the floor to the highest point. size_confidence: "
+        "side, depth_m from front to back, height_m from the floor to the highest point (a bed: width_m across "
+        "the headboard, depth_m from the head to the foot). size_confidence: "
         "high only when something of known size is in the photo to judge the scale by (a tape measure, a "
         "door frame, a standard chair), otherwise medium or low. Details: the rooms it suits, its style, its "
         "main material, its features, and a short plain title such as \"Three-seat grey sofa, slim arms\" "
@@ -266,8 +270,11 @@ def request(target: str, kind: str | None) -> tuple[str, dict[str, dict]]:
     spec = fur.get(kind) if kind in kinds else None
     s: dict[str, dict] = {}
     if spec is None:
-        s["kind"] = _field("What it is: the closest kind, or other",
-                           _sel_select([*kinds, *([] if B.BOX_KIND in kinds else [B.BOX_KIND])]), required=True)
+        # Asked in its own words, then matched to a kind (_kind_from_words):
+        # given the list to pick from, a small local model picked "fan" for
+        # sofas, a chair and a table (real test, 2026-10-27; 3 of 7 right).
+        s["what_it_is"] = _field("What the main piece is, in two or three plain words, such as \"corner sofa\", "
+                                 "\"office chair\" or \"dining table\"", {"text": {}}, required=True)
         ranges = _size_ranges(kinds)
         said = ""
     else:
@@ -286,6 +293,10 @@ def request(target: str, kind: str | None) -> tuple[str, dict[str, dict]]:
         s[key] = _field(what, _sel_number(lo, hi, 0.01), required=True)
     s["size_confidence"] = _field("How sure the sizes are: high only with a known-size object in the photo",
                                   _sel_select(CONFIDENCE), required=True)
+    # What it judged the sizes by: a "high" with nothing to judge them by is not high (a small
+    # local model said high for every photo without a tape measure or door in it).
+    s["scale_from"] = _field("What in the photo you judged the sizes by (a door, a tape measure, a standard chair, "
+                             "a person), or none", {"text": {}})
     s.update(_details_fields(target, spec))
     return _PROMPT[target].format(kind=said), s
 
@@ -437,6 +448,8 @@ def parse(target: str, kind: str | None, answer: Any) -> dict[str, Any]:
     if a is None:
         return bad
     said = _pick(a.get("kind"), tuple(kinds)) if isinstance(a.get("kind"), str) else None
+    if said is None and isinstance(a.get("what_it_is"), str):
+        said = _kind_from_words(a["what_it_is"], kinds)
     if kind in kinds:
         k = kind
     elif said:
@@ -455,17 +468,31 @@ def parse(target: str, kind: str | None, answer: Any) -> dict[str, Any]:
             params[p["key"]] = B.clamp_param(p, raw)
     colours = [c for c in (_colour(a.get(f"color_{i}")) for i in (1, 2, 3)) if c]
     sizes = {key: B.number(a.get(key)) for key in ("width_m", "depth_m", "height_m")}
+    # A bed is longer than it is wide (width across the headboard): an answer the other way round is swapped.
+    if k == "bed" and sizes["width_m"] and sizes["depth_m"] and sizes["width_m"] > sizes["depth_m"]:
+        sizes["width_m"], sizes["depth_m"] = sizes["depth_m"], sizes["width_m"]
     used = used or bool(colours) or any(v is not None and v > 0 for v in sizes.values())
     if not used:
         return bad
     recipe = B.clamp_recipe({"kind": k, "params": params, "colors": colours,
                              **{key: v for key, v in sizes.items() if v is not None and v > 0}})
     conf = _pick(a.get("size_confidence"), CONFIDENCE)
+    ref = str(a.get("scale_from") or "").strip().lower()
+    if conf == "high" and (not ref or re.fullmatch(r"(none|nothing|n/?a|no|-|unknown|not sure)\.?", ref)):
+        conf = "medium"
     size = {key: (recipe[key] if sizes[key] is not None and sizes[key] > 0 else None) for key in sizes}
     size["confidence"] = conf if any(size[key] is not None for key in sizes) else None
     out = {"ok": True, "target": target, "kind": k, "recipe": recipe,
            "details": _details(target, k, spec, a, recipe["params"]), "size": size}
     return out
+
+
+def _kind_from_words(text: str, kinds: list[str]) -> str | None:
+    """A kind of this group from the AI's own words for it ("corner sofa" →
+    sofa), by the 3D import's word lists; None when no word names one."""
+    from .ws_house3d_import import kind_of  # noqa: PLC0415
+    k, _ = kind_of({"name": str(text)[:80]})
+    return k if k in kinds and k != B.BOX_KIND else None
 
 
 def _readable(p: dict, raw: Any) -> bool:
@@ -592,9 +619,10 @@ class _NoMedia(Exception):
     pass
 
 
-async def ask(hass: HomeAssistant, eid: str, instructions: str, structure: dict, raw: bytes, mime: str) -> Any:
-    """One ai_task.generate_data call with the photo; the answer's data. The
-    photo's file exists only for the call."""
+async def ask(hass: HomeAssistant, eid: str, instructions: str, structure: dict | None, raw: bytes, mime: str,
+              task_name: str = "PadSpan Live Aboard photo") -> Any:
+    """One ai_task.generate_data call with the photo; the answer's data (with
+    no structure, the AI's text). The photo's file exists only for the call."""
     media = _media_dir(hass)
     if media is None:
         raise _NoMedia
@@ -610,13 +638,12 @@ async def ask(hass: HomeAssistant, eid: str, instructions: str, structure: dict,
         except OSError:
             raise _NoMedia from None
         async with asyncio.timeout(PHOTO_TIMEOUT_S):
-            resp = await hass.services.async_call(
-                "ai_task", "generate_data",
-                {"task_name": "PadSpan Live Aboard photo", "entity_id": eid, "instructions": instructions,
-                 "structure": structure,
-                 "attachments": [{"media_content_id": f"media-source://media_source/{dir_id}/{folder.name}/{path.name}",
-                                  "media_content_type": mime}]},
-                blocking=True, return_response=True)
+            call = {"task_name": task_name, "entity_id": eid, "instructions": instructions,
+                    "attachments": [{"media_content_id": f"media-source://media_source/{dir_id}/{folder.name}/{path.name}",
+                                     "media_content_type": mime}]}
+            if structure is not None:
+                call["structure"] = structure
+            resp = await hass.services.async_call("ai_task", "generate_data", call, blocking=True, return_response=True)
     finally:
         try:
             await hass.async_add_executor_job(_remove, folder, path)
@@ -639,6 +666,16 @@ def _why(err: BaseException) -> str:
         return f"no answer in {PHOTO_TIMEOUT_S // 60} minutes"
     text = " ".join(_BLOB.sub("…", str(err)).split())[:160]
     return text or type(err).__name__
+
+
+# What a photo sent was of, and how long the AI Task took (telemetry.PHOTO_EVENTS).
+_SUBJECT_EVENT = {"furniture": "photo_subject:furniture", "tag": "photo_subject:tag",
+                  "scanner": "photo_subject:scanner", "person": "photo_subject:person"}
+
+
+def _secs_event(s: float) -> str:
+    return ("photo_secs:lt5" if s < 5 else "photo_secs:5_15" if s < 15
+            else "photo_secs:15_45" if s < 45 else "photo_secs:gt45")
 
 
 def _bump(hass: HomeAssistant, event: str) -> None:
@@ -668,6 +705,11 @@ async def ws_house3d_from_photo(hass: HomeAssistant, connection, msg) -> None:
         connection.send_error(msg["id"], OFF_CODE, PRO_MESSAGE)
         return
     await B.async_data(hass)
+    # Settings → AI: reading photos switched off (it is on unless someone turned it off).
+    _st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
+    if ((_st.data if _st else {}) or {}).get("ai_photos_enabled") is False:
+        connection.send_error(msg["id"], PHOTOS_OFF_CODE, PHOTOS_OFF_MESSAGE)
+        return
     ai = ai_task(hass)
     target = msg["target"]
     if "photo" not in msg:
@@ -684,6 +726,8 @@ async def ws_house3d_from_photo(hass: HomeAssistant, connection, msg) -> None:
         return
     kind = msg.get("kind") if target != "person" else None
     instructions, structure = request(target, kind)
+    _bump(hass, _SUBJECT_EVENT[target])
+    t0 = time.monotonic()
     try:
         answer = await ask(hass, ai["ai_task"], instructions, structure, raw, mime)
     except _NoMedia:
@@ -692,6 +736,7 @@ async def ws_house3d_from_photo(hass: HomeAssistant, connection, msg) -> None:
                                            "kind": kind, "ai_task": ai["ai_task"]})
         return
     except Exception as err:  # noqa: BLE001 — any failure of the AI Task is a plain "couldn't read it"
+        _bump(hass, _secs_event(time.monotonic() - t0))
         _LOGGER.warning("PadSpan Live Aboard: the AI Task %s couldn't read a photo: %s", ai["ai_task"], _why(err))
         _bump(hass, "photo_read:error")
         connection.send_result(msg["id"], {"ok": False, "target": target, "reason": "error",
@@ -699,6 +744,18 @@ async def ws_house3d_from_photo(hass: HomeAssistant, connection, msg) -> None:
                                            "ai_task": ai["ai_task"]})
         return
     out = parse(target, kind, answer)
+    # Its kind in its own words, then that kind's own settings, asked again as if
+    # the person had said what it is (much the better answer in the real test).
+    if (out["ok"] and target == "furniture" and kind not in B.kinds_of(_GROUPS[target])
+            and out.get("kind") not in (None, B.BOX_KIND)):
+        try:
+            i2, s2 = request(target, out["kind"])
+            o2 = parse(target, out["kind"], await ask(hass, ai["ai_task"], i2, s2, raw, mime))
+            if o2["ok"]:
+                out = o2
+        except Exception as err:  # noqa: BLE001 — the first answer stands
+            _LOGGER.debug("PadSpan Live Aboard: the second read of a photo failed: %s", _why(err))
+    _bump(hass, _secs_event(time.monotonic() - t0))
     _bump(hass, "photo_read:ok" if out["ok"] else "photo_read:bad_answer")
     connection.send_result(msg["id"], {**out, "ai_task": ai["ai_task"]})
 
