@@ -8,6 +8,8 @@
 // The metric frame the lights map draws with. Metres in, screen out, no photo
 // anywhere in it — the 3D map below uses THIS, and the stack_transform import
 // above survives only for the experimental 2D map, which is swept next.
+const { deviceName, deviceWhat, listWhat, addressBadge, fadeFor, groupRows, firstFew, serviceWords, SERVICE_HOW } =
+  await import(`./device_name.js${new URL(import.meta.url).search}`);
 const { fabricFrame, barrierNoReading } =
   await import(`./iso_lights.js${new URL(import.meta.url).search}`);
 // The plan viewer — the one view whose subject IS the photograph.
@@ -92,7 +94,7 @@ function _renderAtlasHome(ctx){
     // check, so the Atlas skips its own (set before hass, which boots it).
     app._embedded = true;
     import(`../lights_panel.js${new URL(import.meta.url).search}`)
-      .catch(() => { if (ctx.toast) ctx.toast("The Atlas could not load. Turn \"Overview shows the Atlas\" off in Settings → UI Structure.", true); });
+      .catch(() => { if (ctx.toast) ctx.toast("The Atlas could not load. Turn \"Show the Atlas as Overview\" off in Settings → Atlas.", true); });
   }
   if (ctx.hass) app.hass = ctx.hass;
   const wrap = document.createElement("div");
@@ -124,9 +126,10 @@ export function liveSwitch(ctx){
     return b;
   };
   return el("div", { class: "live-switch", style: "display:flex;gap:6px;align-items:center;margin:0 0 12px" }, [
-    btn(!classic, "⚡ Pure Live", "The live view", false),
+    btn(!classic, "⚡ Live Tracker", "The live view", false),
     btn(classic, "▦ Overview", "The classic Overview (the Overview tab shows the Atlas)", true),
-  ]);
+    ctx.helpers.helpBtn ? ctx.helpers.helpBtn("live_tracker", "Help: Live Tracker") : null,
+  ].filter(Boolean));
 }
 
 /**
@@ -216,12 +219,13 @@ export function renderClassic(ctx){
   // The demo house says so, with the way back, where it can't be missed.
   const sampleBanner = (modeKnown && dataMode === "sample")
     ? el("div",{style:"display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border:1px solid #92400e;background:rgba(245,158,11,.08);border-radius:8px;margin-bottom:10px","data-sample-banner":"1"},[
-        el("span",{style:"font-size:13px;color:#fde68a;flex:1;min-width:12em"}, "You're looking at a made-up house, with every feature set up."),
+        el("span",{style:"font-size:13px;color:#fde68a;flex:1;min-width:12em"}, "You're looking at a sample house, with every feature set up."),
         (() => {
           const b = el("button",{class:"btn inline",style:"font-size:12px;font-weight:700"}, "Back to my house");
           b.addEventListener("click", () => ctx.actions.setDataMode("live"));
           return b;
         })(),
+        helpBtn("data_mode"),
       ])
     : null;
 
@@ -416,12 +420,12 @@ export function renderClassic(ctx){
           if(radio.disabled) await ctx.actions.radioDisabledSet(radio.source, false);
           await ctx.actions.radioLostSet(radio.source, true);
           ctx.actions.closeModal();
-          ctx.toast(`"${radio.name || radio.source}" marked as Lost`);
+          ctx.toast(`"${radio.display_name || radio.name || radio.source}" marked as Lost`);
         } else if(v === "__disabled__"){
           if(radio.lost) await ctx.actions.radioLostSet(radio.source, false);
           await ctx.actions.radioDisabledSet(radio.source, true);
           ctx.actions.closeModal();
-          ctx.toast(`"${radio.name || radio.source}" marked as Disabled`);
+          ctx.toast(`"${radio.display_name || radio.name || radio.source}" marked as Disabled`);
         } else {
           // Restore from lost/disabled if needed, then set area
           if(radio.lost)     await ctx.actions.radioLostSet(radio.source, false);
@@ -443,7 +447,7 @@ export function renderClassic(ctx){
         saveBtn.disabled = false;
       }
     });
-    const radioLabel = [sid, radio.name || radio.source].filter(Boolean).join("  ·  ");
+    const radioLabel = [sid, radio.display_name || radio.name || radio.source].filter(Boolean).join("  ·  ");
     const body = el("div",{},[
       el("div",{class:"muted", style:"margin-bottom:8px"}, `Radio: ${radioLabel}`),
       radio.lost     ? el("div",{style:"color:#f59e0b;font-size:12px;margin-bottom:8px"}, "⚠ Currently marked as Lost. Select a room to restore it.") : null,
@@ -452,74 +456,35 @@ export function renderClassic(ctx){
       el("div",{class:"row",style:"gap:8px;flex-wrap:wrap"},[sel, saveBtn, cancelBtn]),
       status,
     ].filter(Boolean));
-    ctx.actions.openModal("Assign Area", body, `HA area for "${radio.name || radio.source}"`);
+    ctx.actions.openModal("Assign Area", body, `HA area for "${radio.display_name || radio.name || radio.source}"`);
   }
 
-  // Best-effort OUI vendor lookup for one BLE row's Vendor cell, called
-  // from the Objects modal's post-open queue (see the concurrency limiter
-  // at the bottom of openObjectsList) rather than up front for every row —
-  // a modal can list hundreds of BLE addresses and the lookup is a network
-  // call, so doing it eagerly for rows the user may never scroll to would
-  // be wasted work and wasted rate-limit budget on whatever the lookup
-  // service imposes.
-  async function fillVendorCell(mac, cell){
-    // Cache by prefix (AA:BB:CC): the OUI (vendor-assigned) portion of a
-    // MAC is shared by every device from that vendor, so once one address
-    // with a given prefix has been looked up, every other row sharing it
-    // is filled from ctx.state._vendorCache instead of re-querying.
-    ctx.state._vendorCache = ctx.state._vendorCache || {};
-    const prefix = (mac||"").split(":").slice(0,3).join(":").toUpperCase();
-    if(!prefix){ cell.textContent = ""; return; }
-
-    const cached = ctx.state._vendorCache[prefix];
-    if(cached){
-      cell.innerHTML = renderVendorHTML(cached);
-      return;
-    }
-
-    // Placeholder while fetching
-    cell.innerHTML = `<span class="badge">Looking up…</span>`;
-    try{
-      const res = await ctx.actions.vendorLookup(mac, false);
-      ctx.state._vendorCache[prefix] = res;
-      cell.innerHTML = renderVendorHTML(res);
-    }catch(e){
-      cell.innerHTML = `<span class="badge err">Lookup failed</span>`;
-    }
+  // A first byte with bit 0x02 (locally administered) or 0x01 (multicast) set
+  // isn't an address any maker was assigned (ble_enrichment.apply_address_maker).
+  function isRandomAddress(mac){
+    const first = parseInt(String(mac || "").split(":")[0], 16);
+    return Number.isFinite(first) && (first & 0x03) !== 0;
   }
 
-  // Formats one vendor-lookup response (macvendors.com + maclookup.app,
-  // called server-side — see fillVendorCell) into the Vendor cell's badge
-  // markup. Two independent sources can each have an opinion on the same
-  // MAC; maclookup's is preferred when both answered because it is also
-  // the one source able to flag "randomized"/"private" addresses, which
-  // matters more to a viewer than which of the two vendor-name strings is
-  // shown.
-  function renderVendorHTML(res){
-    if(!res || res.enabled === false){
-      return `<span class="badge warn">Vendor lookup disabled</span>`;
-    }
-    const v1 = res.sources?.macvendors || null;
-    const v2 = res.sources?.maclookup?.company || null;
-    const rand = res.sources?.maclookup?.isRand;
-    const priv = res.sources?.maclookup?.isPrivate;
-    const flags = [];
-    if(rand===true) flags.push("randomized");
-    if(priv===true) flags.push("private");
-    const top = (v2 || v1 || "Unknown vendor");
-    const sub = flags.length ? ` <span class="badge warn">${flags.join(", ")}</span>` : "";
-    const bt = res.sources?.maclookup?.blockType ? ` · ${res.sources.maclookup.blockType}` : "";
-    return `<div><span class="badge">${escapeHtml(top)}</span>${sub}${escapeHtml(bt)}</div>`;
-  }
-
-  function escapeHtml(s){
-    return String(s||"").replace(/[&<>"']/g,(c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[c]));
+  // The Maker cell, from what the server worked out for the object. Nothing is
+  // asked or sent: the broadcast and PadSpan's built-in lists are the only sources.
+  const MAKER_HOW = {
+    company_id: "From the company number in its broadcast",
+    espresense: "From ESPresense's id for this device",
+    address: "From the built-in list of address makers. A receiver confirmed this address is fixed",
+  };
+  function makerCell(o, kind, addr){
+    if(kind !== "ble" && kind !== "private_ble" && kind !== "ibeacon") return el("span",{class:"badge"}, "n/a");
+    if(o.company_name) return el("span",{class:"badge", title: MAKER_HOW[o.maker_source] || ""}, o.company_name);
+    if(o.service_owner) return el("span",{class:"badge", title: SERVICE_HOW}, serviceWords(o));
+    if(o.maker_guess) return el("span",{class:"badge", title:"From the built-in list of address makers. No receiver has confirmed this address is fixed, so a random address could match by chance"}, `Probably ${o.maker_guess}`);
+    if(kind === "private_ble" || o.address_type === "random" || (kind === "ble" && isRandomAddress(addr))) return el("span",{class:"badge warn"}, "random address");
+    return el("span",{class:"badge"}, "maker unknown");
   }
 
   // The Objects KPI's modal — every tracked object (HA entities plus raw
   // BLE/iBeacon/private_ble advertisements), filterable by kind, status,
-  // OUI commonness and a "how far back" age slider, with a best-effort
-  // vendor lookup queued after the modal opens (see fillVendorCell).
+  // OUI commonness and a "how far back" age slider.
   // Live-mode only: sample mode has no BLE advertisement monitor stream to
   // list. `initialFilter` lets a caller (the Unidentified count button)
   // open the modal pre-filtered instead of the viewer having to set it by
@@ -527,10 +492,10 @@ export function renderClassic(ctx){
   function openObjectsList(initialFilter="all"){
     if(!liveSnap || !liveSnap.objects){
       const body = el("div",{},[
-        el("p",{}, "Objects list is only available in Live mode (it includes BLE advertisement monitor data)."),
+        el("p",{}, "This list is only available in Live mode (it includes BLE advertisement monitor data)."),
         el("p",{}, "Switch to Live in Settings, then reopen this list.")
       ]);
-      ctx.actions.openModal("Objects", body, "Live snapshot required");
+      ctx.actions.openModal("All objects", body, "Live snapshot required");
       return;
     }
 
@@ -623,13 +588,14 @@ export function renderClassic(ctx){
       el("th",{}, "OUI freq"),
       el("th",{}, "Follow"),
       el("th",{}, "Tag"),
-      el("th",{}, "Vendor (online)"),
+      el("th",{}, "Maker"),
     ]));
     const tbody = el("tbody",{});
     table.appendChild(thead);
     table.appendChild(tbody);
 
     // Build rows once, then filter by show/hide (fast, no re-render).
+    const _listRows = [];
     const rowEls = list.map((o)=>{
       // Skip entity rows that duplicate a BLE row for the same physical device
       if(_ovIsDup(o)) return null;
@@ -638,7 +604,7 @@ export function renderClassic(ctx){
       const identified = !!o.identified;
       const addr = o.address || "";
       const userLabel = o.user_label || "";
-      const name = userLabel || o.name || o.entity_id || "";
+      const name = deviceName(o, "");
       const room = o.room || "";
       const rssi = (o.rssi==null?"":String(o.rssi));
       const lastSeen = o.age_s!=null ? fmtAgo(o.age_s) : (o.last_seen || "");
@@ -646,7 +612,7 @@ export function renderClassic(ctx){
       const pfx = (o.prefix || "").toUpperCase();
       const isCommon = pfx && (commonPrefixes[pfx] || 0) >= 3;
 
-      const vendorCell = el("td",{}, kind==="ble" ? el("span",{class:"badge"}, "—") : el("span",{class:"badge"}, "n/a"));
+      const vendorCell = el("td",{}, makerCell(o, kind, addr));
 
       // Follow button
       const followKey = addr || o.entity_id || "";
@@ -692,7 +658,7 @@ export function renderClassic(ctx){
         "data-age": String(o.age_s != null ? Math.round(o.age_s) : 0),
         "data-search": [
           kind, name, addr, room, userLabel, o.entity_id, _guestName(o),
-          o.ibeacon_uuid, o.company_name, o.device_type, o.auto_class,
+          o.ibeacon_uuid, o.company_name, o.device_type, o.auto_class, o.what_it_is,
           (o.service_names||[]).join(" "),
           o.canonical_id, o.key, o.name, o.private_ble_name,
           (o.all_addresses||[]).join(" "),
@@ -703,7 +669,6 @@ export function renderClassic(ctx){
           (o.service_uuids||[]).join(" "),
           isAway ? "away" : "",
         ].filter(Boolean).join(" ").toLowerCase(),
-        "data-mac": addr,
       },[
         el("td",{}, kind==="ble" ? pill("BLE","") : pill("Entity","")),
         el("td",{}, [
@@ -711,14 +676,16 @@ export function renderClassic(ctx){
             ? el("div",{title:`Tag: ${name}`}, [_guestName(o), " ", el("span",{style:_GUEST_PILL_CSS}, "Guest"),
                 el("span",{style:"color:#94a3b8;margin-left:6px"}, name)])
             : el("div",{}, name)),
-          (userLabel && (o.name && o.name !== userLabel) ? el("div",{style:"color:#94a3b8"}, `raw: ${o.name}`) : null),
+          (userLabel && o.broadcast_name && o.broadcast_name !== userLabel ? el("div",{style:"color:#94a3b8"}, `Broadcasts as ${o.broadcast_name}`) : null),
           (o.entity_id ? el("div",{style:"color:#94a3b8"}, o.entity_id) : null),
           (Array.isArray(o.linked_entities) && o.linked_entities.length ? el("div",{style:"color:#94a3b8"}, `Linked: ${o.linked_entities.join(", ")}`) : null),
-          (kind==="ble" && Array.isArray(o.sources) && o.sources.length ? el("div",{style:"color:#94a3b8"}, `Seen by: ${o.sources.map(s=>{const _src=typeof s==="object"?(s.source||""):String(s);const id=_sid(_src);const _fn=ctx.helpers.radioName(_src);return id?id+" "+(_fn||_src):(_fn||_src);}).join(", ")}`) : null),
-          ((o.company_name || o.auto_class || o.device_type || (o.service_names && o.service_names.length))
+          (kind==="ble" && Array.isArray(o.sources) && o.sources.length ? (() => { const _by = o.sources.map(s=>{const _src=typeof s==="object"?(s.source||""):String(s);const id=_sid(_src);const _fn=ctx.helpers.radioName(_src);return id?id+" "+(_fn||_src):(_fn||_src);}); return el("div",{style:"color:#94a3b8",title:_by.join(", ")}, `Seen by: ${firstFew(_by)}`); })() : null),
+          ((o.company_name || o.service_owner || deviceWhat(o) || o.address_kind || (o.service_names && o.service_names.length))
             ? el("div",{style:"display:flex;flex-wrap:wrap;gap:4px;margin-top:2px"}, [
-                o.company_name ? el("span",{style:"font-size:10px;padding:1px 5px;border-radius:4px;background:#1a2a3a;color:#7dd3fc;border:1px solid #1e4976"}, o.company_name) : null,
-                (o.auto_class || o.device_type) ? el("span",{style:"font-size:10px;padding:1px 5px;border-radius:4px;background:#2a1a3a;color:#c4b5fd;border:1px solid #5b21b6"}, o.auto_class || o.device_type) : null,
+                addressBadge(el, o),
+                o.company_name ? el("span",{style:"font-size:10px;padding:1px 5px;border-radius:4px;background:#1a2a3a;color:#7dd3fc;border:1px solid #1e4976"}, o.company_name)
+                  : o.service_owner ? el("span",{style:"font-size:10px;padding:1px 5px;border-radius:4px;background:#1a2a3a;color:#94a3b8;border:1px solid #334155",title:SERVICE_HOW}, serviceWords(o)) : null,
+                listWhat(o) ? el("span",{style:"font-size:10px;padding:1px 5px;border-radius:4px;background:#2a1a3a;color:#c4b5fd;border:1px solid #5b21b6"}, listWhat(o)) : null,
                 ...(o.service_names || []).slice(0,3).map(sn =>
                   el("span",{style:"font-size:10px;padding:1px 5px;border-radius:4px;background:#1a3a2a;color:#a7f3d0;border:1px solid #166534"}, sn)
                 ),
@@ -751,12 +718,20 @@ export function renderClassic(ctx){
         if(ev.target.tagName==="BUTTON"||ev.target.tagName==="A") return;
         ctx.actions.closeModal(); ctx.actions.showObjectDetail(o);
       });
-      // kick vendor lookup for BLE rows (best-effort, after render)
-      tr._vendorCell = vendorCell;
+      tr.style.opacity = String(fadeFor(o));
+      _listRows.push({ node: tr, obj: o });
       return tr;
     }).filter(Boolean);
 
     rowEls.forEach(tr=>tbody.appendChild(tr));
+
+    // Rotating addresses nobody named, gathered by kind: "169 Windows PC addresses".
+    const _listGroups = groupRows(el, _listRows, tbody, {
+      openKeys: new Set(),
+      isKept: (o) => ctx.actions.followedHas(o.address || ""),
+      makeShell: (content) => el("tr",{},[el("td",{colspan:"10"}, content)]),
+      reapply: () => apply(),
+    });
 
     function apply(){
       const q = (search.value||"").trim().toLowerCase();
@@ -790,6 +765,7 @@ export function renderClassic(ctx){
         tr.style.display = ok ? "" : "none";
         if(ok) shown++;
       }
+      _listGroups.refresh(!!q);
       stats.textContent = `${shown} of ${rowEls.length}`;
     }
 
@@ -802,27 +778,7 @@ export function renderClassic(ctx){
     body.appendChild(controls);
     body.appendChild(table);
 
-    ctx.actions.openModal("Objects", body, "Filter + vendor lookup (best-effort)");
-
-    // After modal opens, do vendor lookups for visible BLE rows (limited concurrency).
-    const maxLookups = 40;
-    const queue = rowEls
-      .filter(tr=>tr.getAttribute("data-kind")==="ble")
-      .slice(0, maxLookups);
-
-    // lightweight concurrency limiter
-    let i = 0;
-    const conc = 3;
-    const runOne = async ()=>{
-      while(i < queue.length){
-        const tr = queue[i++];
-        if(tr.style.display==="none") continue;
-        const mac = tr.getAttribute("data-mac") || "";
-        const cell = tr._vendorCell;
-        if(mac && cell) await fillVendorCell(mac, cell);
-      }
-    };
-    for(let n=0;n<conc;n++) runOne();
+    ctx.actions.openModal(initialFilter === "unidentified" ? "Unidentified" : (_quietMode ? "Tracked objects" : "All objects"), body, "Filter");
   }
 
   // The experimental 2D flat map lives in views/plan_viewer.js — it is a
@@ -1278,7 +1234,7 @@ export function renderClassic(ctx){
       s += `</defs>`;
 
       if(!sortedIsoLevels.length){
-        s += `<text x="${W/2}" y="${BASE_H/2}" text-anchor="middle" fill="#4a6052" font-size="13">No rooms yet — draw them in Mapping → Rooms to build the map</text>`;
+        s += `<text x="${W/2}" y="${BASE_H/2}" text-anchor="middle" fill="#4a6052" font-size="13">No rooms yet — draw them in Mapping → Layout to build the map</text>`;
         return _finishIso(s);
       }
 
@@ -1423,7 +1379,7 @@ export function renderClassic(ctx){
           // by its neighbour's own slab, leaving the outline of the floor.
           for(const r of zRooms){
             const top = r.pts.map(p=>iso(p[0],p[1],z));
-            const bot = r.pts.map(p=>iso(p[0],p[1],z-slabWZ));
+            const bot = r.pts.map(p=>iso(p[0],p[1],_fabF.rankOf(z)-slabWZ));
             for(let i=0;i<top.length;i++){
               const j=(i+1)%top.length;
               s += `<polygon points="${pts([top[i],top[j],bot[j],bot[i]])}" `
@@ -1451,7 +1407,8 @@ export function renderClassic(ctx){
           s += `<polygon points="${pts([TL,TR,BR,BL])}" fill="none" `
              + `stroke="${lyrColor}" stroke-width="1.5" stroke-dasharray="10,5" opacity="0.22"/>`;
         } else {
-          const TR_b=iso(x1,y0_,z-slabWZ), BR_b=iso(x1,y1_,z-slabWZ), BL_b=iso(x0,y1_,z-slabWZ);
+          const zb=_fabF.rankOf(z)-slabWZ;
+          const TR_b=iso(x1,y0_,zb), BR_b=iso(x1,y1_,zb), BL_b=iso(x0,y1_,zb);
           s += `<polygon points="${pts([TR,BR,BR_b,TR_b])}" fill="#0d2318" fill-opacity="0.35" stroke="#253e2e" stroke-width="0.8"/>`;
           s += `<polygon points="${pts([BL,BR,BR_b,BL_b])}" fill="#0a1a12" fill-opacity="0.3" stroke="#253e2e" stroke-width="0.8"/>`;
           s += `<polygon points="${pts([TL,TR,BR,BL])}" fill="#0f2017" fill-opacity="0.06" stroke="${lyrColor}" stroke-width="1.5" stroke-dasharray="10,5" opacity="0.5"/>`;
@@ -1562,7 +1519,7 @@ export function renderClassic(ctx){
           const [px,py] = iso(sc.x_m, sc.y_m, z);
           const rsid = (_sid(sc.source) || "R").toUpperCase();
           const inRoom = storey.rooms.find(r => _ptInPoly(sc.x_m, sc.y_m, r.pts));
-          const _rTip = `${rsid} · ${(isLive ? liveRadio.name : null)||sc.source}`
+          const _rTip = `${rsid} · ${(isLive ? (liveRadio.display_name||liveRadio.name) : null)||sc.source}`
             + (inRoom ? `\nArea: ${inRoom.room}` : "")
             + ((isLive && liveRadio.scanning!=null) ? `\nScanning: ${liveRadio.scanning?"Yes":"No"}` : "")
             + ((isLive && liveRadio.scan_mode) ? `\nMode: ${liveRadio.scan_mode === "active" ? "Active — transmits scan requests" : liveRadio.scan_mode === "passive" ? "Passive — listens only" : liveRadio.scan_mode}` : "")
@@ -1612,7 +1569,7 @@ export function renderClassic(ctx){
       // ── Helper: build tooltip string for any object ────────────────────────
       const _objTip = (o) => {
         const parts = [];
-        const n = o.user_label || o.private_ble_name || o.name || o.address || o.entity_id || "Unknown";
+        const n = deviceName(o, "Unknown");
         if(_guestName(o)) parts.push(`${_guestName(o)} (Guest)`, `Tag: ${n}`);
         else parts.push(n);
         if(o.kind) parts.push(`Kind: ${o.kind}`);
@@ -1693,7 +1650,7 @@ export function renderClassic(ctx){
         const isGhost = o._ghost || o._stale;
         const ageS = typeof o.age_s === "number" ? o.age_s : 0;
         const isAway = isGhost && (o.rssi == null) && (ageS > _awayTimeoutS2);
-        const lbl = (_guestName(o)||o.user_label||o.private_ble_name||o.name||"?").substring(0,14);
+        const lbl = (_guestName(o)||deviceName(o, "?")).substring(0,14);
         let bx, by;
         let posConf = 0;  // confidence for dashed circle
 
@@ -1835,7 +1792,7 @@ export function renderClassic(ctx){
           _renderedObjKeys.add(oKey);
           const _ok = _esc(oKey);
           const isAway = ctx.helpers.isAway(obj, ctx.helpers.awayTimeoutS(ctx.state.settings));
-          const objLabel = _guestName(obj) || obj.user_label || obj.private_ble_name || obj.name || "";
+          const objLabel = _guestName(obj) || deviceName(obj, "");
 
           // The server's position, else the room centroid with a small
           // stagger so several room-only objects do not stack on one point.
@@ -2302,7 +2259,7 @@ export function renderClassic(ctx){
         for(const o of (rr.objects||[]).slice(0,6)){
           const oKey = o.address || o.entity_id || "";
           const isF = ctx.actions.followedHas(oKey);
-          const tagLbl = o.user_label || o.private_ble_name || o.name || o.address || "?";
+          const tagLbl = deviceName(o, "?");
           const lbl = (_guestName(o) || tagLbl).substring(0,16);
           const oc = isF ? "#fbbf24" : (o.identified ? "#5eead488" : "#f59e0b88");
           const chip = el("span",{style:`font-size:10px;padding:1px 5px;border-radius:3px;background:${oc}22;color:${isF?"#fbbf24":"#94a3b8"};border:1px solid ${oc};white-space:nowrap${isF?";font-weight:700":""}`}, isF ? lbl + " \u25C9" : lbl);
@@ -2336,7 +2293,7 @@ export function renderClassic(ctx){
     } else {
       const msg = document.createElement("div");
       msg.className = "muted"; msg.style.cssText = "font-size:12px;padding:8px";
-      msg.textContent = "No rooms drawn yet. Go to Maps → Edit to draw room boundaries.";
+      msg.textContent = "No rooms drawn yet. Go to Mapping → Edit to draw room boundaries.";
       roomListPanel.appendChild(msg);
     }
 
@@ -2620,7 +2577,7 @@ export function renderClassic(ctx){
       _ovDistBtn = document.createElement("button");
       _ovDistBtn.className = "btn inline";
       _ovDistBtn.style.cssText = _distStyle(ctx.state._overviewShowDistortion);
-      _ovDistBtn.textContent = ctx.state._overviewShowDistortion ? "\u2192 Distortion ON" : "\u2192 Distortion";
+      _ovDistBtn.textContent = ctx.state._overviewShowDistortion ? "\u2192 Signal distortion ON" : "\u2192 Signal distortion";
       _ovDistBtn.addEventListener("click", () => {
         ctx.state._overviewShowDistortion = !ctx.state._overviewShowDistortion;
         if (ctx.state._overviewShowDistortion) ctx.state._overviewShowHeatmap = false; // mutual exclusion
@@ -2872,12 +2829,12 @@ export function renderClassic(ctx){
       roomRadios.slice(0,5).forEach((r, ri) => {
         const rx = x + 22 + ri * 52, ry = y + 105;
         const sid = _sid(r.source || "");
-        const rName = (r.name || r.source || "radio").substring(0, 12);
+        const rName = (r.display_name || r.name || r.source || "radio").substring(0, 12);
         s += `<circle cx="${rx}" cy="${ry}" r="14" fill="none" stroke="#52b788" stroke-width="0.7" opacity="0.2"/>`;
         s += `<circle cx="${rx}" cy="${ry}" r="8"  fill="none" stroke="#52b788" stroke-width="1"   opacity="0.5"/>`;
         s += `<circle cx="${rx}" cy="${ry}" r="4"  fill="#52b788"/>`;
         s += `<text x="${rx}" y="${ry - 18}" text-anchor="middle" fill="#52b788" font-size="9" font-weight="600">${sid ? _esc(sid)+" " : ""}${_esc(rName)}</text>`;
-        const lbl = (r.name || r.source || "").substring(0, 9);
+        const lbl = (r.display_name || r.name || r.source || "").substring(0, 9);
         s += `<text x="${rx}" y="${ry + 20}" text-anchor="middle" fill="#52b788" font-size="8" opacity="0.7">${_esc(lbl)}</text>`;
       });
 
@@ -2889,7 +2846,7 @@ export function renderClassic(ctx){
         s += `<circle cx="${ox}" cy="${oy}" r="7" fill="${oc}" opacity="0.9"/>`;
         // Guest tag: an amber ring and the guest's name; tag label in the hover.
         if(_guestName(o)) s += `<circle cx="${ox}" cy="${oy}" r="10" fill="none" stroke="#fbbf24" stroke-width="1.5"><title>${_esc(_guestName(o))} (Guest) · Tag: ${_esc(o.user_label || o.private_ble_name || o.name || "?")}</title></circle>`;
-        const lbl = (_guestName(o) || o.user_label || o.private_ble_name || o.name || "?").substring(0, 6);
+        const lbl = (_guestName(o) || deviceName(o, "?")).substring(0, 6);
         s += `<text x="${ox}" y="${oy + 18}" text-anchor="middle" fill="${oc}" font-size="9">${_esc(lbl)}</text>`;
       });
 
@@ -2905,12 +2862,12 @@ export function renderClassic(ctx){
       s += `<text x="${PX}" y="${uy + 14}" fill="#94a3b8" font-size="12" font-weight="600">Radios not yet assigned to an HA area</text>`;
       unassignedRadios.slice(0,6).forEach((r, ri) => {
         const rx = PX + 20 + ri * 140, ry = uy + 42;
-        const rName = (r.name || r.source || "Unknown").substring(0, 16);
+        const rName = (r.display_name || r.name || r.source || "Unknown").substring(0, 16);
         s += `<circle cx="${rx}" cy="${ry}" r="8" fill="none" stroke="#52b788" stroke-width="0.8" opacity="0.3"/>`;
         s += `<circle cx="${rx}" cy="${ry}" r="5" fill="none" stroke="#52b788" stroke-width="1"   opacity="0.6"/>`;
         s += `<circle cx="${rx}" cy="${ry}" r="3" fill="#52b78888"/>`;
         s += `<text x="${rx + 14}" y="${ry - 2}" fill="#52b788" font-size="10" font-weight="600">${_esc(rName)}</text>`;
-        s += `<text x="${rx + 14}" y="${ry + 12}" fill="#94a3b8" font-size="9">${_esc(r.name || r.source || "Unknown")}</text>`;
+        s += `<text x="${rx + 14}" y="${ry + 12}" fill="#94a3b8" font-size="9">${_esc(r.display_name || r.name || r.source || "Unknown")}</text>`;
       });
     }
 
@@ -3147,7 +3104,7 @@ export function renderClassic(ctx){
         const empty = cs.empty_points || 0;
         const usable = total - empty;
         const color = !usable ? "#f87171" : usable >= (cs.knn_min_required||5) ? "#52b788" : "#f59e0b";
-        const algoName = cs.positioning_algorithm === "rf" ? "RF" : "k-NN";
+        const algoName = cs.positioning_algorithm === "rf" ? "Learned model" : "Calibration match";
         const knnLabel = cs.store_initialized === false ? "Store not loaded" :
           !cs.knn_active ? `Need ${(cs.knn_min_required||5) - usable} more` :
           cs.knn_positioned_objects > 0 ? `${algoName} active (${cs.knn_positioned_objects})` : `${algoName} ready`;
@@ -3165,7 +3122,7 @@ export function renderClassic(ctx){
     const mapCard = el("div",{class:"card"},[
       el("div",{class:"card-head"},[
         el("div",{class:"h2"}, "Your home"),
-        helpBtn("overview"),
+        helpBtn("overview_grid"),
       ]),
       el("div",{class:"muted",style:"font-size:12px;margin-bottom:10px"},
         dataMode === "live" ? "Live view · updates every 5s"
@@ -3183,6 +3140,7 @@ export function renderClassic(ctx){
       _phoneHdr.appendChild(_phoneArrow);
       _phoneHdr.appendChild(el("span",{style:"font-weight:600;font-size:13px;color:#60a5fa"}, "Track Your Phone"));
       _phoneHdr.appendChild(el("span",{class:"muted",style:"font-size:11px;flex:1"}, "Tap to expand"));
+      _phoneHdr.appendChild(helpBtn("phone_tracking"));
       basicCompanionCard.appendChild(_phoneHdr);
       const _phoneBody = el("div",{style:"display:none;margin-top:8px"});
       basicCompanionCard.appendChild(_phoneBody);
@@ -3253,7 +3211,7 @@ export function renderClassic(ctx){
               irkInput.placeholder = "Paste IRK (hex or base64)";
               // "Save unverified" is for the key it was offered for: an edited key is checked again.
               irkInput.addEventListener("input", () => { if (irkSaveBtn._force) { irkSaveBtn._force = false; irkSaveBtn.textContent = "Save"; irkSaveBtn.style.color = "#4ade80"; irkSaveBtn.style.borderColor = "#16a34a"; } });
-              irkInput.style.cssText = "font-size:10px;padding:2px 6px;background:#071008;color:#e2e8f0;border:1px solid #2d4a38;border-radius:3px;width:220px;display:none;font-family:monospace";
+              irkInput.style.cssText = "font-size:10px;padding:2px 6px;background:#071008;color:#e2e8f0;border:1px solid #2d4a38;border-radius:3px;width:220px;box-sizing:content-box;display:none;font-family:monospace";
 
               const irkSaveBtn = document.createElement("button");
               irkSaveBtn.style.cssText = "font-size:10px;padding:2px 8px;border-radius:3px;cursor:pointer;border:1px solid #16a34a;background:#052e16;color:#4ade80;display:none";
@@ -3475,7 +3433,7 @@ export function renderClassic(ctx){
       el("div",{style:"display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"},[
         el("div",{class:"row",style:"align-items:center;gap:8px"},[
           el("h2",{style:"margin:0"}, "Overview"),
-          helpBtn("overview_grid"),
+          helpBtn("overview"),
         ]),
         bQuietRow,
       ]),
@@ -3548,10 +3506,11 @@ export function renderClassic(ctx){
       const storeOk = cs.store_initialized !== false;
       const knnPos = cs.knn_positioned_objects || 0;
       const color = !storeOk ? "#f87171" : !total ? "#f87171" : empty > 0 ? "#f59e0b" : ready ? "#52b788" : "#f59e0b";
-      const algoLabel = cs.positioning_algorithm === "rf" ? "Random Forest" : "k-NN";
+      const algoLabel = cs.positioning_algorithm === "rf" ? "Learned model" : "Matched to calibration points";
+      const algoTech = cs.positioning_algorithm === "rf" ? "Random Forest" : "k-NN (k-nearest neighbours)";
       const statusText = !storeOk ? "Store not loaded (restart HA)" :
         !total ? "No data" : !ready ? `Need ${(cs.knn_min_required||5) - usable} more` :
-        knnPos > 0 ? `${algoLabel} — ${knnPos} objects positioned` : `${algoLabel} ready (no objects matched yet)`;
+        knnPos > 0 ? `${algoLabel} — ${knnPos} objects positioned` : `${algoLabel} — ready (no objects matched yet)`;
       const parts = [];
       if (cs.manual_points > 0) parts.push(`${cs.manual_points} manual`);
       if (cs.auto_points > 0) parts.push(`${cs.auto_points} auto`);
@@ -3563,10 +3522,10 @@ export function renderClassic(ctx){
         ]),
         el("div",{style:"font-size:11px;color:#94a3b8;margin-top:4px"},
           parts.join(" · ") + (cs.scanners ? ` · ${cs.scanners} scanners` : "") + (cs.maps ? ` · ${cs.maps} maps` : "")),
-        el("div",{style:`font-size:11px;margin-top:4px;color:${color}`},
-          `k-NN: ${statusText}`),
+        el("div",{style:`font-size:11px;margin-top:4px;color:${color}`,title:algoTech},
+          `Positioning: ${statusText}`),
         !storeOk ? el("div",{style:"font-size:11px;margin-top:4px;color:#f87171;font-weight:600"},
-          "CalibrationStore was not loaded at startup. Restart Home Assistant to activate k-NN positioning.") : null,
+          "CalibrationStore was not loaded at startup. Restart Home Assistant to turn on positioning from calibration points.") : null,
         empty > 0 ? el("div",{style:"font-size:11px;margin-top:4px;color:#f59e0b"},
           `${empty} point(s) have no RSSI data — re-calibrate to fix`) : null,
         // k-NN diagnostic: collapsible
@@ -3575,10 +3534,10 @@ export function renderClassic(ctx){
           const diagHdr = el("div",{style:"display:flex;align-items:center;gap:6px;cursor:pointer"});
           const diagArrow = el("span",{style:"font-size:10px;color:#52b788;transition:transform .2s"}, "\u25B6");
           diagHdr.appendChild(diagArrow);
-          diagHdr.appendChild(el("span",{style:"font-weight:600;color:#e2e8f0"}, `${algoLabel} Diagnostic`));
+          diagHdr.appendChild(el("span",{style:"font-weight:600;color:#e2e8f0"}, `${algoLabel}: details`));
           diagWrap.appendChild(diagHdr);
           const diagBody = el("div",{style:"display:none;margin-top:4px"});
-          diagBody.appendChild(el("div",{}, `Cal sources: ${(cs.cal_sources||[]).length} · Live EMA sources: ${(cs.ema_sources||[]).length} · Overlap: ${cs.source_overlap}`));
+          diagBody.appendChild(el("div",{}, `Cal sources: ${(cs.cal_sources||[]).length} · Live signal sources: ${(cs.ema_sources||[]).length} · Overlap: ${cs.source_overlap}`));
           if (cs.source_overlap === 0) diagBody.appendChild(el("div",{style:"color:#f87171;font-weight:600;margin-top:3px"},
             "No scanner overlap between calibration data and live objects — cannot match!"));
           if (cs.source_overlap === 0 && (cs.cal_sources||[]).length > 0 && (cs.ema_sources||[]).length > 0)
@@ -3586,7 +3545,7 @@ export function renderClassic(ctx){
               `Cal: ${(cs.cal_sources||[]).slice(0,3).join(", ")} · Live: ${(cs.ema_sources||[]).slice(0,3).join(", ")}`));
           (cs.knn_diag||[]).forEach(d => {
             diagBody.appendChild(el("div",{style:"margin-top:3px;border-top:1px solid #1b3526;padding-top:3px"}, [
-              el("div",{}, `${d.key}: ${d.ema_scanners} EMA, ${d.shared_with_cal} overlap cal`),
+              el("div",{}, `${d.key}: ${d.ema_scanners} smoothed, ${d.shared_with_cal} overlap cal`),
               d.knn_result ? el("div",{style:"color:#52b788"},
                 `→ conf=${(d.knn_result.confidence*100).toFixed(0)}% room=${d.knn_result.room} k=${d.knn_result.k_used} shared=${d.knn_result.shared_scanners||"?"}`) :
                 el("div",{style:"color:#f87171"}, d.shared_with_cal > 0 ? "→ locate returned null" : "→ no shared scanners"),
@@ -3613,6 +3572,7 @@ export function renderClassic(ctx){
     _aPhoneHdr.appendChild(_aPhoneArrow);
     _aPhoneHdr.appendChild(el("span",{style:"font-weight:700;font-size:14px;color:#60a5fa"}, "Track Your Phone"));
     _aPhoneHdr.appendChild(el("span",{class:"muted",style:"font-size:11px;flex:1"}, "Tap to expand"));
+    _aPhoneHdr.appendChild(helpBtn("phone_tracking"));
     companionCard.appendChild(_aPhoneHdr);
     const _aPhoneBody = el("div",{style:"display:none;margin-top:8px"});
     companionCard.appendChild(_aPhoneBody);
@@ -3684,7 +3644,7 @@ export function renderClassic(ctx){
             irkInput.placeholder = "Paste IRK (hex or base64)";
             // "Save unverified" is for the key it was offered for: an edited key is checked again.
             irkInput.addEventListener("input", () => { if (irkSaveBtn._force) { irkSaveBtn._force = false; irkSaveBtn.textContent = "Save"; irkSaveBtn.style.color = "#4ade80"; irkSaveBtn.style.borderColor = "#16a34a"; } });
-            irkInput.style.cssText = "font-size:10px;padding:2px 6px;background:#071008;color:#e2e8f0;border:1px solid #2d4a38;border-radius:3px;width:220px;display:none;font-family:monospace";
+            irkInput.style.cssText = "font-size:10px;padding:2px 6px;background:#071008;color:#e2e8f0;border:1px solid #2d4a38;border-radius:3px;width:220px;box-sizing:content-box;display:none;font-family:monospace";
             const irkSaveBtn = document.createElement("button");
             irkSaveBtn.style.cssText = "font-size:10px;padding:2px 8px;border-radius:3px;cursor:pointer;border:1px solid #16a34a;background:#052e16;color:#4ade80;display:none";
             irkSaveBtn.textContent = "Save";
@@ -3935,10 +3895,13 @@ export function renderClassic(ctx){
   const section = el("section",{},[
     _buildSuspendBanner(),
     el("div",{style:"display:flex;align-items:center;justify-content:space-between"},[
-      el("h2",{style:"margin:0"}, "Overview"),
+      el("div",{class:"row",style:"align-items:center;gap:8px"},[
+        el("h2",{style:"margin:0"}, "Overview"),
+        helpBtn("overview"),
+      ]),
       quietRow,
     ]),
-    el("div",{style:"color:#94a3b8;margin-top:2px;margin-bottom:10px"}, `Mode: ${dataMode.toUpperCase()} · ${ctx.state.versionInfo?.version || ""} (${ctx.state.versionInfo?.build_id || ""})`),
+    el("div",{style:"color:#94a3b8;margin-top:2px;margin-bottom:10px"}, `Mode: ${modeKnown ? dataMode.toUpperCase() : "…"} · ${ctx.state.versionInfo?.version || ""} (${ctx.state.versionInfo?.build_id || ""})`),
     sampleBanner,
     whosWhere,
     _buildDiagPanel(),
@@ -3950,8 +3913,8 @@ export function renderClassic(ctx){
     const _hasFabric = Object.keys(ctx.state.model?.scanner_positions_m || {}).length > 0 || Object.keys(ctx.state.model?.room_geometry_m || {}).length > 0;
     if (_hasMaps && !_hasFabric) {
       section.appendChild(el("div",{style:"padding:10px 14px;border:2px solid #f59e0b;background:rgba(245,158,11,.08);border-radius:8px;margin-bottom:10px"},[
-        el("div",{style:"font-weight:700;color:#fbbf24;font-size:13px"},"\u26a0 Positioning fabric not built yet"),
-        el("div",{style:"font-size:11px;color:#e2e8f0;margin-top:4px"},"Go to Mapping \u2192 Rooms and place scanners and draw rooms there \u2014 the positioning fabric builds from that automatically, there is nothing separate to migrate."),
+        el("div",{style:"font-weight:700;color:#fbbf24;font-size:13px"},"\u26a0 Room and receiver layout not built yet"),
+        el("div",{style:"font-size:11px;color:#e2e8f0;margin-top:4px"},"Go to Mapping \u2192 Layout and place scanners and draw rooms there \u2014 the layout builds from that automatically, there is nothing separate to migrate."),
       ]));
     }
   }

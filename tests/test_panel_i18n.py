@@ -42,7 +42,12 @@ _GROUP_BUDGET = 60 * 1024    # bytes per language group file
 # (~60 KB on their own) beside the translation, so one language is ~120-130 KB
 # (~45 KB gzipped). It loads once, lazily, only for a shipped language, never
 # for English; splitting it would only add fetches for the same bytes.
-_HELP_BUDGET = 160 * 1024
+# 2026-10-31: the help was rewritten and roughly doubled (89 topics, every
+# screen covered), so a fully translated help.json is ~340 KB (~110 KB
+# gzipped). Fetched once, lazily: not at startup but on the first "?" or the
+# first visit to Training (panel.js _loadHelpLanguage; tests/js/help_lazy.mjs),
+# and only for a shipped language.
+_HELP_BUDGET = 400 * 1024
 _HELP = _WWW / "help_content.js"
 _SHIPPED = ("nl", "de", "fr")
 
@@ -183,9 +188,10 @@ def test_the_product_name_is_one_literal() -> None:
 # ── Phase 1: the help in nl / de / fr ────────────────────────────────────────
 
 def _help_keys() -> tuple[set[str], set[str]]:
-    """Every t() string in help_content.js, and the ones left English on
-    purpose: settings_tiers names the editions (PadSpan Bright, PadSpan Bright),
-    which a translation may not, so that page stays English everywhere."""
+    """Every t() string in help_content.js, and settings_tiers' (the editions
+    page). That page was left English at first; it is translated now, with
+    PadSpan Bright, PadSpan Bright, PadSpan Pro and PadSpan Bright Pro written
+    as the English writes them, like every other sentence."""
     src = _HELP.read_text(encoding="utf-8")
     keys = {_unjs(m.group(1)) for m in _T_RE.finditer(src)}
     a = src.index("  settings_tiers: {")
@@ -223,7 +229,7 @@ def test_each_help_translation_covers_the_help_and_copies_no_english() -> None:
     assert len(keys) >= 340 and tiers
     for lang in _SHIPPED:
         data = json.loads((_LANG_DIR / lang / "help.json").read_text(encoding="utf-8"))
-        assert set(data) == keys - tiers, (lang, sorted(keys - tiers - set(data))[:3], sorted(set(data) - keys)[:3])
+        assert set(data) == keys, (lang, sorted(keys - set(data))[:3], sorted(set(data) - keys)[:3])
         copies = [k for k, v in data.items() if v.strip() == k.strip()]
         assert not copies, (lang, copies[:3])
         for k, v in data.items():
@@ -243,9 +249,27 @@ def test_the_panel_loads_the_help_language_and_keeps_english_as_imported() -> No
     assert '.catch(() => ({ t: (s) => s, currentLanguage: () => "en" }));' in help_src
     assert "export const HELP = helpTexts();" in help_src
     assert 'I18N.useLanguage(this._hass, ["help"])' in src
-    assert 'HELP = lang === "en" ? HELP_MOD.HELP : HELP_MOD.helpTexts();' in src
+    assert 'HELP = got === "en" ? HELP_MOD.HELP : HELP_MOD.helpTexts();' in src
     # English: helpNote() is "", so the modal gets nothing new.
     assert "if(note){" in src and 'return currentLanguage() === "en" ? ""' in help_src
+
+
+def test_the_translated_help_is_fetched_on_first_need_not_at_startup() -> None:
+    """help.json (~340 KB) is not fetched when the panel loads, only on the
+    first "?" (its modal opens at once with a loading line, filled in when the
+    translation arrives or in English after 2 s; a late translation replaces
+    that English while the same help is open, followed to a language changed
+    meanwhile; a failed load is tried again by a "?" a minute later; a "?"
+    before help_content.js is in waits for it) or the first visit to
+    Training; English fetches nothing (tests/js/help_lazy.mjs)."""
+    if _NODE is None:
+        pytest.skip("node is not installed")
+    res = subprocess.run([_NODE, str(Path(__file__).parent / "js" / "help_lazy.mjs"), str(_WWW)],
+                         capture_output=True, text=True, encoding="utf-8", timeout=120)
+    lines = [ln for ln in res.stdout.strip().splitlines() if ln.startswith("{")]
+    assert lines, res.stderr[-3000:]
+    out = json.loads(lines[-1])
+    assert not out["failures"] and len(out["cases"]) == 20, out["failures"]
 
 
 def test_the_training_manual_opens_with_the_note_only_when_translated() -> None:
@@ -261,4 +285,4 @@ def test_the_training_manual_opens_with_the_note_only_when_translated() -> None:
     lines = [ln for ln in res.stdout.strip().splitlines() if ln.startswith("{")]
     assert lines, res.stderr[-3000:]
     out = json.loads(lines[-1])
-    assert not out["failures"] and len(out["cases"]) == 5, out["failures"]
+    assert not out["failures"] and len(out["cases"]) == 7, out["failures"]

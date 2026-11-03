@@ -13,9 +13,14 @@
 .nav button:hover{border-color:var(--accent);background:linear-gradient(180deg,#1e3d2a,#112918)}
 .main{padding:16px 16px 80px;overflow-y:auto}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+/* Cards with tables or bars in them: at 220 px they clip. A few cards share the row. */
+.grid-wide{grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr))}
 .card{background:#0f1a12;border:1px solid var(--line);border-radius:12px;padding:12px}
 .kpi{font-size:24px;font-weight:700;margin-top:4px}
 .mono{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#0c1a0e;border:1px solid var(--line);border-radius:12px;padding:12px;overflow:auto}
+textarea.mono{color:var(--text)}
+textarea.mono,input[type="text"]{box-sizing:border-box}
+#health .mono{background:none;border:none;border-radius:0;padding:0}
 .hidden{display:none}
 .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 /* Flood alarm latches, sidebar (panel.js #emergencyBanner) — always visible
@@ -30,19 +35,31 @@
    panel.js's global chrome. Built into the DOM only while on, so there is
    no .hidden toggle here to fight a same-specificity display rule. */
 .lv-vacation{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:40;
-  display:flex;align-items:center;gap:10px;flex-wrap:wrap;max-width:min(90vw,520px);
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:max-content;max-width:min(90vw,520px);
   padding:10px 14px;border-radius:12px;background:rgba(30,22,6,.92);border:1px solid #b58a1f;
   box-shadow:0 6px 24px rgba(0,0,0,.45);font-size:12.5px;color:#fde9b8}
 .lv-vacation-label{font-weight:700}
 .lv-vacation-slider-wrap{display:flex;align-items:center;gap:6px}
 .lv-vacation-slider{width:100px;accent-color:#e0b23a}
-.lv-vacation-opts{z-index:41;background:rgba(30,22,6,.98);flex-direction:column;align-items:stretch;gap:8px;max-width:min(94vw,560px);max-height:80vh;overflow:auto}
+.lv-vacation-opts{z-index:41;background:rgba(30,22,6,.98);flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:8px;max-width:min(94vw,560px);max-height:80vh;overflow:auto}
+.lv-vacation-opts > *{flex-shrink:0}
 .lv-vac-opt-head{display:flex;align-items:center;gap:10px}
 .lv-vac-opt{display:flex;flex-direction:column;gap:2px;padding-top:6px;border-top:1px solid rgba(181,138,31,.35)}
 .lv-vac-opt-main{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .lv-vac-opt-lbl{font-weight:600}
 .lv-vac-opt-note{font-size:11px;line-height:1.35}
 .lv-vac-inline{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+/* Routine from: Last week | Monthly average — one choice, so one segmented control */
+.lv-vac-seg{display:inline-flex;border:1px solid rgba(181,138,31,.55);border-radius:9px;overflow:hidden}
+.lv-vac-seg button{all:unset;box-sizing:border-box;padding:4px 12px;font-size:12px;font-weight:600;
+  color:rgba(253,233,184,.7);cursor:pointer;border-right:1px solid rgba(181,138,31,.55)}
+.lv-vac-seg button:last-child{border-right:none}
+.lv-vac-seg button:hover{background:rgba(224,178,58,.14);color:#fde9b8}
+.lv-vac-seg button[aria-pressed="true"]{background:rgba(224,178,58,.3);color:#fde9b8}
+.lv-vac-seg button:focus-visible{outline:2px solid #e0b23a;outline-offset:-2px}
+.lv-vac-anchors{display:flex;flex-direction:column;gap:2px;max-height:140px;overflow:auto;min-width:180px}
+.lv-vac-preview{display:flex;flex-direction:column;gap:3px;font-size:12px}
+.lv-vac-preview-row{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
 /* Alert pulse on a wall screen (lights_map.js safetyAlerts): the worst alert
    and where, across the top until it clears; red for an alarm, amber for an
    opening. A slow breath of its border, in CSS (the map redraws every 5 s). */
@@ -68,7 +85,7 @@
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .btn.inline{width:auto;margin-top:0}
 .btn.tiny{width:auto;margin-top:0;padding:3px 8px;font-size:11px}
-@media(max-width:1100px){.app{grid-template-columns:1fr}.left{position:fixed;z-index:12;left:0;top:0;bottom:0;width:300px;transform:translateX(-100%);transition:transform .2s ease}.app.mobile-open .left{transform:translateX(0)}}
+@media(max-width:1100px){.app,.app.mini{grid-template-columns:1fr}.left{position:fixed;z-index:60;left:0;top:0;bottom:0;width:300px;transform:translateX(-100%);transition:transform .2s ease}.app.mobile-open .left{transform:translateX(0)}}
 
 /* Mapping tabs + editor */
 .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
@@ -94,6 +111,8 @@
 
 .marker{position:absolute;transform:translate(-50%,-50%);min-width:28px;height:28px;padding:0 4px;border-radius:999px;border:2px solid #52b788;background:#0d1f12;color:#dce7ff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:10px;letter-spacing:.03em;cursor:grab;user-select:none;white-space:nowrap}
 .marker:active{cursor:grabbing}
+/* A name on a map stage (maps.js _stageLabelStyle): the stage's box, a fixed size. */
+.maplabel{position:absolute;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 6px;border:1px solid #52b788;border-radius:6px;background:rgba(7,16,8,.78);color:#e2e8f0;font-size:11.5px;line-height:1.35;font-weight:600;pointer-events:none;user-select:none}
 
 /* Sidebar scroll polish */
 .left::-webkit-scrollbar{width:10px}
@@ -101,8 +120,8 @@
 
 
 /* --- v0.4.0 additions --- */
-.toast{position:sticky;top:0;z-index:50;margin:0 0 10px 0;padding:10px 12px;border-radius:12px;background:rgba(82,183,136,.12);border:1px solid rgba(82,183,136,.35);color:var(--text)}
-.toast.error{background:rgba(245,158,11,.10);border-color:rgba(245,158,11,.35)}
+.toast{position:sticky;top:0;z-index:50;margin:0 0 10px 0;padding:10px 12px;border-radius:12px;background:linear-gradient(rgba(82,183,136,.12),rgba(82,183,136,.12)),var(--bg);border:1px solid rgba(82,183,136,.35);color:var(--text)}
+.toast.error{background:linear-gradient(rgba(245,158,11,.10),rgba(245,158,11,.10)),var(--bg);border-color:rgba(245,158,11,.35)}
 .toast.hidden{display:none}
 .stale-build{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px 0;padding:8px 12px;border-radius:12px;background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.35);color:var(--text);font-size:13px}
 .stale-build.hidden{display:none}
@@ -139,10 +158,17 @@
 :host([data-invert]) video {
   filter: invert(1) hue-rotate(180deg);
 }
+/* Native checkboxes too: inverted, an empty white box is a solid black square
+   that reads as ticked. */
+:host([data-invert]) input[type="checkbox"]{filter:invert(1) hue-rotate(180deg)}
+:host([data-invert]) input[type="checkbox"]{color-scheme:light}
 
 /* Day theme (day_theme.js): native controls (slider tracks, scrollbars,
    dropdown lists) drawn light too. */
 :host([data-theme="day"]){color-scheme:light}
+/* Everywhere else the date fields are dark and the native calendar icon black. */
+:host(:not([data-theme="day"])) input[type^="date"],:host(:not([data-theme="day"])) input[type="time"]{color-scheme:light}
+:host(:not([data-theme="day"])) ::-webkit-calendar-picker-indicator{filter:invert(1)}
 
 .marker.selected{
   outline: 2px solid rgba(255,255,255,0.85);
@@ -157,12 +183,21 @@
 .nav button.navbtn.active{outline:2px solid var(--navcolor,#52b788)}
 .nav button.navbtn:hover{border-color:var(--navcolor,#52b788)}
 .navdot{display:inline-block;width:8px;height:8px;border-radius:999px;background:var(--navcolor,#52b788);margin-right:10px;vertical-align:middle}
+/* More tools: the menu's closed group (panel.js _renderNav) */
+.nav button.navmore{display:flex;align-items:center;gap:8px;color:#94a3b8;--navcolor:#78909c}
+.navmore .navchev{width:14px;height:14px;flex:0 0 14px;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s ease}
+.navmore[aria-expanded="true"] .navchev{transform:rotate(90deg)}
 
 /* --- Added for Bluetooth view --- */
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.presence-scanners{columns:3;column-gap:10px}
+.health-checks{display:grid;grid-template-columns:18px 1fr auto;gap:4px 8px;font-size:11px;align-items:center}
+.health-checks .mono{white-space:nowrap}
+@media(max-width:768px){.health-checks{grid-template-columns:18px minmax(0,1fr)}.health-checks .mono{grid-column:2;justify-self:start;max-width:100%;box-sizing:border-box;white-space:normal}}
 @media (max-width:900px){.grid-2{grid-template-columns:1fr}}
 
 .input,.select{
+  box-sizing:border-box;
   width:100%;
   padding:8px 10px;
   border:1px solid rgba(255,255,255,0.18);
@@ -172,6 +207,8 @@
   outline:none;
 }
 .input::placeholder{color:rgba(255,255,255,0.55)}
+select.input{margin-top:0}
+input.input[type="email"]{min-height:37px}
 
 /* --- Bluetooth + Devices UI upgrades (v0.4.10) --- */
 .tabs{display:flex;gap:8px;margin:10px 0 12px 0}
@@ -202,6 +239,27 @@
 .pill.good{border-color:rgba(94,234,212,.7);background:rgba(94,234,212,.12)}
 .pill.ok{border-color:rgba(245,158,11,.7);background:rgba(245,158,11,.12)}
 .pill.bad{border-color:rgba(248,113,113,.7);background:rgba(248,113,113,.12)}
+/* The status dot (panel.js _paintStatusDot, views/status_dot.js): nothing
+   when all is well; red = broken, a round mark; amber = needs attention, a
+   triangle. Shape and count as well as colour; the words are its tooltip.
+   On ?kiosk=1 (no top bars) red only, in the bottom-right corner: kiosk
+   drops the page padding, so the top right is the Overview header's Quiet tick. */
+.status-dot{all:unset;box-sizing:border-box;display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px 0 4px;
+  margin:0 6px 6px 0;border-radius:999px;border:1px solid #2d4a38;font-size:11px;font-weight:700;line-height:1;cursor:pointer;flex-shrink:0}
+.status-dot.hidden{display:none}
+.status-dot:focus-visible{outline:2px solid #52b788;outline-offset:2px}
+.status-dot-mark{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;font-size:10px;font-weight:800;color:#0a150e}
+.status-dot-red{border-color:rgba(248,113,113,.7);background:rgba(248,113,113,.12);color:#fca5a5}
+.status-dot-red .status-dot-mark{border-radius:50%;background:#f87171}
+.status-dot-amber{border-color:rgba(245,158,11,.7);background:rgba(245,158,11,.12);color:#fcd34d}
+.status-dot-amber .status-dot-mark{background:#f59e0b;clip-path:polygon(50% 0,100% 100%,0 100%);padding-top:3px;box-sizing:border-box}
+/* Day: the amber count darkened past what day_theme.js's text rule gives (#bf9303, 2.3:1) to 5.8:1. */
+:host([data-theme="day"]) .status-dot-amber{color:#92400e}
+.mobile-topbar .status-dot{margin:0;height:26px}
+.status-dot.status-dot-wall{position:fixed;bottom:calc(12px + env(safe-area-inset-bottom,0px));right:12px;z-index:42;margin:0;cursor:default;height:auto;
+  padding:.35em .8em .35em .4em;gap:.4em;font-size:clamp(14px,.9vw,28px);background:rgba(40,10,10,.92)}
+.status-dot-wall .status-dot-mark{width:1.3em;height:1.3em;font-size:.8em}
+.status-dot-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
 .card.warn{border-color:rgba(245,158,11,.6)}
 .bt-pills{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .bt-viz{width:100%;height:auto;border:1px solid var(--line);border-radius:14px;background:rgba(10,21,14,.45)}
@@ -336,7 +394,7 @@
   color: #cbd5e1;
   font-weight: 700;
   position: sticky;
-  top: 0;
+  top: var(--sticky-top,0);
   background: var(--panel);
 }
 .badge {
@@ -381,6 +439,11 @@
 /* Small ? help button — appears in card headers */
 .btn-help{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;min-width:22px;border-radius:999px;border:1px solid rgba(82,183,136,.45);background:rgba(82,183,136,.1);color:rgba(82,183,136,.9);font-size:12px;font-weight:700;cursor:pointer;flex-shrink:0;margin:0;padding:0;line-height:1}
 .btn-help:hover{background:rgba(82,183,136,.22);border-color:rgba(82,183,136,.8)}
+/* The top bar's two "?" (Live/Sample, Basic/Advanced/Development) give way
+   at 1101-1279 px, where PadSpan's own nav is back and, with Home Assistant's
+   sidebar docked, they would wrap the bar onto a second row (both skins).
+   Both topics stay in Training. */
+@media (min-width:1101px) and (max-width:1279px){#dataModeHelp,#complexityHelp{display:none}}
 
 /* Shared card-header row: title on left, ? button on right */
 .card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
@@ -425,7 +488,8 @@
      - .sidebar-mobile-header (hidden on desktop) shows ✕ close button
 
    BREAKPOINTS:
-     > 900px  = desktop layout  (left sidebar always visible, no top/bottom bar)
+     > 1100px = desktop layout  (left sidebar always visible, no top/bottom bar)
+     ≤ 1100px = narrow window   (drawer + top bar)
      ≤ 900px  = mobile layout   (drawer + top bar + bottom nav)
      ≤ 480px  = small phone     (reduced padding, smaller pills)
 
@@ -539,6 +603,9 @@
 
 /* ── Desktop top bar (hidden on mobile) ─────────────────────────── */
 .desktop-topbar{display:flex}
+/* One row, always: where the bar is short of room a badge shortens (…) rather than wrap. */
+.desktop-topbar{flex-wrap:nowrap}
+.desktop-topbar>.pill{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ── Mobile bottom navigation bar ──────────────────────────────── */
 .mobile-bottom-nav{
@@ -589,12 +656,25 @@
 /* ═══════════════════════════════════════════════════════════════════
    RESPONSIVE BREAKPOINTS
    ═══════════════════════════════════════════════════════════════════ */
+/* The sidebar is a drawer from 1100px down, so the bar with its menu button
+   comes with it. The bottom nav stays phone-only: Home Assistant's own sidebar
+   is still docked up here and the nav runs the full width of the window. */
+@media(min-width:901px) and (max-width:1100px){
+  .main{--sticky-top:61px}
+  .main [style*="overflow"],.main .list-scroll,.main .rooms,.main .tags,.main .lv-stage,.main .lv-sheet,.main .modal{--sticky-top:0px}
+}
+@media(max-width:1100px){
+  #toggleSide{display:none}
+  .mobile-topbar{display:flex;margin:0 -16px 10px}
+  .desktop-topbar{display:none !important}
+  .sidebar-mobile-header{display:flex}
+  .app.mobile-open .brand{display:none}
+  .main{padding-top:0}
+}
 @media(max-width:900px){
   /* Show/hide mobile vs desktop chrome */
-  .mobile-topbar{display:flex}
-  .desktop-topbar{display:none !important}
+  .mobile-topbar{margin:0 -10px 10px}
   .mobile-bottom-nav{display:flex}
-  .sidebar-mobile-header{display:flex}
 
   /* Sidebar becomes a drawer */
   .app{grid-template-columns:1fr}
@@ -609,8 +689,6 @@
     overflow-x:hidden;
   }
   .app.mobile-open .left{transform:translateX(0)}
-  /* Hide desktop brand block when mobile header is showing */
-  .app.mobile-open .brand{display:none}
 
   /* Content area: padding for bottom nav + scroll */
   .main{
@@ -633,16 +711,22 @@
   /* Tables scroll horizontally rather than overflow */
   .table-wrap,.list-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .table{min-width:360px}
+  .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .table-scroll table{word-break:normal;overflow-wrap:break-word}
+  .obj-scanner{min-width:150px}
 
   /* Cards full-width, no wrapping issues */
   .card{word-break:break-word}
-  .grid{grid-template-columns:1fr}
-  .grid-2{grid-template-columns:1fr}
+  .card .btn{word-break:normal;overflow-wrap:break-word;max-width:100%}
+  .grid{grid-template-columns:minmax(0,1fr)}
+  .grid-2{grid-template-columns:minmax(0,1fr)}
+  .presence-scanners{columns:3 240px}
   .controls input[type="text"]{min-width:unset;width:100%}
 
   /* Row wrapping on narrow screens */
   .row{flex-wrap:wrap}
   .bt-adv-right{flex-wrap:wrap}
+  .bt-kpis{flex-wrap:wrap}
 
   /* Modal full-screen on phone */
   .modal .overlay{padding:0;align-items:flex-end}
@@ -664,7 +748,9 @@
   .kpi-num,.kpi{font-size:20px}
   .controls input[type="text"]{min-width:unset;width:100%}
   .toolbar{flex-wrap:wrap;gap:6px}
-  .toolbar select{min-width:0;flex:1;max-width:100%}
+  .toolbar select{min-width:0;flex:1 1 120px;max-width:100%}
+  .maprow{flex-wrap:wrap}
+  .maprow > :last-child{flex:1 0 100%}
   .h2{font-size:15px}
 }
 
@@ -965,7 +1051,7 @@
 }
 #bluetooth .bt-controls .input,#bluetooth .bt-controls .select{
   background:var(--bt-surface);border-color:var(--bt-line);border-radius:9px;
-  padding:7px 10px;font-size:12px;
+  padding:7px 10px;font-size:12px;margin-top:0;min-height:34px;
 }
 #bluetooth .bt-controls .input:focus,#bluetooth .bt-controls .select:focus{
   border-color:rgba(82,183,136,.65);
@@ -1016,6 +1102,12 @@
   #bluetooth .bt-seg{width:100%}
   #bluetooth .bt-seg .tab{flex:1 1 auto;text-align:center;min-height:38px}
 }
+@media(max-width:480px){
+  #bluetooth .bt-adv-row{flex-wrap:wrap}
+  #bluetooth .bt-adv-main{flex-basis:100% !important}
+  #bluetooth .bt-adv-sub,#bluetooth .bt-scanner-src{white-space:normal}
+  #bluetooth .bt-mini select{width:auto;max-width:100% !important}
+}
 
 /* ══ Lights view — the surface, refreshed ═══════════════════════════════════
    Shared by the Lights sidebar panel AND the Mapping → Lights tab (both load
@@ -1062,7 +1154,7 @@
    the top of the scrolling map card, with an opaque backdrop matching
    lv-mapcard's own so the map/table scrolling underneath never shows
    through — a translucent sticky bar would look broken, not docked. */
-.lv-toolbar-sticky{position:sticky;top:0;z-index:20;
+.lv-toolbar-sticky{position:sticky;top:var(--sticky-top,0);z-index:20;
   background:linear-gradient(180deg,#101d14 0%,#0d1811 100%);
   box-shadow:0 6px 14px -6px rgba(0,0,0,.5)}
 /* Presets — Garry, 2026-09-10: "thousands of combinations in the mapping,
@@ -1088,7 +1180,7 @@
    wins on source order (this rule comes later in the file). */
 input.lv-preset-name{background:rgba(15,26,18,.85);color:#e2e8f0;
   border:1px solid rgba(196,181,253,.3);border-radius:8px;padding:2px 8px;
-  font-size:11px;width:150px}
+  font-size:11px;width:150px;box-sizing:content-box}
 input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 .lv-sep{width:1px;align-self:stretch;margin:2px 3px;
   background:linear-gradient(180deg,transparent,rgba(120,190,155,.26),transparent)}
@@ -1216,6 +1308,17 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 /* The phone rule above ("SVG maps: prevent overflow", max-width:900px) holds
    the map's SVG to the stage width whatever the zoom; the overlay follows. */
 @media(max-width:900px){.lv-wx{--wxcap:100%}}
+/* The trees of Showcase's West Coast Forest (views/atlas_forest.js): one plain box
+   with the picture as its background, first in the stage so it paints before the
+   drawing, as wide as the drawing and pulled up by its own height, so it adds
+   nothing to the scroll area. It is not positioned: no stacking context and no
+   layer of its own, nothing asked of the stage or the drawing. */
+.lv-forest{display:block;pointer-events:none;box-sizing:content-box;height:0;--fcap:100000%;
+  background-size:100% 100%;background-repeat:no-repeat;
+  width:min(var(--fz,100%),var(--fcap));
+  padding-top:calc(min(var(--fz,100%),var(--fcap)) * var(--fa,0));
+  margin-bottom:calc(-1 * min(var(--fz,100%),var(--fcap)) * var(--fa,0))}
+@media(max-width:900px){.lv-forest{--fcap:100%}}
 .lv-wx *{pointer-events:none}
 /* Four sides, not `inset`: older wall-tablet WebViews lack the shorthand. The
    tilted field reaches past the drawing by what the steepest wind needs for
@@ -1287,7 +1390,8 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 .lv-rail{position:absolute;left:0;top:0;bottom:0;width:44px;display:flex;flex-direction:column;
   align-items:center;gap:4px;padding:8px 0;background:linear-gradient(180deg,#101d14 0%,#0d1811 100%);
   border-right:1px solid rgba(120,190,155,.18);z-index:5;transition:transform .18s ease}
-.lv-rail.hidden{transform:translateX(-100%)}
+.lv-rail.hidden{width:0;padding:8px 0 0 6px;align-items:flex-start;background:none;border:none}
+.lv-rail.hidden > :not(:last-child){display:none}
 .lv-rail.hidden ~ .lv-stage{width:100%;margin-left:0}
 /* The legend clears the rail like the stage does; the card has no padding
    here, so it brings its own. */
@@ -1300,6 +1404,7 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
   background:linear-gradient(180deg,#101d14 0%,#0d1811 100%);
   box-shadow:0 10px 24px -8px rgba(0,0,0,.6);transition:max-height .16s ease}
 .lv-drawer.open{max-height:220px;overflow-y:auto;border-bottom:1px solid rgba(120,190,155,.18)}
+@media(max-width:900px){.lv-drawer.open{max-height:min(70vh,100%)}}
 .lv-drawer .lv-toolbar,.lv-drawer .lv-presetbar{margin:0;border:none;background:none;border-radius:0}
 
 /* ── Emergency lighting test (the Atlas sidebar; lights_panel.js) ─────────
@@ -1441,7 +1546,7 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 .lv-table th,.lv-table td.lv-map,.lv-table td.lv-map .lv-act{white-space:nowrap}
 .lv-table td svg{max-width:none}
 @container lv-index (max-width:900px){
-  .lv-tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .lv-tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;--sticky-top:0px}
   .lv-table{min-width:0}
 }
 @container lv-index (max-width:480px){
@@ -1611,3 +1716,41 @@ input.lv-preset-name:focus{border-color:rgba(196,181,253,.7);outline:none}
 /* A wall shows the overview only (control-room practice: the big screen is
    the house at a glance; the fixture key is for whoever edits the map). */
 .lv-mapcard.lv-display.lv-wall > .lv-legend.lv-shapes{display:none}
+/* ── Receivers page (views/receivers.js) ─────────────────────────────────
+   One table, every receiver. Palette: card #0f1a12, line #1b3526, text
+   #e2e8f0, muted #94a3b8, accent #52b788, amber #f59e0b. Below 760 px the
+   table becomes one card per receiver (each cell labelled from data-label). */
+#receivers{display:flex;flex-direction:column;gap:12px}
+#receivers .rx-note{font-size:12px;color:#a7f3d0;border-color:#2d4a38}
+#receivers .rx-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:12px;margin-bottom:8px}
+#receivers .rx-filter{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#e2e8f0;cursor:pointer}
+#receivers .rx-table th{padding:0;vertical-align:bottom}
+#receivers .rx-sort{all:unset;box-sizing:border-box;display:block;width:100%;padding:8px;cursor:pointer;
+  font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;white-space:nowrap}
+#receivers .rx-sort:hover,#receivers .rx-sort.on{color:#a7f3d0}
+#receivers .rx-sort:focus-visible{outline:2px solid #52b788;outline-offset:-2px;border-radius:4px}
+#receivers .rx-table td{vertical-align:middle}
+#receivers .rx-table tbody tr:hover{background:rgba(82,183,136,.05)}
+#receivers .rx-name{font-weight:600;color:#e2e8f0}
+#receivers .rx-src{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;color:#64748b;word-break:break-all}
+#receivers .rx-num{font-variant-numeric:tabular-nums}
+#receivers .rx-edit{display:inline-flex;align-items:center;gap:6px;flex-wrap:nowrap}
+#receivers .rx-save,#receivers .rx-place{font-size:11px;padding:4px 10px}
+#receivers .rx-status{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-weight:600}
+#receivers .rx-dot{width:8px;height:8px;border-radius:50%;background:#52b788;flex:0 0 auto}
+#receivers .rx-status.ok{color:#a7f3d0}
+#receivers .rx-status.warn{color:#f59e0b}
+#receivers .rx-status.warn .rx-dot{background:#f59e0b}
+#receivers tr.rx-problem td:first-child{box-shadow:inset 3px 0 0 #f59e0b}
+@media(max-width:760px){
+  #receivers .rx-table{min-width:0}
+  #receivers .rx-table thead{display:none}
+  #receivers .rx-table,#receivers .rx-table tbody,#receivers .rx-table tr,#receivers .rx-table td{display:block;width:100%;box-sizing:border-box}
+  #receivers .rx-table tr{box-sizing:border-box;border:1px solid #1b3526;border-radius:10px;padding:6px 10px;margin-bottom:10px;background:#0a150e}
+  #receivers tr.rx-problem{border-color:#7d5c2b}
+  #receivers tr.rx-problem td:first-child{box-shadow:none}
+  #receivers .rx-table td{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid rgba(120,190,155,.08)}
+  #receivers .rx-table td:last-child{border-bottom:none}
+  #receivers .rx-table td:first-child{display:block}
+  #receivers .rx-table td:not(:first-child)::before{content:attr(data-label);color:#94a3b8;font-size:11px;flex:0 0 auto}
+}

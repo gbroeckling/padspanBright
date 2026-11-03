@@ -9,10 +9,12 @@
  * it ("Guest tag 1"). Lending it starts a stay: who has it, until when, the
  * rooms they should not go into, and the notices wanted. The stay's report —
  * arrived, left, time in each room, off-limits visits — is kept the days set
- * in Settings → Presence → Guest tags. The tab exists only while guest tags
+ * in Settings → Tracking → Guest tags. The tab exists only while guest tags
  * are on.
  */
 
+// Basic's focused views (views/focus.js).
+const FOCUS = await import(`./focus.js${new URL(import.meta.url).search}`);
 const REFRESH_MS = 10000;
 const AMBER = "#fbbf24";
 
@@ -40,7 +42,8 @@ export function render(ctx) {
     el("div", { style: "display:flex;align-items:center;gap:8px" }, [
       el("div", { style: "font-size:24px" }, "🧳"),
       el("div", { style: `font-weight:700;font-size:16px;color:${AMBER}` }, "Guests"),
-    ]),
+      ctx.helpers.helpBtn ? ctx.helpers.helpBtn("guest_tags") : null,
+    ].filter(Boolean)),
     el("div", { style: "font-size:12px;color:#94a3b8;margin-top:2px" },
       "Lend a tag to a guest: see where they are, when they came and went, and be told when they go somewhere they shouldn't."),
   ]));
@@ -93,8 +96,9 @@ function _draw(ctx, el, content, data) {
   content.innerHTML = "";
   if (!data.enabled) {
     content.appendChild(_card(el, "Guest tags are off", [
-      el("div", { class: "muted", style: "font-size:13px;margin-bottom:10px" }, "Turn them on in Settings → Presence → Guest tags."),
-      el("button", { class: "btn", onclick: () => { ctx.state.view = "settings"; ctx.state._settingsTab = "presence"; ctx.actions.renderRooms(); } }, "Open Settings"),
+      el("div", { class: "muted", style: "font-size:13px;margin-bottom:10px" }, "Turn them on in Settings → Tracking → Guest tags."),
+      // Settings → Tracking; in Basic only the Guest tags card (views/focus.js).
+      el("button", { class: "btn", onclick: () => { ctx.state._presenceReveal = "phones"; FOCUS.openFocus(ctx, FOCUS.part("guestTags")); } }, "Open Settings"),
     ]));
     return;
   }
@@ -147,7 +151,7 @@ function _draw(ctx, el, content, data) {
   // ── Finished stays: their reports ─────────────────────────────────────
   content.appendChild(_card(el, `Past stays (${done.length})`, done.length
     ? done.map(s => _report(ctx, el, s, isAdmin))
-    : [el("div", { class: "muted", style: "font-size:13px" }, `None kept. Finished stays are kept ${data.retention_days ? data.retention_days + " days" : "not at all"} (Settings → Presence → Guest tags).`)]));
+    : [el("div", { class: "muted", style: "font-size:13px" }, `None kept. Finished stays are kept ${data.retention_days ? data.retention_days + " days" : "not at all"} (Settings → Tracking → Guest tags).`)]));
 }
 
 function _runningRow(ctx, el, s, isAdmin) {

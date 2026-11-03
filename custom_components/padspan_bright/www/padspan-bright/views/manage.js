@@ -13,8 +13,8 @@
 //   HA Entities      — Entity reference docs, publishing toggles, live audit,
 //                      automation YAML library, MQTT config
 //   Beacon Chars     — Per-beacon signal profiles from calibration, model grouping
-//   History          — Persisted room-transition log (backend movement_history store)
-//   Events           — Session event log (in-memory), email alert configuration
+//   History          — A way to the History screen's Movement tab (the same log)
+//   Events           — Email/phone alert configuration, a way to History → Movement
 //   Logs             — Live integration log viewer with level filtering
 //   Factory Reset    — Nuclear option: wipes all PadSpan stores + browser caches
 //
@@ -22,6 +22,9 @@
 // Live mode. In Sample mode the buttons render but are disabled, and a
 // warning banner tells the user to switch.
 // ══════════════════════════════════════════════════════════════════════════════
+
+// Basic's links (views/focus.js): which lead out to an expert screen.
+const FOCUS = await import(`./focus.js${new URL(import.meta.url).search}`);
 
 export function render(ctx){
   const { el } = ctx.helpers;
@@ -178,10 +181,10 @@ export function render(ctx){
           el("td",{},bw),
         ]));
       }
-      orphCard.appendChild(el("table",{class:"table"},[
+      orphCard.appendChild(el("div",{class:"table-scroll"},el("table",{class:"table"},[
         el("thead",{},el("tr",{},[el("th",{},"Orphan room"),el("th",{},"Map"),el("th",{},"Points"),el("th",{},"")])),
         tbody,
-      ]));
+      ])));
 
       // Bulk delete: only shown when >1 orphan. Groups orphans by map to
     // minimise API calls — one mapsUpdate per affected map.
@@ -322,10 +325,10 @@ export function render(ctx){
       return b;
     };
     clearAllWrap.appendChild(makeClearAllBtn());
-    tagsCard.appendChild(el("table",{class:"table"},[
+    tagsCard.appendChild(el("div",{class:"table-scroll"},el("table",{class:"table"},[
       el("thead",{},el("tr",{},[el("th",{},"Address"),el("th",{},"Label"),el("th",{},"Last seen"),el("th",{},"")])),
       tbody,
-    ]));
+    ])));
     tagsCard.appendChild(clearAllWrap);
   } else {
     tagsCard.appendChild(el("div",{class:"muted",style:"font-size:12px"},"No BLE devices have been tagged yet."));
@@ -489,7 +492,7 @@ export function render(ctx){
     entCard.appendChild(entSearch);
     entCard.appendChild(entList);
   } else {
-    entCard.appendChild(el("div",{class:"muted",style:"font-size:12px"},"No HA entities found in snapshot. Switch to Live mode to see real entities."));
+    entCard.appendChild(el("div",{class:"muted",style:"font-size:12px"},ctx.state.dataMode === "sample" ? "No HA entities found in snapshot. Switch to Live mode to see real entities." : "No HA entities found in snapshot."));
   }
   root.appendChild(entCard);
 
@@ -538,18 +541,20 @@ export function render(ctx){
         el("td",{},areaBtnWrap),
       ]));
     }
-    areasCard.appendChild(el("table",{class:"table"},[
+    areasCard.appendChild(el("div",{class:"table-scroll"},el("table",{class:"table"},[
       el("thead",{},el("tr",{},[el("th",{},"Name"),el("th",{},"Floor"),el("th",{},"ID"),el("th",{},"")])),
       tbody,
-    ]));
+    ])));
   } else {
     areasCard.appendChild(el("div",{class:"muted",style:"font-size:12px"},"No areas found."));
   }
   root.appendChild(areasCard);
 
   // ── Uploaded Maps ────────────────────────────────────────────────────────────
-  // Permanently deletes floor plan images. Calibration data and room polygons
-  // referencing the map will become orphaned (see Orphan Polygons above).
+  // Permanently deletes floor plans. The room shapes go with the map. Its
+  // calibration points are kept, detached from any map, and still steer
+  // k-NN (ws_maps.py -> calibration_store.async_clear_map: only points
+  // without metres are deleted; delete=True, the per-map Clear, drops all).
   const maps = ctx.state.maps?.list || [];
   if(maps.length){
     const mapsCard = el("div",{class:"card"});
@@ -586,10 +591,10 @@ export function render(ctx){
         el("td",{},mapBtnWrap),
       ]));
     }
-    mapsCard.appendChild(el("table",{class:"table"},[
+    mapsCard.appendChild(el("div",{class:"table-scroll"},el("table",{class:"table"},[
       el("thead",{},el("tr",{},[el("th",{},"Name"),el("th",{},"File"),el("th",{},"")])),
       tbody,
-    ]));
+    ])));
     root.appendChild(mapsCard);
   }
 
@@ -896,7 +901,7 @@ export function render(ctx){
 function _haEntities(ctx, el){
   const wrap = el("div",{style:"display:flex;flex-direction:column;gap:12px"});
   const settings = ctx.state.settings || {};
-  wrap.appendChild(_haEntitiesIntro(el));
+  wrap.appendChild(_haEntitiesIntro(el, ctx.helpers.helpBtn));
   wrap.appendChild(_haEntityControls(ctx, el, settings));
   wrap.appendChild(_haEntityAudit(ctx, el));
   wrap.appendChild(_haEntityLibrary(ctx, el));
@@ -908,10 +913,12 @@ function _haEntities(ctx, el){
 }
 
 /**
- * Aggressive BLE Reseed toggle — for Shelly and passive BLE proxies.
+ * Aggressive BLE Reseed — for Shelly and passive BLE proxies.
  * When enabled, reseeds from HA's discovered-service-info API every 5s
  * instead of 30s. Helps with HA 2026.4+ where habluetooth dedup
  * suppresses repeat callbacks from passive proxies.
+ * The switch itself lives in Settings → Tracking → Receivers, beside the
+ * Bluetooth refresh interval it caps (2026-10-30); this card says where.
  */
 function _haBleReseedSection(ctx, el, settings){
   const card = el("div",{class:"card",style:"border-color:#26c6da"});
@@ -926,17 +933,20 @@ function _haBleReseedSection(ctx, el, settings){
     "This increases the BLE data reseed frequency from every 30 seconds to every 5 seconds, working around a deduplication change in HA 2026.4."
   ));
 
-  const chk = el("input",{type:"checkbox"});
-  chk.checked = settings.aggressive_ble_reseed === true;
-  chk.addEventListener("change", async()=>{
-    try {
-      await ctx.actions.settingsSet({aggressive_ble_reseed: chk.checked});
-      ctx.toast(chk.checked ? "Aggressive BLE reseed enabled (5s cycle)." : "BLE reseed set to normal (30s cycle).");
-      ctx.actions.renderRooms();
-    } catch(e){ ctx.toast("Failed: "+String(e), true); chk.checked = !chk.checked; }
+  const go = el("button",{class:"btn inline","data-goto":"settings-receivers"},"Open Settings");
+  go.addEventListener("click", ()=>{
+    ctx.state.view = "settings";
+    ctx.state._settingsTab = "presence";
+    ctx.state._presenceReveal = "receivers";
+    if (ctx.actions.renderNav) ctx.actions.renderNav();
+    ctx.actions.renderRooms();
   });
-  card.appendChild(el("label",{style:"display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px"},[
-    chk, el("span",{},"Enable aggressive BLE reseed (5s) for passive proxy scanners"),
+  card.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px"},[
+    el("span",{style:"color:#e2e8f0"}, settings.aggressive_ble_reseed === true ? "Aggressive BLE reseed is on." : "Aggressive BLE reseed is off."),
+    el("span",{style:"color:#94a3b8"},"Set it in Settings → Tracking → Receivers (Bluetooth refresh interval)."),
+    // The Bluetooth refresh interval is receiver tuning, Advanced's: Basic
+    // has no Tracking tab to open, so no button (views/focus.js).
+    FOCUS.expertLinks(ctx.state) ? go : null,
   ]));
 
   if(settings.aggressive_ble_reseed){
@@ -949,9 +959,12 @@ function _haBleReseedSection(ctx, el, settings){
 }
 
 /** Static intro card explaining the four entity types PadSpan creates. */
-function _haEntitiesIntro(el){
+function _haEntitiesIntro(el, helpBtn){
   return el("div",{class:"card",style:"border-color:#1b4a2e"},[
-    el("div",{style:"font-weight:800;font-size:15px;color:#5eead4;margin-bottom:6px"},"PadSpan Bright — Entity Reference"),
+    el("div",{style:"display:flex;align-items:center;gap:8px"},[
+      el("div",{style:"font-weight:800;font-size:15px;color:#5eead4;margin-bottom:6px"},"PadSpan Bright — Entity Reference"),
+      helpBtn ? helpBtn("manage_entities") : null,
+    ]),
     el("div",{style:"font-size:13px;color:#94a3b8;line-height:1.6"},
       "PadSpan creates up to four HA entities for every labelled BLE device. This reference documents each entity type, its state values, attributes, and provides ready-to-paste automation examples."
     ),
@@ -974,11 +987,11 @@ function _haEntityControls(ctx, el, settings){
   ));
 
   const types = [
-    {key:"ha_entity_tracker_enabled", label:"device_tracker.padspan_{label}", desc:"Person-linkable tracker (home/room state)"},
-    {key:"ha_entity_area_enabled", label:"sensor.padspan_{label}_area", desc:"Primary room sensor with confidence attributes"},
-    {key:"ha_entity_distance_enabled", label:"sensor.padspan_{label}_distance", desc:"Distance to nearest scanner (metres)"},
-    {key:"ha_entity_scanner_distance_enabled", label:"sensor.padspan_{label}_distance_{scanner}", desc:"Per-scanner distance for hyper-local triggers"},
-    {key:"ha_entity_occupancy_enabled", label:"sensor.padspan_occupancy", desc:"Building occupancy estimate (min/estimate/max) — requires integration reload"},
+    {key:"ha_entity_tracker_enabled", label:"device_tracker.{label}", desc:"Person-linkable tracker (home/room state)"},
+    {key:"ha_entity_area_enabled", label:"sensor.{label}_area", desc:"Primary room sensor with confidence attributes"},
+    {key:"ha_entity_distance_enabled", label:"sensor.{label}_distance", desc:"Distance to nearest scanner (metres)"},
+    {key:"ha_entity_scanner_distance_enabled", label:"sensor.{label}_distance_{scanner}", desc:"Per-scanner distance for hyper-local triggers"},
+    {key:"ha_entity_occupancy_enabled", label:"sensor.padspan_occupancy_occupancy", desc:"Building occupancy estimate (min/estimate/max) — requires integration reload"},
     {key:"subzones_enabled", label:"binary_sensor.padspan_{sub-zone}_occupied", desc:"Sub-zones: a bed, couch or desk drawn with Mapping → Sub-zones; each gets an occupied and a who sensor (off: they go unavailable)"},
   ];
 
@@ -1029,7 +1042,9 @@ function _haEntityAudit(ctx, el){
     body.innerHTML = "";
     if(!res || !res.entities || !res.entities.length){
       body.appendChild(el("div",{class:"muted",style:"font-size:12px;padding:8px 0"},
-        "No PadSpan entities found. Label a BLE device in the Objects tab and switch to Live mode."
+        ctx.state.dataMode === "sample"
+          ? "No PadSpan entities found. Name a BLE device in Devices → By Room and switch to Live mode."
+          : "No PadSpan entities found. Name a BLE device in Devices → By Room."
       ));
       return;
     }
@@ -1194,7 +1209,7 @@ function _haEntityAudit(ctx, el){
 
     if(insights.length){
       const insightWrap = el("div",{style:"margin-top:10px;display:flex;flex-direction:column;gap:6px"});
-      insightWrap.appendChild(el("div",{style:"font-weight:600;font-size:12px;margin-bottom:2px"},"Insights"));
+      insightWrap.appendChild(el("div",{style:"font-weight:600;font-size:12px;margin-bottom:2px"},"Tips"));
       for(const ins of insights){
         insightWrap.appendChild(el("div",{style:`font-size:11px;color:${ins.color};padding:4px 8px;background:#0a150e;border:1px solid #1b3526;border-radius:6px;line-height:1.4`},ins.text));
       }
@@ -1223,7 +1238,7 @@ function _haEntityLibrary(ctx, el){
 
   // ── 1. device_tracker — person-linkable room tracker ────────────────────
   wrap.appendChild(_entityCard(el, {
-    id: "device_tracker.padspan_{label}",
+    id: "device_tracker.{label}",
     badge: "Person-linkable",
     badgeColor: "#8b5cf6",
     state: "Room name when home (e.g. \"kitchen\"), \"not_home\" when away beyond timeout.",
@@ -1237,10 +1252,10 @@ function _haEntityLibrary(ctx, el){
     examples: [
       {
         title: "Link to a Person entity",
-        desc: "Go to HA Settings → People → select person → under \"Track devices\", add device_tracker.padspan_{label}. HA will use PadSpan's room assignment for that person's location.",
+        desc: "Go to HA Settings → People → select person → under \"Track devices\", add device_tracker.{label}. HA will use PadSpan's room assignment for that person's location.",
         yaml: `# No YAML needed — this is configured in the HA UI:
 # Settings → People → [person] → Track devices
-# Add: device_tracker.padspan_alice_phone
+# Add: device_tracker.alice_phone
 #
 # Once linked, person.alice will show the room name
 # reported by PadSpan (e.g. "kitchen", "bedroom").
@@ -1251,7 +1266,7 @@ function _haEntityLibrary(ctx, el){
 
   // ── 2. sensor._area — primary room sensor with confidence attributes ───
   wrap.appendChild(_entityCard(el, {
-    id: "sensor.padspan_{label}_area",
+    id: "sensor.{label}_area",
     badge: "Primary room sensor",
     badgeColor: "#10b981",
     state: "Current room name (e.g. \"living_room\"), \"unknown\" if no room assigned, \"not_home\" when away.",
@@ -1275,11 +1290,11 @@ function _haEntityLibrary(ctx, el){
   - alias: "Kitchen lights on — confidence gated"
     trigger:
       - platform: state
-        entity_id: sensor.padspan_alice_phone_area
+        entity_id: sensor.alice_phone_area
         to: "kitchen"
     condition:
       - condition: numeric_state
-        entity_id: sensor.padspan_alice_phone_area
+        entity_id: sensor.alice_phone_area
         attribute: room_confidence
         above: 0.75
     action:
@@ -1295,7 +1310,9 @@ function _haEntityLibrary(ctx, el){
       - name: "Kitchen occupied"
         state: >-
           {{ states.sensor
-             | selectattr('entity_id', 'search', 'padspan_.*_area')
+             | selectattr('entity_id', 'in', integration_entities('padspan_bright'))
+             | selectattr('entity_id', 'search', '_area$')
+             | rejectattr('entity_id', 'search', '_distance_')
              | map(attribute='state')
              | select('eq', 'kitchen')
              | list | length > 0 }}
@@ -1308,10 +1325,10 @@ function _haEntityLibrary(ctx, el){
   - alias: "Follow-me Sonos"
     trigger:
       - platform: state
-        entity_id: sensor.padspan_alice_phone_area
+        entity_id: sensor.alice_phone_area
     condition:
       - condition: numeric_state
-        entity_id: sensor.padspan_alice_phone_area
+        entity_id: sensor.alice_phone_area
         attribute: room_confidence
         above: 0.8
     action:
@@ -1337,10 +1354,10 @@ function _haEntityLibrary(ctx, el){
   - alias: "Heat occupied rooms only"
     trigger:
       - platform: state
-        entity_id: sensor.padspan_alice_phone_area
+        entity_id: sensor.alice_phone_area
     condition:
       - condition: numeric_state
-        entity_id: sensor.padspan_alice_phone_area
+        entity_id: sensor.alice_phone_area
         attribute: room_confidence
         above: 0.8
     action:
@@ -1364,7 +1381,9 @@ function _haEntityLibrary(ctx, el){
 title: PadSpan Presence
 content: >-
   {% set sensors = states.sensor
-     | selectattr('entity_id', 'search', 'padspan_.*_area')
+     | selectattr('entity_id', 'in', integration_entities('padspan_bright'))
+     | selectattr('entity_id', 'search', '_area$')
+     | rejectattr('entity_id', 'search', '_distance_')
      | list %}
   | Device | Room | Confidence |
   |--------|------|------------|
@@ -1377,7 +1396,7 @@ content: >-
 
   // ── 3. sensor._distance — nearest-scanner proximity in metres ───────────
   wrap.appendChild(_entityCard(el, {
-    id: "sensor.padspan_{label}_distance",
+    id: "sensor.{label}_distance",
     badge: "Proximity metre",
     badgeColor: "#f59e0b",
     state: "Distance in metres to nearest scanner (float, e.g. 2.3). Unavailable when away.",
@@ -1395,7 +1414,7 @@ content: >-
   - alias: "Wake desk PC on approach"
     trigger:
       - platform: numeric_state
-        entity_id: sensor.padspan_alice_phone_distance
+        entity_id: sensor.alice_phone_distance
         below: 1.5
     condition:
       - condition: state
@@ -1415,7 +1434,8 @@ content: >-
         unit_of_measurement: "people"
         state: >-
           {{ states.sensor
-             | selectattr('entity_id', 'search', 'padspan_.*_distance$')
+             | selectattr('entity_id', 'in', integration_entities('padspan_bright'))
+             | selectattr('entity_id', 'search', '_distance$')
              | selectattr('state', 'is_number')
              | map(attribute='state')
              | map('float')
@@ -1427,7 +1447,7 @@ content: >-
 
   // ── 4. sensor._distance_{scanner} — per-scanner micro-zone distance ────
   wrap.appendChild(_entityCard(el, {
-    id: "sensor.padspan_{label}_distance_{scanner}",
+    id: "sensor.{label}_distance_{scanner}",
     badge: "Per-scanner hyper-local",
     badgeColor: "#06b6d4",
     state: "Distance in metres from this specific scanner to the device. Unavailable when not heard.",
@@ -1445,7 +1465,7 @@ content: >-
   - alias: "Bedside lamp on approach"
     trigger:
       - platform: numeric_state
-        entity_id: sensor.padspan_alice_phone_distance_bedroom_proxy
+        entity_id: sensor.alice_phone_distance_bedroom_proxy
         below: 1.2
         for: "00:00:05"
     action:
@@ -1457,7 +1477,7 @@ content: >-
   - alias: "Bedside lamp off on leave"
     trigger:
       - platform: numeric_state
-        entity_id: sensor.padspan_alice_phone_distance_bedroom_proxy
+        entity_id: sensor.alice_phone_distance_bedroom_proxy
         above: 2.0
         for: "00:00:10"
     action:
@@ -1475,13 +1495,13 @@ content: >-
           {% set ns = namespace(best='unknown', dist=999) %}
           {% for s in states.sensor
              | selectattr('entity_id', 'search',
-                 'padspan_alice_phone_distance_')
+                 'alice_phone_distance_')
              | selectattr('state', 'is_number') %}
             {% if s.state | float < ns.dist %}
               {% set ns.dist = s.state | float %}
               {% set ns.best = s.attributes.scanner | default(
                  s.entity_id | replace(
-                   'sensor.padspan_alice_phone_distance_','')) %}
+                   'sensor.alice_phone_distance_','')) %}
             {% endif %}
           {% endfor %}
           {{ ns.best }}`,
@@ -1725,7 +1745,7 @@ function _haEspresenseSection(ctx, el, settings){
     const prefixRow = el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:10px"});
     prefixRow.appendChild(el("span",{style:"font-size:12px;color:#94a3b8;white-space:nowrap"},"Topic prefix:"));
     const prefixInput = el("input",{type:"text",value:settings.espresense_topic_prefix||"espresense",placeholder:"espresense"});
-    prefixInput.style.cssText = "background:#0a150e;border:1px solid #2d5a3d;border-radius:6px;color:#e2e8f0;padding:4px 8px;font-size:12px;width:180px";
+    prefixInput.style.cssText = "background:#0a150e;border:1px solid #2d5a3d;border-radius:6px;color:#e2e8f0;padding:4px 8px;font-size:12px;width:180px;box-sizing:content-box";
     const prefixSave = el("button",{class:"btn inline",style:"font-size:11px;padding:3px 10px"});
     prefixSave.textContent = "Save";
     prefixSave.addEventListener("click", async()=>{
@@ -1759,14 +1779,14 @@ function _haEspresenseSection(ctx, el, settings){
   ]));
   card.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-bottom:8px"},
     "Import floor layouts, room boundaries, and scanner/node positions from ESPresense Companion. " +
-    "Coordinates are in metres — PadSpan imports them directly into its positioning fabric. " +
+    "Coordinates are in metres — PadSpan imports them directly into its room and receiver layout. " +
     "This is a merge — existing PadSpan data is preserved."
   ));
 
   const urlRow = el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap"});
   urlRow.appendChild(el("span",{style:"font-size:12px;color:#94a3b8;white-space:nowrap"}, "Companion URL:"));
   const urlInput = el("input",{type:"text",value:settings.espresense_companion_url||"",placeholder:"http://espresense:8267"});
-  urlInput.style.cssText = "background:#0a150e;border:1px solid #2d5a3d;border-radius:6px;color:#e2e8f0;padding:4px 8px;font-size:12px;width:240px";
+  urlInput.style.cssText = "background:#0a150e;border:1px solid #2d5a3d;border-radius:6px;color:#e2e8f0;padding:4px 8px;font-size:12px;width:240px;box-sizing:content-box";
   const urlSave = el("button",{class:"btn inline",style:"font-size:11px;padding:3px 10px"});
   urlSave.textContent = "Save URL";
   urlSave.addEventListener("click", async()=>{
@@ -1814,138 +1834,40 @@ function _haEspresenseSection(ctx, el, settings){
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// History sub-tab — persisted room-transition timeline
+// History sub-tab — now a way to the History screen
 //
-// Fetches the backend movement_history store (up to 500 entries) and renders
-// them newest-first in a scrollable timeline. Each entry shows timestamp,
-// device label, from-room, and to-room with a colour-coded left border.
-//
-// Friendly names are resolved from three sources (in priority order):
-//   1. Live snapshot objects (BLE devices)
-//   2. Snapshot tags (entity trackers)
-//   3. Stored object labels (padspan_bright.objects store)
+// It drew the backend movement_history store as a timeline, the same entries
+// the History screen's Movement tab draws (which also tells a first sighting
+// from a room change, filters them and jumps to Traceback). Interface review,
+// 2026-10-30: one place for it. The tab id stays so a remembered Manage tab
+// still lands here.
 // ══════════════════════════════════════════════════════════════════════════════
 function _history(ctx, el){
-  const { roomColor } = ctx.helpers;
-  const wrap = el("div",{style:"display:flex;flex-direction:column;gap:12px"});
-
-  // Lazy-load object labels from the backend (once per session).
-  // Triggers a re-render when labels arrive so device names appear.
-  if(!ctx.state._objectLabelsLoaded){
-    ctx.state._objectLabelsLoaded = true;
-    ctx.actions.objectLabelList().then(r => {
-      if(r && r.labels && Object.keys(r.labels).length){
-        ctx.state._objectLabels = r.labels;
-        ctx.actions.renderRooms();
-      }
-    }).catch(()=>{});
-  }
-
-  // Fetch persisted movement history from backend (once per session).
-  // The _manageMovementLoaded flag prevents re-fetching on every render.
-  if(!ctx.state._manageMovementLoaded){
-    ctx.state._manageMovementLoaded = true;
-    ctx.state._manageMovementEntries = [];
-    ctx.actions.wsCall("padspan_bright/movement_history_get", {limit: 500}).then(r => {
-      ctx.state._manageMovementEntries = (r && r.entries) || [];
-      ctx.actions.renderRooms();
-    }).catch(e => {
-      console.error("Movement history load failed:", e);
-    });
-  }
-
-  const entries = ctx.state._manageMovementEntries || [];
-
-  // Build a lookup for friendly names from all available sources
-  const snap = (ctx.state.live && ctx.state.live.snapshot) || null;
-  const _nameMap = {};
-  // From snapshot objects (BLE devices)
-  const _objs = (snap && snap.objects && Array.isArray(snap.objects.list)) ? snap.objects.list : [];
-  for(const o of _objs){
-    const addr = o.address || o.entity_id || "";
-    if(addr && (o.user_label || o.name)) _nameMap[addr] = o.user_label || o.name;
-  }
-  // From snapshot tags (entity trackers)
-  const _tags = (snap && Array.isArray(snap.tags)) ? snap.tags : [];
-  for(const t of _tags){
-    if(t.entity_id && (t.name || t.entity_id)){
-      if(!_nameMap[t.entity_id]) _nameMap[t.entity_id] = t.name || t.entity_id;
-    }
-  }
-  // From stored object labels
-  const _storedLabels = ctx.state._objectLabels || {};
-  for(const [addr, info] of Object.entries(_storedLabels)){
-    if(addr && !_nameMap[addr]){
-      _nameMap[addr] = (typeof info === "string") ? info : (info && info.label) || addr;
-    }
-  }
-
-  // Toolbar
-  const toolbar = el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:8px"});
-  toolbar.appendChild(el("div",{class:"muted",style:"font-size:12px"}, `${entries.length} room transitions (persisted)`));
-  toolbar.appendChild(el("div",{style:"flex:1"}));
-  const refreshBtn = el("button",{class:"btn inline",style:"font-size:11px;padding:2px 8px"}, "Refresh");
-  refreshBtn.addEventListener("click", ()=>{
-    ctx.state._manageMovementLoaded = false;
-    ctx.actions.renderRooms();
-  });
-  toolbar.appendChild(refreshBtn);
-  wrap.appendChild(toolbar);
-
-  if(entries.length === 0){
-    wrap.appendChild(el("div",{class:"card"},[
-      el("div",{class:"muted"},"No movement history recorded yet. Room transitions are automatically saved when tracked devices move between rooms."),
-    ]));
-    return wrap;
-  }
-
-  // Timeline (newest first)
-  const listContainer = el("div",{style:"max-height:500px;overflow-y:auto;display:flex;flex-direction:column;gap:2px"});
-  const sorted = [...entries].reverse();
-  for(const entry of sorted){
-    const ts = entry.ts ? new Date(entry.ts * 1000) : null;
-    let timeStr = "\u2014";
-    let dateStr = "";
-    if(ts){
-      const hh = String(ts.getHours()).padStart(2, "0");
-      const mm = String(ts.getMinutes()).padStart(2, "0");
-      const ss = String(ts.getSeconds()).padStart(2, "0");
-      timeStr = `${hh}:${mm}:${ss}`;
-      const today = new Date();
-      if(ts.toDateString() !== today.toDateString()){
-        dateStr = `${ts.getMonth()+1}/${ts.getDate()} `;
-      }
-    }
-    const _dev = entry.device || "";
-    const label = entry.label || _nameMap[_dev] || _dev || "Unknown";
-    const fromRoom = entry.from || "?";
-    const toRoom = entry.to || "?";
-    const rc = roomColor ? roomColor(toRoom) : "#52b788";
-    const row = el("div",{style:"display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:4px;background:rgba(255,255,255,0.02);border-left:3px solid " + rc});
-    row.appendChild(el("span",{style:"font-family:monospace;font-size:11px;color:#64748b;flex-shrink:0;width:72px"}, dateStr + timeStr));
-    row.appendChild(el("span",{style:"font-size:12px;font-weight:600;color:#e2e8f0;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0"}, label));
-    row.appendChild(el("span",{style:"font-size:11px;color:#94a3b8;flex-shrink:0"}, fromRoom));
-    row.appendChild(el("span",{style:"font-size:11px;color:#5eead4"}, "\u2192"));
-    row.appendChild(el("span",{style:`font-size:11px;color:${rc};font-weight:600`}, toRoom));
-    listContainer.appendChild(row);
-  }
-  wrap.appendChild(listContainer);
-  return wrap;
+  const open = () => {
+    ctx.state._historyTab = "movement";
+    if (ctx.actions.showView) ctx.actions.showView("history");
+    else { ctx.state.view = "history"; ctx.actions.renderRooms(); }
+  };
+  return el("div",{class:"card","data-manage-history":"",style:"display:flex;align-items:center;gap:10px;flex-wrap:wrap"},[
+    el("span",{style:"font-size:13px;color:#cbd5e1"},
+      "The saved room changes (who moved from which room to which, and when) are on the History screen, under Movement."),
+    el("button",{class:"btn inline","data-goto":"history-movement",onclick:open},"Open History"),
+  ]);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Events sub-tab — session event log + email alert configuration
+// Events sub-tab — email alert configuration + a way to History → Movement
 //
-// Two main sections:
 //   1. Email Notifications — saved alerts summary table + per-device editor
 //      with email, service selection, room filter checkboxes, test button
-//   2. Session event log — in-memory followHistory, newest first, clears on
-//      page reload (unlike the History tab which reads persisted data)
+//   2. A line and "Open History": the room changes are on the History
+//      screen's Movement tab. (A "session event log" stood here. It read
+//      ctx.state.followHistory, which nothing has written since Follow moved
+//      onto the server's movement history, so it was always empty.)
 //
 // Also shows system diagnostics JSON if ctx.state.diag is populated.
 // ══════════════════════════════════════════════════════════════════════════════
 function _events(ctx, el){
-  const { roomColor } = ctx.helpers;
   const wrap = el("div",{style:"display:flex;flex-direction:column;gap:12px"});
 
   // ── Email Notifications card ──────────────────────────────────────────────
@@ -1961,55 +1883,16 @@ function _events(ctx, el){
     ]));
   }
 
-  wrap.appendChild(el("div",{class:"muted",style:"font-size:12px"},
-    "Session event log — room transitions for all tracked tags, newest first. Clears on page reload."
-  ));
-
-  // Build a flat, time-sorted event list from per-device followHistory arrays.
-  // Each device's history is an array of {ts, room} entries; we merge them all
-  // and tag the last entry per device as "isCurrent" for a "now" badge.
-  const followHistory = ctx.state.followHistory || {};
-  const snap = (ctx.state.live && ctx.state.live.snapshot) || null;
-  const allObjects = (snap && snap.objects && Array.isArray(snap.objects.list)) ? snap.objects.list : [];
-  const events = [];
-  for(const [addr,history] of Object.entries(followHistory)){
-    if(!history||!history.length) continue;
-    const obj = allObjects.find(o=>(o.address||o.entity_id||"")===addr);
-    const label = (obj&&(obj.user_label||obj.name||obj.entity_id))||addr;
-    for(let i=history.length-1;i>=0;i--){
-      events.push({ts:history[i].ts,room:history[i].room,label,isCurrent:i===history.length-1});
-    }
-  }
-  events.sort((a,b)=>b.ts-a.ts);
-
-  if(!events.length){
-    wrap.appendChild(el("div",{class:"card"},[
-      el("div",{class:"muted"},"No events recorded yet. Track tags in the Follow tab to generate movement events."),
-    ]));
-  } else {
-    const card = el("div",{class:"card"});
-    card.appendChild(el("div",{class:"row",style:"margin-bottom:8px"},[
-      el("div",{style:"font-weight:700"},"Room Transitions"),
-      el("span",{class:"badge",style:"margin-left:8px"},`${events.length} events`),
-    ]));
-    const list = el("div",{style:"display:flex;flex-direction:column;gap:4px;max-height:400px;overflow-y:auto"});
-    for(const ev of events){
-      const timeStr = new Date(ev.ts).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
-      const rc = roomColor(ev.room||"");
-      const row = el("div",{style:"display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;background:#0a150e;border:1px solid #1b3526"},[
-        el("span",{style:"color:#94a3b8;font-size:11px;font-family:monospace;white-space:nowrap"},timeStr),
-        el("span",{class:"dot",style:`background:${rc};flex-shrink:0`}),
-        el("span",{style:"flex:1;font-size:12px"},[
-          el("span",{style:"color:#94a3b8"},ev.label+" → "),
-          el("span",{style:"font-weight:600"},ev.room||"(unknown)"),
-        ]),
-        ev.isCurrent ? el("span",{class:"badge"},"now") : null,
-      ].filter(Boolean));
-      list.appendChild(row);
-    }
-    card.appendChild(list);
-    wrap.appendChild(card);
-  }
+  const openHistory = () => {
+    ctx.state._historyTab = "movement";
+    if (ctx.actions.showView) ctx.actions.showView("history");
+    else { ctx.state.view = "history"; ctx.actions.renderRooms(); }
+  };
+  wrap.appendChild(el("div",{class:"card","data-manage-events-history":"",style:"display:flex;align-items:center;gap:10px;flex-wrap:wrap"},[
+    el("span",{style:"font-size:13px;color:#cbd5e1"},
+      "The room changes of your devices (who moved from which room to which, and when) are on the History screen, under Movement."),
+    el("button",{class:"btn inline","data-goto":"history-movement",onclick:openHistory},"Open History"),
+  ]));
 
   const diag = ctx.state.diag;
   if(diag && Object.keys(diag).length){
@@ -2108,6 +1991,7 @@ function _buildNotifications(ctx, el){
   const activeCount = savedEntries.filter(([,c]) => c.on_room_change).length;
   savedCard.appendChild(el("div",{class:"row",style:"margin-bottom:6px"},[
     el("div",{style:"font-weight:700;font-size:14px"},"Saved Alerts"),
+    ctx.helpers.helpBtn ? ctx.helpers.helpBtn("manage_events") : null,
     activeCount > 0
       ? el("span",{class:"badge",style:"margin-left:8px;border-color:#52b788;color:#52b788"},`${activeCount} active`)
       : el("span",{class:"badge",style:"margin-left:8px;border-color:#64748b;color:#64748b"},"none active"),
@@ -2118,7 +2002,7 @@ function _buildNotifications(ctx, el){
 
   if(!savedEntries.length){
     savedCard.appendChild(el("div",{class:"muted",style:"font-size:12px;padding:8px 0"},
-      "No alerts configured yet. Tag a device in Objects, then set up alerts below or in the Follow tab."
+      "No alerts configured yet. Tag a device on the Devices screen, then set up alerts below or in the Follow tab."
     ));
   } else {
     const thead = el("thead",{},el("tr",{},[
@@ -2183,13 +2067,12 @@ function _buildNotifications(ctx, el){
   if(!ctx.state._notifyServices) ctx.state._notifyServices = [];
   ctx.actions.wsCall("padspan_bright/notify_services_list", {}).then(r => {
     ctx.state._notifyServices = (r && r.services) || [];
-    ctx.state._notifySvcDebug = r ? JSON.stringify(r) : "null response";
     // Re-render if list changed (new service added, or still empty on first load)
     if(JSON.stringify(ctx.state._notifyServices) !== _prevServices){
       ctx.actions.renderRooms();
     }
   }).catch(e => {
-    ctx.state._notifySvcDebug = "WS error: " + (e?.message || String(e));
+    console.warn("PadSpan: notify services list failed", e);
   });
 
   const editCard = el("div",{class:"card"});
@@ -2212,7 +2095,6 @@ function _buildNotifications(ctx, el){
     ctx.actions.renderRooms();
   });
   if(_svcList.length === 0){
-    const _dbg = ctx.state._notifySvcDebug || "loading…";
     editCard.appendChild(el("div",{style:"background:#1a0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:12px 14px;margin-bottom:12px"},[
       el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:4px"},[
         el("div",{style:"font-weight:700;font-size:13px;color:#fca5a5"},"No notification services found"),
@@ -2227,7 +2109,6 @@ function _buildNotifications(ctx, el){
         "3. Configure it with your email/credentials\n" +
         "4. Restart HA, then click Refresh Services above"
       ),
-      el("div",{style:"font-size:10px;color:#64748b;margin-top:8px;font-family:monospace;word-break:break-all"}, "Debug: " + _dbg + " | UI: v" + (ctx.state.version||"?") + " | Backend: v" + (ctx.state.versionInfo?.version||"?") + " | Mode: " + (ctx.state.dataMode||"?")),
     ]));
   } else {
     editCard.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"},[
@@ -2239,7 +2120,7 @@ function _buildNotifications(ctx, el){
 
   if(!trackable.length){
     editCard.appendChild(el("div",{class:"muted",style:"font-size:12px;padding:8px 0"},
-      "No tracked devices found. Tag BLE devices in Objects or add device trackers to set up notifications."
+      "No tracked devices found. Tag BLE devices on the Devices screen or add device trackers to set up notifications."
     ));
     wrap.appendChild(editCard);
     return wrap;
@@ -2445,6 +2326,7 @@ function _logs(ctx, el) {
     el("span", { style: "font-weight:600;font-size:13px" }, "Min level:"),
     levelSel,
     refreshBtn,
+    ctx.helpers.helpBtn ? ctx.helpers.helpBtn("manage_logs") : null,
   ]);
   wrap.appendChild(toolbar);
 
@@ -2519,8 +2401,10 @@ function _beaconChars(ctx, el){
   const settings = ctx.state.settings || {};
 
   // Header
-  wrap.appendChild(el("div",{style:"font-weight:700;font-size:16px;color:#e2e8f0;margin-bottom:8px"},
-    "Beacon Signal Profiles"));
+  wrap.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px"},[
+    el("div",{style:"font-weight:700;font-size:16px;color:#e2e8f0;margin-bottom:8px"}, "Beacon Signal Profiles"),
+    ctx.helpers.helpBtn ? ctx.helpers.helpBtn("manage_beacon_chars") : null,
+  ]));
   wrap.appendChild(el("div",{style:"font-size:12px;color:#94a3b8;margin-bottom:12px;line-height:1.5"},
     "Per-beacon signal characteristics computed from calibration data, grouped by model "
     + "(iBeacon UUID prefix, manufacturer, BLE name). A report: it shows how each beacon reads, "
@@ -2756,7 +2640,7 @@ function _beaconChars(ctx, el){
       sHead.appendChild(el("th",{style:"padding:3px 5px"},"Beacon"));
       for (const src of allScanners) {
         sHead.appendChild(el("th",{style:"padding:3px 5px;max-width:80px;overflow:hidden;text-overflow:ellipsis",title:src},
-          scanner_names[src] || src.substring(0,12)));
+          ctx.helpers.radioName(src) || scanner_names[src] || src.substring(0,12)));
       }
       st.appendChild(sHead);
 

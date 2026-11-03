@@ -212,7 +212,10 @@ def test_one_overview_card_per_page_load_and_basic_mode_reaches_the_sign_up():
     slot = src[src.index("const _ms = this._proInviteOverviewCard()"):][:200]
     assert slot.index("_proInviteOverviewCard") < slot.index("_testerOverviewCard") < slot.index("_trialMilestoneCard")
     sign = src[src.index("_openTesterSignup(){"):][:600]
-    assert 'this.state.complexity = "advanced"' in sign, "Basic mode has no Presence tab"
+    # Basic reaches it without a mode switch: in Basic just the report's card
+    # (views/focus.js), in Advanced Settings -> Tracking.
+    assert 'F.openFocus(this._ctx(), F.part("usageReport"))' in sign
+    assert "complexity" not in sign[:sign.index("\n  }\n")]
 
 
 def test_the_commands_are_registered_and_admin_only():

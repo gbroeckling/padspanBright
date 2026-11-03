@@ -64,7 +64,7 @@ export function beaconsOf(snapshot){
     const id = o.key || o.address || "";
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    out.push({ id, label: o.user_label || o.private_ble_name || o.name || id });
+    out.push({ id, label: o.best_name || o.user_label || o.private_ble_name || o.name || id });
   }
   return out.sort((a, b) => a.label.localeCompare(b.label));
 }
@@ -85,7 +85,7 @@ export function thingsOf(snapshot){
     seen.add(id);
     const room = typeof o.room === "string" && o.room ? o.room : "", heard = TR.seenText(o.age_s);
     const where = o._stale ? "Not heard now" : [room ? `In ${room}` : "", heard].filter(Boolean).join(" · ");
-    out.push({ id, label: String(o.user_label || o.private_ble_name || o.name || id), where: where || (o.kind === "entity" ? "A Home Assistant tracker" : "") });
+    out.push({ id, label: String(o.best_name || o.user_label || o.private_ble_name || o.name || id), where: where || (o.kind === "entity" ? "A Home Assistant tracker" : "") });
   }
   return out.sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
 }
@@ -164,7 +164,8 @@ export function peopleMachine({ F, callWS, hass, draft = null, settings = null }
       const data = draft || (got && got.data ? got.data : {});
       m.file = { figures: { ...(data.figures || {}) }, devices: { ...(data.devices || {}) } };
       if (got && got.error) m.warn = got.error;
-      else if (got && got.writable === false) m.warn = "A newer PadSpan saved Live Aboard's file: changes here can't be saved until PadSpan is updated.";
+      else if (got && got.writable === false) m.warn = got.sample ? "This is the sample house; switch to Live to edit your own."
+        : "A newer PadSpan saved Live Aboard's file: changes here can't be saved until PadSpan is updated.";
       m.info = info;
       m.loading = false;
       return m;
@@ -247,10 +248,10 @@ export function peopleMachine({ F, callWS, hass, draft = null, settings = null }
       try { out = await callWS({ type: CMD, target, photo }); }
       catch (e) { out = { ok: false, message: errText(e) }; }
       if (out && out.ok && back === "figphoto" && out.figure) {
-        m.edit = { ...m.edit, params: clampFigureParams(F, out.figure.params), origin: "photo" };
+        m.edit = { ...m.edit, params: clampFigureParams(F, out.figure.params), origin: "photo", byBackup: !!out.by_backup };
         m.step = "figure";
       } else if (out && out.ok && back === "lookphoto" && out.recipe) {
-        m.edit = { ...m.edit, recipe: F.clampRecipe({ ...out.recipe, details: out.details || undefined }) };
+        m.edit = { ...m.edit, recipe: F.clampRecipe({ ...out.recipe, details: out.details || undefined }), byBackup: !!out.by_backup };
         m.step = "look";
       } else {
         m.error = (out && out.message) || "Couldn't read it. Use the sliders instead.";
@@ -499,7 +500,7 @@ export async function peopleFlow(ctx){
       const out = [el("h3", {}, "People, beacons and scanners"),
         el("p", { class: "muted" }, `${LIKENESS} People's figures stay in this house: they are never shared.`)];
       if (ctx.settings && ctx.settings.atlas_3d_people === false) {
-        out.push(el("p", { class: "note" }, "Figures show in Live Aboard when Show people is on (Settings → UI Structure → Atlas → Live Aboard)."));
+        out.push(el("p", { class: "note" }, "Figures show in Live Aboard when Show people is on (Live Aboard: Views ▾ → Show people)."));
       }
       if (m.warn) out.push(el("p", { class: "warn" }, m.warn));
       out.push(el("h3", {}, "People"));
@@ -553,7 +554,7 @@ export async function peopleFlow(ctx){
       show();
       return [
         el("h3", {}, `${e.name}'s figure`),
-        el("p", { class: "muted" }, e.origin === "photo" ? `Read from the photo; adjust anything. ${LIKENESS}` : LIKENESS),
+        el("p", { class: "muted" }, e.origin === "photo" ? `Read from the photo${e.byBackup ? " (by the backup AI task)" : ""}; adjust anything. ${LIKENESS}` : LIKENESS),
         el("div", { class: "edit" }, grid, preview.el),
         el("div", { class: "row" },
           el("button", { class: "go", onclick: () => { m.keepFigure(); closePreview(); draw(); } }, "Keep"),
@@ -578,7 +579,7 @@ export async function peopleFlow(ctx){
         out.push(el("label", { class: "warn" }, tick, `${e.name}, the person in the photo, agrees to it being read by the AI Task.`),
           el("p", { class: "muted" }, CHILD_TIP + " ", el("button", { onclick: () => { m.editFigure(e.id, e.name); draw(); } }, "Use the sliders")));
       }
-      out.push(el("p", { class: "note" }, aiNote(m.info) + (forPerson && m.info.local !== true ? ` ${LOCAL_TIP}` : "")));
+      out.push(el("p", { class: "note" }, aiNote(m.info) + (forPerson && PH.mayLeave(m.info) ? ` ${LOCAL_TIP}` : "")));
       out.push(photoButtons(async (file) => {
         try { const p = await shrinkPhoto(file); m.setPhoto(p.b64); shot = p.url; m.error = null; }
         catch (err) { m.setPhoto(null); shot = null; m.error = errText(err); }
@@ -639,6 +640,7 @@ export async function peopleFlow(ctx){
       show();
       return [
         el("h3", {}, `How ${e.name} looks`),
+        e.byBackup ? el("p", { class: "muted" }, PH.BACKUP_NOTE) : null,
         el("div", { class: "edit" }, grid, preview.el),
         el("div", { class: "row" },
           el("button", { class: "go", onclick: () => { m.keepLook(); closePreview(); draw(); } }, "Keep"),

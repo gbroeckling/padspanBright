@@ -5,7 +5,9 @@
 
 // Shared stack transform (P2-5); query inherited from our own module URL so
 // the ?b= cache-buster propagates (see docs/06_UI_CACHE_BUSTING.md).
-const { BUY_URL: _LIC_BUY_URL, PRO_PRICE: _LIC_PRICE, LICENCE_PATH: _LIC_PATH, tierAtLeast: _tierAtLeast } =
+const { deviceName } = await import(`./device_name.js${new URL(import.meta.url).search}`);
+const { BUY_URL: _LIC_BUY_URL, PRO_PRICE: _LIC_PRICE, LICENCE_PATH: _LIC_PATH, tierAtLeast: _tierAtLeast,
+        surfacesForEdition: _surfacesForEdition } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
 // Shared pan/zoom viewport (gap #11, best-in-class roadmap) — extracted
 // from this file's own former _attachPanZoom, see pan_zoom.js's header.
@@ -14,12 +16,13 @@ const { attachPanZoom } =
 const { makeStackXform, mapXform, imageAr, fabricWorldRooms, mapFracToMetres,
         metresToMapFrac, placementFromColumns, placementStageAffine, worldGauge,
         nearestPointOnPolyline, splitPolylineAtTwoPositions,
-        circlePolylineIntersections, bestCircleWall, roomEdgeForCircle } =
+        circlePolylineIntersections, bestCircleWall, roomEdgeForCircle,
+        closedOutline, stretchAt, roomStretches, openGaps, wallsAlong, cutWallAlong, runsAlongOutline } =
   await import(`./stack_transform.js${new URL(import.meta.url).search}`);
 // THE fabric frame — the Lights tab inverts drags through the exact function
 // the renderer draws with, so the two cannot disagree.
 const { fabricFrame, markerScale, markerRadiusPx, cmFromHandlePx, MAX_FIXTURE_CM,
-        floorIdAtLevel, sceneColours, defaultPerimeterMarginM, shapeSvg, pointInPolygon } =
+        floorIdAtLevel, floorNameAtLevel, sceneColours, defaultPerimeterMarginM, shapeSvg, pointInPolygon } =
   await import(`./iso_lights.js${new URL(import.meta.url).search}`);
 // THE shared Lights view (data pipeline, map card, index table) — used
 // verbatim by the Lights sidebar panel, so the two tools always show the
@@ -29,7 +32,7 @@ const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable
         wireUseSurface, openControlCard, controlApiFor, openBarrierCard, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates, doorInvertOf,
         isOutdoorFloorId, wireHoverHud, pressRing, HOLD_MS, PRESS_RING_MS,
         captureWholeHouse, applyWholeHouse, layoutTierFor, ensureExactDevices, isExactEntity,
-        vacationOptionsOf, vacationEndsText } =
+        vacationOptionsOf, vacationEndsText, la3dCannotHere, la3dPlansList } =
   await import(`./lights_map.js${new URL(import.meta.url).search}`);
 // Fixture-shape vocabulary + derivation (the tab owns the manual override UI).
 const { LIGHT_SHAPES, deriveLightShape, isControllable, deviceClassOf, hasControlCard, hasFixedGlyph, isDoorSensor } =
@@ -51,6 +54,8 @@ const { whatIfDelta } =
 const { planHouse, buildHouse } = await import(`./wizard_build.js${new URL(import.meta.url).search}`)
   .catch(() => ({ planHouse: null, buildHouse: null }));
 const TSP = await import(`./tune_save_plan.js${new URL(import.meta.url).search}`).catch(() => null);
+// Basic's focused views (views/focus.js): a link opens one tool or one card.
+const FOCUS = await import(`./focus.js${new URL(import.meta.url).search}`);
 if (TSP) TSP.tuneSavePlanInit({ mapFracToMetres, metresToMapFrac });
 const VACUUM = await import(`./vacuum_import.js${new URL(import.meta.url).search}`)
   .catch(err => { console.warn("PadSpan: vacuum_import failed to load", err); return null; });
@@ -97,8 +102,25 @@ export function render(ctx){
   root.className = ctx.state.view==="maps" ? "" : "hidden";
 
   const maps = (ctx.state.maps && ctx.state.maps.list) ? ctx.state.maps.list : [];
+  // The Rooms page's "Edit outline" (rooms.js sets _openRoom): open the plan
+  // the room is traced on, when one is; else the one it picked by floor.
+  const _openRoom = ctx.state.maps && ctx.state.maps._openRoom;
+  if (_openRoom) {
+    const tracedOn = maps.find(m => m.room_bounds && m.room_bounds[_openRoom]);
+    if (tracedOn) ctx.state.activeMapId = tracedOn.id;
+  }
   const activeId = ctx.state.activeMapId || (maps[0] && maps[0].id) || null;
   const active = maps.find(m=>m.id===activeId) || null;
+
+  // Basic, from a link (views/focus.js): just the part it is about, the
+  // editor with one tool or the Floor Heights card, under a "← Back" bar.
+  // No Mapping header or tab bar, so nothing leads into the rest of it.
+  const focus = FOCUS.focusFor(ctx.state, "maps");
+  if (focus) {
+    root.appendChild(FOCUS.focusBar(ctx, focus));
+    root.appendChild(_focused(ctx, focus, active, maps));
+    return root;
+  }
 
   // Setup Wizard — a guided walkthrough that takes over the whole Mapping
   // surface while active (see _wizard below). Short-circuits before the
@@ -120,7 +142,7 @@ export function render(ctx){
   // without a key, which left PadSpan Bright's free program with no map at all.
   const tabDefs = isBasic
     ? [["library","Library"],["upload","Upload"]]
-    : [["library","Library"],["upload","Upload"],["edit","Edit"],["stack","3D Stack"],["rooms","Rooms"],["lights","Atlas"],["export","Export"],["help","Help"]];
+    : [["library","Library"],["upload","Upload"],["edit","Edit"],["stack","3D Stack"],["rooms","Layout"],["lights","Atlas"],["export","Export"],["help","Help"]];
 
   // Live Aboard's Furnish (P2), after Atlas: only while Live Aboard shows (the
   // switch on, at Pro or Bright Pro). Otherwise there is no such tab, the way
@@ -129,7 +151,8 @@ export function render(ctx){
   if (furnishTab) tabDefs.splice(tabDefs.findIndex(([id]) => id === "lights") + 1, 0, ["furnish", "Furnish"]);
   else if (tab === "furnish") ctx.state.mapsTab = "lights";
 
-  // If current tab is not in basic tab list, reset to library
+  // If current tab is not in basic tab list, reset to library (a link's
+  // part of another tab is the focus above)
   if(isBasic && tab !== "library" && tab !== "upload"){
     ctx.state.mapsTab = "library";
   }
@@ -140,8 +163,13 @@ export function render(ctx){
     if(ctx.state.mapsTab === "upload") ctx.state.mapsTab = "library";
   }
   const activeTab = ctx.state.mapsTab || "library";
+  // "Edit outline" is for the Edit tab only: anywhere else it is dropped.
+  if (activeTab !== "edit" && ctx.state.maps) ctx.state.maps._openRoom = null;
 
   const tabs = el("div",{class:"tabs"}, tabDefs.map(([id,label])=>_tabBtn(id,label,activeTab,setTab)));
+  const _setupShown = !!(_surfacesForEdition(["setup"], ctx.state.settings).length && ctx.actions.showView);
+  // The Library's empty state (_library): its Start Setup Wizard is Setup's first step.
+  const _noPlansYet = activeTab === "library" && !maps.length && ctx.state.dataMode === "live";
 
   // The text takes what is left and wraps by word; Refresh keeps its width
   // (on a phone it squeezed to one letter per line).
@@ -158,6 +186,12 @@ export function render(ctx){
       ]),
       el("div",{style:"display:flex;gap:8px;align-items:center;flex:none"},[
         el("button",{class:"btn inline", style:"white-space:nowrap", onclick:()=>ctx.actions.mapsRefresh()}, "Refresh"),
+        // The guided Setup (views/setup.js), where this build shows it; not
+        // over the Library's "No floor plans yet", whose button opens it.
+        ...(_setupShown && !_noPlansYet
+          ? [el("button",{class:"btn inline", style:"white-space:nowrap", "data-setup-link":"maps",
+              title:"Plan, scale, floors, rooms, receivers and calibration, one step at a time",
+              onclick:()=>ctx.actions.showView("setup")}, "Setup")] : []),
       ])
     ]),
     tabs,
@@ -181,6 +215,16 @@ export function render(ctx){
   return root;
 }
 
+// A focused part (views/focus.js), in Basic: Edit with the one tool the link
+// is about (rooms: that room's outline; receivers: that receiver's place and
+// height), or 3D Stack's Floor Heights card on its own.
+function _focused(ctx, f, active, maps){
+  const { el } = ctx.helpers;
+  if (f.tab === "edit") return _edit(ctx, active, maps, { tools: [f.part], focused: true });
+  if (f.part === "floor_heights") return el("div",{class:"card","data-focus-part":"floor_heights"},[_floorHeights(ctx)]);
+  return el("div",{class:"card muted","data-focus-missing":f.part},"This isn't available on this install.");
+}
+
 // ── Tab Button Helper ─────────────────────────────────────────────────────────
 function _tabBtn(id,label,active,setTab){
   const b = document.createElement("button");
@@ -195,6 +239,12 @@ function _tabBtn(id,label,active,setTab){
 const OUTSIDE_FLOOR_ID = "__outside__";
 const WALLS_GUIDE_URL = "https://github.com/gbroeckling/padspanHA/blob/main/docs/WALLS_GUIDE.md";
 function _isOutsideMap(m) { return (m.floor_id || "") === OUTSIDE_FLOOR_ID; }
+
+// An HA floor may be called Outside too: two headings or buttons mustn't read
+// the same. Pass only the floors that get one on this screen.
+function _outsideLabel(floors) {
+  return floors.some(f => String(f.name || "").trim().toLowerCase() === "outside") ? "Outside (Exp.)" : "Outside";
+}
 
 // Resolve a floor_id to a human-readable name from the HA floor registry.
 function _floorName(ctx, floor_id){
@@ -234,9 +284,16 @@ function _compareAllMaps(ctx, maps, resultDiv) {
     return xf ? xf.mapPt(cx, cy) : null;
   };
 
-  // Build {roomName: [{map, wx, wy}]} for all visible maps
+  // Build {roomName: [{map, wx, wy}]} for all visible maps. A plan with no
+  // placement is skipped and named under the result: destructuring its null
+  // centroid threw, and Compare Maps showed nothing at all.
   const roomEntries = {};
+  const notPlaced = [];
   for (const m of visMaps) {
+    if (!mapXform(ctx.state.model, m)) {
+      if (Object.keys(m.room_bounds || {}).length) notPlaced.push(m.name || m.id);
+      continue;
+    }
     for (const [rname, b] of Object.entries(m.room_bounds || {})) {
       let cx = 0.5, cy = 0.5;
       if (b.type === "circle") {
@@ -245,7 +302,9 @@ function _compareAllMaps(ctx, maps, resultDiv) {
         cx = b.points.reduce((s, p) => s + p[0], 0) / b.points.length;
         cy = b.points.reduce((s, p) => s + p[1], 0) / b.points.length;
       }
-      const [wx, wy] = _worldCentroid(m, cx, cy);
+      const w = _worldCentroid(m, cx, cy);
+      if (!w) continue;
+      const [wx, wy] = w;
       if (!roomEntries[rname]) roomEntries[rname] = [];
       roomEntries[rname].push({ map: m, wx, wy, cx, cy });
     }
@@ -261,7 +320,7 @@ function _compareAllMaps(ctx, maps, resultDiv) {
         const a = entries[i], b = entries[j];
         const dx = a.wx - b.wx, dy = a.wy - b.wy;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        const pct = Math.round(dist * 1000) / 10; // % of normalised space
+        const pct = Math.round(dist * 1000) / 10; // % of one world unit: the rating
         pairs.push({ room: rname, mapA: a.map.name || a.map.id, mapB: b.map.name || b.map.id, dist, pct });
         if (dist > worstErr) {
           worstErr = dist;
@@ -272,21 +331,33 @@ function _compareAllMaps(ctx, maps, resultDiv) {
     }
   }
 
+  const notPlacedNote = () => notPlaced.length
+    ? el("div",{"data-compare-not-placed":"",style:"padding:4px 10px;font-size:11px;color:#f59e0b"},
+        "Not placed yet, so not compared: " + notPlaced.join(", ") + ".")
+    : null;
+
   if (!pairs.length) {
     resultDiv.appendChild(el("div",{style:"padding:10px;font-size:12px;color:#94a3b8"},
       "No shared rooms found between visible maps. Room names must match exactly."));
+    const n = notPlacedNote();
+    if (n) resultDiv.appendChild(n);
     return;
   }
 
   // Sort worst-first
   pairs.sort((a, b) => b.dist - a.dist);
   const avgErr = pairs.reduce((s, p) => s + p.dist, 0) / pairs.length;
-  const avgPct = Math.round(avgErr * 1000) / 10;
   const worstPct = Math.round(worstErr * 1000) / 10;
 
   // Rating
   const _rating = (pct) => pct < 2 ? ["Excellent", "#52b788"] : pct < 5 ? ["Good", "#7dd3fc"] : pct < 10 ? ["Fair", "#f59e0b"] : ["Poor", "#f87171"];
   const [overallLabel, overallColor] = _rating(worstPct);
+  // The distances are in world units (metres over the house's gauge), so they
+  // read "%" of nothing anyone could see: shown in metres. The rating is as it
+  // was, a share of one world unit, and its limits are shown in metres too.
+  // (Every pair went through mapXform, which needs the gauge.)
+  const mPerUnit = (worldGauge(ctx.state.model) || {}).m_per_unit || 0;
+  const _m = (worldDist) => (worldDist * mPerUnit).toFixed(2) + " m";
 
   // Build result card
   const card = el("div",{style:"margin-top:10px;padding:12px;border-radius:8px;background:#071210;border:1px solid " + overallColor + "44"});
@@ -295,18 +366,20 @@ function _compareAllMaps(ctx, maps, resultDiv) {
   const headline = el("div",{style:"display:flex;align-items:center;gap:10px;flex-wrap:wrap"});
   headline.appendChild(el("span",{style:"font-size:14px;font-weight:700;color:" + overallColor}, overallLabel));
   headline.appendChild(el("span",{style:"font-size:12px;color:#94a3b8"},
-    "Worst error: " + worstPct + "% (" + worstRoom + ")"));
+    "Worst error: " + _m(worstErr) + " (" + worstRoom + ")"));
   headline.appendChild(el("span",{style:"font-size:11px;color:#64748b"},
-    "Avg: " + avgPct + "% across " + pairs.length + " room pair(s)"));
+    "Avg: " + _m(avgErr) + " across " + pairs.length + " room pair(s)"));
   card.appendChild(headline);
+  card.appendChild(el("div",{"data-compare-limits":"",style:"font-size:11px;color:#64748b;margin-top:2px"},
+    "For this house: Excellent under " + _m(0.02) + ", Good under " + _m(0.05) + ", Fair under " + _m(0.10) + "."));
 
   // Detail table
   const table = el("div",{style:"margin-top:8px;font-size:11px;font-family:monospace"});
   for (const p of pairs.slice(0, 20)) {
     const [lbl, col] = _rating(p.pct);
-    const row = el("div",{style:"display:flex;gap:8px;padding:2px 0;border-bottom:1px solid #1a2a1a"});
-    row.appendChild(el("span",{style:"width:100px;color:" + col + ";font-weight:600"}, p.pct.toFixed(1) + "%"));
-    row.appendChild(el("span",{style:"flex:1;color:#e2e8f0"}, p.room));
+    const row = el("div",{style:"display:flex;flex-wrap:wrap;gap:0 8px;padding:2px 0;border-bottom:1px solid #1a2a1a"});
+    row.appendChild(el("span",{style:"width:100px;color:" + col + ";font-weight:600"}, _m(p.dist)));
+    row.appendChild(el("span",{style:"flex:1 1 120px;color:#e2e8f0"}, p.room));
     row.appendChild(el("span",{style:"color:#64748b"}, p.mapA + " vs " + p.mapB));
     table.appendChild(row);
   }
@@ -314,6 +387,7 @@ function _compareAllMaps(ctx, maps, resultDiv) {
     table.appendChild(el("div",{style:"color:#64748b;padding:4px 0"}, "...and " + (pairs.length - 20) + " more"));
   }
   card.appendChild(table);
+  { const n = notPlacedNote(); if (n) card.appendChild(n); }
 
   // Tip
   if (worstPct > 5) {
@@ -335,16 +409,18 @@ function _compareAllMaps(ctx, maps, resultDiv) {
 // buttons. Each row shows receiver count, dimensions, floor, whether a
 // coverage gap was detected, and its placed size (or "not placed"). Includes
 // the undo-migration banner.
-// Opening a floor plan to edit it lives in Advanced mode: Basic has only
-// Library and Upload, and render() puts any other tab straight back to
-// Library. So in Basic, Open did nothing at all, with no sign why (Jay,
-// 2026-10-04, placing a BLE proxy he had missed). It switches to Advanced,
-// says so, and opens the plan.
+// Basic has only Library and Upload in its tab bar, and render() puts any
+// other tab straight back to Library. So in Basic, Open did nothing at all,
+// with no sign why (Jay, 2026-10-04, placing a BLE proxy he had missed). In
+// Basic it opens the plan in the Setup Wizard at its scale step: Basic's own
+// way through a plan (scale, rooms, scanners), each step with only its tool.
+// Advanced and Development open Edit.
 function _openForEdit(ctx, mapId){
   ctx.actions.mapsSetActive(mapId);
   if (ctx.state.complexity === "basic") {
-    ctx.actions.setComplexity("advanced");
-    ctx.toast("Editing a floor plan is in Advanced mode, so PadSpan switched to Advanced. The Basic / Advanced button at the top switches back.");
+    ctx.state._mapsWizard = { step: 2, mapId };
+    ctx.actions.renderRooms();
+    return;
   }
   ctx.actions.setMapsTab("edit");
 }
@@ -370,9 +446,18 @@ function _library(ctx, maps, activeId, helpBtn, isBasic){
     _compareResultDiv,
   ]);
 
-  // Sample mode: always show the demo floor plan regardless of real map count
+  // Sample mode: the sample house's measured floor plans (sample_house.js),
+  // read-only (panel.js refuses every save); the small demo house's drawing
+  // when that house could not load.
   if(ctx.state.dataMode !== "live"){
-    return _sampleDemo(ctx);
+    // "sample" before any settings answer is only the default (#88).
+    if(!ctx.state._dataModeKnown){
+      wrap.appendChild(el("div",{class:"muted",style:"margin-top:8px;font-size:12px"}, "Connecting to Home Assistant…"));
+      return wrap;
+    }
+    if(!maps.some(m => /^estate_/.test(String(m.id || "")))) return _sampleDemo(ctx);
+    wrap.appendChild(el("div",{class:"muted","data-maps-note":"sample",style:"margin-top:8px;font-size:12px"},
+      "Sample mode: these are the sample house's floor plans, shown read-only. Switch to Live mode to see and edit yours."));
   }
 
   if(!maps.length){
@@ -381,7 +466,15 @@ function _library(ctx, maps, activeId, helpBtn, isBasic){
     empty.appendChild(el("div",{class:"muted", style:"margin-bottom:14px;font-size:13px"},
       "The setup wizard walks you through uploading a floor plan, setting its scale, drawing rooms, and placing scanners, one step at a time."));
     const startBtn = el("button",{class:"btn primary", style:"font-size:13px;padding:8px 18px"}, "Start Setup Wizard");
+    startBtn.setAttribute("data-maps-start", "setup");
     startBtn.addEventListener("click", ()=>{
+      // Through the guided Setup's first step (views/setup.js openStep): the
+      // same wizard at step 1, with the bar back to Setup over it. A build
+      // without Setup (Bright) opens the wizard as before.
+      if (ctx.actions.openSetupStep && _surfacesForEdition(["setup"], ctx.state.settings).length) {
+        ctx.actions.openSetupStep("plan");
+        return;
+      }
       ctx.state._mapsWizard = { step: 1, mapId: null };
       ctx.actions.renderRooms();
     });
@@ -495,7 +588,7 @@ function _library(ctx, maps, activeId, helpBtn, isBasic){
     const floorMaps = _floorMap.get(fid) || [];
     floorMaps.sort((a, b) => String(a.created || "").localeCompare(String(b.created || "")));
     const floorObj = _floors.find(f => f.id === fid);
-    const floorName = floorObj ? (floorObj.name || fid) : fid;
+    const floorName = fid === OUTSIDE_FLOOR_ID ? _outsideLabel(_floors.filter(f => _floorMap.has(f.id))) : floorObj ? (floorObj.name || fid) : fid;
     list.appendChild(el("div",{style:"font-weight:700;font-size:13px;color:#52b788;margin-top:8px;margin-bottom:2px;text-transform:uppercase;letter-spacing:.5px"},
       `${floorName} (${floorMaps.length})`));
 
@@ -1339,6 +1432,12 @@ function _wizardForceEditMode(ctx, w, mode){
   }
 }
 
+// In Basic a wizard step's editor has only that step's tool (no Signal walls
+// or Sub-zones beside it); Advanced and Development keep every tool there.
+function _wizardTools(ctx, mode){
+  return ctx.state.complexity === "basic" ? { tools: [mode], openTool: mode } : { openTool: mode };
+}
+
 // The Back / Skip / Next bar every wizard step ends with. `opts.skip` gates
 // whether a Skip button appears at all (a step already satisfied, e.g. scale
 // already set, shows Skip so re-doing it is optional, not mandatory); `onNext`
@@ -1399,7 +1498,7 @@ function _wizardScale(ctx, map, maps, w){
     "Rooms can be drawn without this, but wall attenuation and any real-world measurement need it, so it's worth doing now while you're here."));
   if (done) wrap.appendChild(el("div",{style:"margin-bottom:10px;padding:8px 12px;background:#0a1f14;border:1px solid #1a4228;border-radius:6px;color:#a7f3d0;font-size:13px"},
     "✓ Scale is set for this house."));
-  wrap.appendChild(_edit(ctx, map, maps));
+  wrap.appendChild(_edit(ctx, map, maps, _wizardTools(ctx, "measure")));
   wrap.appendChild(_wizardFooter(ctx, w, { skip: !done, skipLabel: "Skip — set this later" }));
   return wrap;
 }
@@ -1428,7 +1527,7 @@ function _wizardRooms(ctx, map, maps, w){
     }
     wrap.appendChild(check);
   }
-  wrap.appendChild(_edit(ctx, map, maps));
+  wrap.appendChild(_edit(ctx, map, maps, _wizardTools(ctx, "rooms")));
   wrap.appendChild(_wizardFooter(ctx, w, { skip: drawnCount < areaNames.length, skipLabel: "Skip — finish rooms later" }));
   return wrap;
 }
@@ -1442,12 +1541,12 @@ function _wizardScanners(ctx, map, maps, w){
     "Place a marker for every Bluetooth scanner on this floor, where it's actually mounted. Double-click the map to add one, then drag it into position."));
   wrap.appendChild(el("div",{style:"margin-bottom:10px;padding:8px 12px;background:#0a1a12;border:1px solid #1a4228;border-radius:6px;color:#a7f3d0;font-size:13px"},
     count ? `${count} scanner${count===1?"":"s"} placed on this floor.` : "No scanners placed on this floor yet."));
-  wrap.appendChild(_edit(ctx, map, maps));
+  wrap.appendChild(_edit(ctx, map, maps, _wizardTools(ctx, "receivers")));
   wrap.appendChild(_wizardFooter(ctx, w, { skip: count === 0, skipLabel: "Skip — place scanners later", nextLabel: "Finish →" }));
   return wrap;
 }
 
-function _wizardFinish(ctx, map, isBasic){
+function _wizardFinish(ctx, map){
   const { el } = ctx.helpers;
   const wrap = el("div",{class:"card"});
   const rooms = map ? Object.keys(map.room_bounds || {}).length : 0;
@@ -1523,7 +1622,7 @@ function _wizardFinish(ctx, map, isBasic){
           const r = await buildHouse(ctx, traced, { planPins, refresh: () => ctx.actions.modelRefresh() });
           const done = [r.rooms ? n(r.rooms, "room") : "", r.scanners ? n(r.scanners, "scanner") : ""].filter(Boolean).join(" and ");
           const left = r.failed.length + r.notConvertible.length + r.otherPlan.length;
-          const where = "Mapping → Rooms and Calibration → Tune show them";
+          const where = "Mapping → Layout and Calibration → Tune show them";
           ctx.toast(done
             ? `${done} now on the map${left ? `; ${left} couldn't be (${where})` : ""}.`
             : `Nothing could be put on the map${left ? `: ${left} couldn't be (${where})` : ""}.`, !done || !!left);
@@ -1542,9 +1641,9 @@ function _wizardFinish(ctx, map, isBasic){
   const calBtn = el("button",{class:"btn primary"}, "Go to Calibration →");
   calBtn.addEventListener("click", ()=>{
     ctx.state._mapsWizard = null;
-    if (isBasic) ctx.actions.setComplexity("advanced");
     ctx.state.view = "calibration";
-    if (ctx.state._calib) ctx.state._calib.tab = "beacon";
+    ctx.state._calibTabRequest = "beacon";
+    ctx.actions.renderNav();
     ctx.actions.renderRooms();
   });
   row.appendChild(calBtn);
@@ -1604,8 +1703,11 @@ function _wizard(ctx, maps, isBasic){
 
   const head = el("div",{class:"card", style:"margin-bottom:12px"});
   const hrow = el("div",{style:"display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px"});
-  hrow.appendChild(el("div",{style:"font-weight:700;font-size:16px"},
-    map ? `Setting up: ${map.name || "this floor plan"}` : "Set up a floor plan"));
+  hrow.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px"},[
+    el("div",{style:"font-weight:700;font-size:16px"},
+      map ? `Setting up: ${map.name || "this floor plan"}` : "Set up a floor plan"),
+    ctx.helpers.helpBtn ? ctx.helpers.helpBtn("maps_wizard") : null,
+  ]));
   const closeBtn = el("button",{class:"btn inline", style:"font-size:12px"}, "Exit setup");
   closeBtn.addEventListener("click", ()=>{
     // Reaching Finish already counts as the step-5 funnel entry above —
@@ -1641,10 +1743,78 @@ function _wizard(ctx, maps, isBasic){
   else if (w.step === 2) body.appendChild(_wizardScale(ctx, map, maps, w));
   else if (w.step === 3) body.appendChild(_wizardRooms(ctx, map, maps, w));
   else if (w.step === 4) body.appendChild(_wizardScanners(ctx, map, maps, w));
-  else body.appendChild(_wizardFinish(ctx, map, isBasic));
+  else body.appendChild(_wizardFinish(ctx, map));
   root.appendChild(body);
 
   return root;
+}
+
+// Edit → Radios: the selected radio's mounting height. The same value,
+// command and payload as Calibration → Tune's "Save Z" (one height, two
+// places): read from the model's scanner_positions_m[source].z_m, written
+// with padspan_bright/fabric_scanner_z_set {source, z_m}. Only the height is
+// sent — never a position. Shares Tune's fabric-writer lock when Tune has
+// been opened, so a height never lands in the middle of a Tune save.
+function _rxHeightRow(ctx, sel, rerender){
+  const { el } = ctx.helpers;
+  const src = (sel && sel.source) || "";
+  const fab = src ? ((ctx.state.model && ctx.state.model.scanner_positions_m) || {})[src] : null;
+  if(!fab){
+    return el("div",{class:"muted", style:"font-size:11px;margin-top:8px", "data-rx-height":"none"},
+      "Height: set once this radio has a position (Save Layout, then Calibration → Tune → Save).");
+  }
+  const zInp = el("input",{type:"number", min:"0", max:"100", step:"0.1",
+    style:"width:72px;background:#071008;border:1px solid #2d4a38;color:#e2e8f0;padding:6px 8px;border-radius:8px;font-size:12px"});
+  zInp.value = String(fab.z_m != null ? fab.z_m : 2.4);
+  zInp.setAttribute("aria-label", "Height above floor (m)");
+  const zBtn = el("button",{class:"btn inline", style:"margin-top:0",
+    title:"Mounting height above this radio's own floor. Used for 3D distance; survives map syncs. Same value as Calibration → Tune."}, "Save height");
+  zBtn.addEventListener("click", async ()=>{
+    const v = parseFloat(zInp.value);
+    if(!Number.isFinite(v) || v < 0 || v > 100){
+      ctx.toast("Height must be 0–100 m", true);
+      return;
+    }
+    const ts = (TSP && ctx.state._calibTune) || null;
+    if(ts && !TSP.tuneTryAcquire(ts)){
+      ctx.toast("A save is in progress — try again in a moment", true);
+      return;
+    }
+    zBtn.disabled = true;
+    try{
+      const res = await ctx.actions.callWS({
+        type: "padspan_bright/fabric_scanner_z_set",
+        source: src, z_m: v,
+      });
+      if(res && res.ok === false){
+        ctx.toast("Save failed: height not stored", true);
+        return;
+      }
+      // Publish the acknowledged height before refreshing (modelRefresh
+      // swallows fetch errors), rounded as the backend stores it.
+      try{
+        const mdl = ctx.state.model || (ctx.state.model = {});
+        const spm = mdl.scanner_positions_m || (mdl.scanner_positions_m = {});
+        const prev = spm[src];
+        spm[src] = { ...(prev && typeof prev === "object" ? prev : {}),
+          z_m: Math.round(Math.max(0, Math.min(100, v)) * 100) / 100 };
+      }catch(_e){ /* best-effort */ }
+      ctx.toast(`${sel.label || src}: height set to ${v} m`);
+      if(ts) ts._tuneRev = (ts._tuneRev || 0) + 1;
+      if(ctx.actions.modelRefresh) await ctx.actions.modelRefresh();
+    }catch(e){
+      ctx.toast("Save failed: height not stored", true);
+    }finally{
+      if(ts) TSP.tuneRelease(ts);
+      zBtn.disabled = false;
+    }
+    if(rerender) rerender();
+  });
+  return el("div",{style:"display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px", "data-rx-height":src},[
+    el("span",{class:"muted", style:"font-size:12px"}, "Height above floor (m)"),
+    zInp,
+    zBtn,
+  ]);
 }
 
 // ── Edit Tab ─────────────────────────────────────────────────────────────────
@@ -1658,9 +1828,20 @@ function _wizard(ctx, maps, isBasic){
 // Draft state is kept on ctx.state.maps._draft* so edits survive tab switches
 // within the same session. Changes are only persisted on explicit "Save Layout".
 // Also includes Trim Image and Rotate Image sub-panels.
-function _edit(ctx, map, allMaps){
+//
+// opts.tools: the only tools offered (Basic's wizard steps and focused views:
+// one of receivers, rooms, measure); the Signal walls tool's Enclose goes
+// with them. opts.openTool: the tool a plan opens on (a wizard step's), not
+// Radios. opts.focused (Basic, a link's part, views/focus.js): no map or
+// floor switch, Trim, Rotate, Suggest Placement or "All rooms / receivers"
+// either, so the one task is all there is.
+function _edit(ctx, map, allMaps, opts){
   const { el, roomColor, helpBtn } = ctx.helpers;
   const card = el("div",{class:"card"});
+  const _tools = (opts && Array.isArray(opts.tools) && opts.tools.length) ? opts.tools : null;
+  const _toolOk = (m) => !_tools || _tools.includes(m);
+  const _focused = !!(opts && opts.focused);
+  if(_focused) card.setAttribute("data-focus-part", _tools ? _tools.join(" ") : "edit");
 
   if(!map){
     card.appendChild(el("div",{class:"muted"},"No map selected. Go to Library or Upload tab."));
@@ -1711,15 +1892,37 @@ function _edit(ctx, map, allMaps){
     ctx.state.maps._draftImageSha = _draftImgSha;
     ctx.state.maps._selectedRxId = null;
     // receivers | rooms | barriers | measure. _openMode: a one-shot tool to
-    // open in, set by a link from another tab (Calibration's "Measure this
-    // floor"), so loading the plan does not put it back on Radios.
-    ctx.state.maps._mode = ctx.state.maps._openMode || "receivers";
+    // open in, set by the Rooms page's "Edit outline" (rooms.js), so loading
+    // the plan does not put it back on Radios.
+    ctx.state.maps._mode = (opts && opts.openTool) || ctx.state.maps._openMode || "receivers";
     ctx.state.maps._openMode = null;
-    ctx.state.maps._selectedRoom = "";
+    // _openRoom: the room the Rooms page's "Edit outline" opened it on.
+    ctx.state.maps._selectedRoom = ctx.state.maps._openRoom || "";
+    ctx.state.maps._openRoom = null;
     ctx.state.maps._drawing = null; // {room, points:[]} or barrier drawing
     ctx.state.maps._selectedBarrierId = null;
     ctx.state.maps._barrierMaterial = "metal";
     ctx.state.maps._recommendPoly = null;
+  } else if (ctx.state.maps._openRoom) {
+    // Already open on this plan: the Rooms tool and the room, drafts kept.
+    ctx.state.maps._mode = ctx.state.maps._openMode || "rooms";
+    ctx.state.maps._selectedRoom = ctx.state.maps._openRoom;
+    ctx.state.maps._drawing = null;
+    ctx.state.maps._openMode = null;
+    ctx.state.maps._openRoom = null;
+  }
+  // The Receivers page's Place / Move (views/receivers.js): a one-shot that
+  // opens Radios with that receiver selected (none: just Radios).
+  if(ctx.state.maps._openRadios){
+    const _want = ctx.state.maps._openRadios.rxId;
+    ctx.state.maps._openRadios = null;
+    ctx.state.maps._mode = "receivers";
+    if(_want && ctx.state.maps._draftReceivers.some(r=>r.id===_want)) ctx.state.maps._selectedRxId = _want;
+  }
+  // Only the tools offered: anything else open goes to the first of them.
+  if(_tools && !_tools.includes(ctx.state.maps._mode)){
+    ctx.state.maps._mode = _tools[0];
+    ctx.state.maps._drawing = null;
   }
 
   // Cache-buster: map.updated changes on every trim/replace so the browser fetches fresh content
@@ -1763,7 +1966,7 @@ function _edit(ctx, map, allMaps){
   }
   mapSel.onchange = ()=>{ ctx.actions.mapsSetActive(mapSel.value); };
 
-  const titleBtns = el("div",{style:"display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end"},[
+  const titleBtns = el("div",{style:"display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end"}, _focused ? [] : [
     el("div",{class:"muted", style:"font-size:12px"},"Map:"),
     mapSel,
     el("div",{class:"muted", style:"font-size:12px"},"Floor:"),
@@ -1779,7 +1982,9 @@ function _edit(ctx, map, allMaps){
   const title = el("div",{style:"display:flex;justify-content:space-between;align-items:center;gap:10px"},[
     el("div",{},[
       el("div",{style:"font-weight:700"}, `Edit: ${map.name || map.id}`),
-      el("div",{class:"muted", style:"font-size:12px"}, "Place receivers and then draw room boundaries. Save when done."),
+      el("div",{class:"muted", style:"font-size:12px"}, !_focused ? "Place receivers and then draw room boundaries. Save when done."
+        : _toolOk("rooms") ? "Draw the room's outline on the plan, then Save Layout."
+        : "Drag the receiver to where it is mounted and set its height, then Save Layout."),
     ]),
     titleBtns,
   ]);
@@ -1836,7 +2041,7 @@ function _edit(ctx, map, allMaps){
       out.push({ id: b.id, name: b.name || "", material: b.material || "custom",
                  attenuation_dbm: b.attenuation_dbm ?? 6, points: pts,
                  linked_entity_id: b.linked_entity_id || null,
-                 invert_state: !!b.invert_state });
+                 invert_state: !!b.invert_state, rail: b.rail });
     }
     return out;
   };
@@ -1846,8 +2051,10 @@ function _edit(ctx, map, allMaps){
     const points_m = fracPts.map(p => mapFracToMetres(tf, clamp01(p[0]), clamp01(p[1])))
       .map(q => [Math.round(q[0] * 1000) / 1000, Math.round(q[1] * 1000) / 1000]);
     try {
+      // An Open (Loft) edge drawn from now on starts with no railing in Live
+      // Aboard (rail "none"; the Railing button on its row changes it).
       const r = await ctx.actions.callWS({ type: "padspan_bright/fabric_rf_barrier_set", barrier: {
-        name, material, attenuation_dbm: atten, floor_id: _wallFloor(), points_m } });
+        name, material, attenuation_dbm: atten, floor_id: _wallFloor(), points_m, ...(material === "open" ? { rail: "none" } : {}) } });
       await ctx.actions.modelRefresh();
       return r && r.barrier ? r.barrier.id : null;
     } catch (e) { ctx.toast("Could not place wall: " + (e.message || e), true); return null; }
@@ -1858,6 +2065,140 @@ function _edit(ctx, map, allMaps){
       await ctx.actions.modelRefresh();
     } catch (e) { ctx.toast("Could not remove wall: " + (e.message || e), true); }
   };
+
+  // ── Open edges: a room edge with no wall on it (a loft, an open plan) ──────
+  // Signal already passes where no wall is drawn: the solver and the coverage
+  // map add up the walls a ray crosses and nothing else. Marking the edge
+  // Open (0 dB) records that on the map, and the 3D house leaves out the
+  // wall it would otherwise derive there (live_aboard_house.js openAt). A tap
+  // opens only the stretch the edge shares with the room next door, and an
+  // edge with no neighbour whole (Garry, 2026-11-02), in the same metres the 3D
+  // house reads, so nothing is re-traced by hand; what an open wall already
+  // runs along is written once (openGaps). `rail: "none"`: a new open edge has
+  // no railing until one is chosen (the per-edge rail key; the store keeps it).
+  // A signal wall already on the stretch is replaced only on a confirm naming
+  // what changes (positioning does), and only that stretch of it goes: its
+  // first surviving piece keeps its id, as a door cut does. All one save, all
+  // or nothing (fabric_open_edges_apply).
+  const _openEdgeGeom = () => {
+    const fid = _wallFloor(), rb = ctx.state.maps._draftRoomBounds || {};
+    return Object.fromEntries(Object.entries(ctx.state.model?.room_geometry_m || {})
+      .filter(([r, g]) => g && g.type === "poly" && String(g.floor_id || "main") === fid && rb[r]));
+  };
+  const _barriersHere = () => (ctx.state.model?.rf_barriers_m || []).filter(x => String(x.floor_id || "main") === _wallFloor());
+  const _openBarriersHere = () => _barriersHere().filter(x => String(x.material || "").trim().toLowerCase() === "open");
+  const _openEdgeRecord = (room, [a, b]) => ({ name: `Open edge — ${room}`, material: "open", attenuation_dbm: 0, rail: "none",
+    floor_id: _wallFloor(), points_m: [[a[0], a[1]], [b[0], b[1]]] });
+  // The tool's one write. null when refused: the refusal is on screen, and stays.
+  const _openEdgesApply = async (action, set_barriers, remove_barrier_ids = []) => {
+    try {
+      const r = await ctx.actions.callWS({ type: "padspan_bright/fabric_open_edges_apply", action, set_barriers, remove_barrier_ids });
+      await ctx.actions.modelRefresh();
+      return r && r.ok ? r : null;
+    } catch (e) { ctx.toast("Could not change the open edges: " + (e.message || e), true); return null; }
+  };
+  // One write at a time: a double tap writes once, and no second confirm opens.
+  const _oneOpenEdgeWrite = async (work) => {
+    if (ctx.state.maps._openEdgeBusy) return;
+    ctx.state.maps._openEdgeBusy = true;
+    try { await work(); } finally { ctx.state.maps._openEdgeBusy = false; }
+  };
+  const _metres = (m) => `${m.toFixed(2)} m`;
+  // What replacing the walls along a stretch writes, and what the confirm says of it.
+  const _replaceWalls = (walls, [p, q], room, neighbour) => {
+    const set = [], remove = [], lines = [];
+    for (const { bar, along_m } of walls) {
+      const { kept, kept_m } = cutWallAlong(bar.points_m, p, q);
+      kept.forEach((points_m, i) => {
+        const piece = { ...bar, name: bar.name || "Wall", points_m };
+        if (i) { delete piece.id; piece.name = `${piece.name} (${i + 1})`; }
+        set.push(piece);
+      });
+      if (!kept.length) remove.push(bar.id);
+      const kind = `${bar.material || "custom"}, ${bar.attenuation_dbm ?? 6} dB`;
+      lines.push(`"${bar.name || "Wall"}" (${kind}) runs along ${_metres(along_m)} of it. That part of the wall goes.`
+        + (kept.length ? ` The wall continues past it: the other ${_metres(kept_m)} stay as they are.` : " Nothing of the wall is left."));
+    }
+    return { set, remove, text: `Replace ${walls.length === 1 ? "a signal wall" : `${walls.length} signal walls`} with an open edge?\n\n`
+      + `This edge of ${room}${neighbour ? `, shared with ${neighbour},` : ""} is ${_metres(Math.hypot(q[0] - p[0], q[1] - p[1]))} long.\n`
+      + lines.join("\n")
+      + `\n\nSignal changes: positioning and the coverage map stop counting ${walls.length === 1 ? "that wall" : "those walls"} here, so where people and devices show near it can shift.`
+      + `\nRemove open edges won't bring a wall back; it would have to be drawn again.` };
+  };
+  const _openEdgeTap = (fx, fy) => _oneOpenEdgeWrite(async () => {
+    const tf = _wallTx();
+    if (!tf) { ctx.toast("Measure this map first (Measure tool) — walls are stored in metres.", true); return; }
+    const [mx, my] = mapFracToMetres(tf, fx, fy);
+    const hit = stretchAt(_openEdgeGeom(), ctx.state.model?.room_geometry_m, _wallFloor(), mx, my);
+    const snap = hit && metresToMapFrac(tf, hit.x, hit.y);
+    if (!hit || !snap || Math.hypot(snap[0] - fx, snap[1] - fy) > 0.03) {
+      ctx.toast("Tap closer to a room's edge (a room needs Save Layout before its edges can be marked).", true); return;
+    }
+    const [sp, sq] = hit.points;
+    const gaps = openGaps(sp, sq, _openBarriersHere().map(x => x.points_m));
+    if (!gaps.length) { ctx.toast(`That edge of ${hit.room} is already open.`); return; }
+    // Part of the stretch open already: the part not open that the tap is nearest.
+    const off = ([u, v]) => { const L = Math.hypot(v[0] - u[0], v[1] - u[1]) || 1, t = Math.max(0, Math.min(1, ((hit.x - u[0]) * (v[0] - u[0]) + (hit.y - u[1]) * (v[1] - u[1])) / (L * L)));
+      return Math.hypot(u[0] + (v[0] - u[0]) * t - hit.x, u[1] + (v[1] - u[1]) * t - hit.y); };
+    const part = gaps.reduce((b, g) => (off(g) < off(b) ? g : b));
+    let walls = wallsAlong(part[0], part[1], _barriersHere());
+    // Cut from the wall as the server has it now: another tab may have moved its corners.
+    if (walls.length) { await ctx.actions.modelRefresh(); walls = wallsAlong(part[0], part[1], _barriersHere()); }
+    const open = _openEdgeRecord(hit.room, part);
+    let r;
+    if (walls.length) {
+      const plan = _replaceWalls(walls, part, hit.room, hit.with);
+      if (!confirm(plan.text)) { ctx.state.maps._selectedBarrierId = walls[0].bar.id; return; }
+      r = await _openEdgesApply("replaced", [...plan.set, open], plan.remove);
+    } else {
+      r = await _openEdgesApply("tap", [open]);
+    }
+    if (!r) return;
+    const made = (r.barriers || []).filter(b => b.material === "open");
+    if (made.length) ctx.state.maps._selectedBarrierId = made[made.length - 1].id;
+    ctx.toast(walls.length ? `Open edge — ${hit.room}. Signal changes here: the wall's loss no longer counts.` : `Open edge — ${hit.room}`);
+  });
+  const _openAllEdges = (room) => _oneOpenEdgeWrite(async () => {
+    const stretches = roomStretches(ctx.state.model?.room_geometry_m, _wallFloor(), room);
+    if (!stretches) { ctx.toast("Save Layout first: that room has no saved outline yet.", true); return; }
+    const todo = [];
+    let had = 0, walled = 0;
+    const opens = _openBarriersHere().map(x => x.points_m), bars = _barriersHere();
+    for (const s of stretches) {
+      const gaps = openGaps(s.points[0], s.points[1], opens);
+      if (!gaps.length) had++;
+      for (const g of gaps) { if (wallsAlong(g[0], g[1], bars).length) walled++; else todo.push(g); }
+    }
+    const left = walled ? `${walled} with a signal wall on ${walled === 1 ? "it" : "them"} left as ${walled === 1 ? "it is" : "they are"}: tap ${walled === 1 ? "it" : "one"} to replace the wall` : "";
+    const edges = (n) => `${n} edge${n !== 1 ? "s" : ""}`;
+    if (!todo.length) {
+      ctx.toast(`${room}: no edges to mark${had ? ` (${had} already open)` : ""}${left ? `; ${left}` : ""}`, !!walled);
+      return;
+    }
+    if (!confirm(`Mark ${edges(todo.length)} of ${room} open?\n\nThe 3D house leaves its walls out there. Signal doesn't change: nothing counted a wall there.`
+      + `${left ? `\n\n${left[0].toUpperCase()}${left.slice(1)}.` : ""}\n\nRemove open edges takes them back.`)) return;
+    const r = await _openEdgesApply("all", todo.map(g => _openEdgeRecord(room, g)));
+    if (!r) return;
+    ctx.toast(`${room}: ${edges(todo.length)} marked open${had ? ` (${had} already open)` : ""}${left ? `; ${left}` : ""}`, !!walled);
+  });
+  // The open edges the tool wrote along a room: named for it, or running along
+  // its outline (a shared edge, tapped from the other side). Hand-drawn Open
+  // walls aren't the tool's and stay.
+  const _openEdgesOf = (room) => {
+    const closed = closedOutline(((ctx.state.model?.room_geometry_m || {})[room] || {}).points_m);
+    return _openBarriersHere().filter(x => x.name === `Open edge — ${room}`
+      || (String(x.name || "").startsWith("Open edge — ") && runsAlongOutline(x.points_m, closed)));
+  };
+  const _removeOpenEdges = (room) => _oneOpenEdgeWrite(async () => {
+    const mine = _openEdgesOf(room);
+    if (!mine.length) { ctx.toast(`${room} has no open edges to remove.`); return; }
+    const edges = `${mine.length} open edge${mine.length !== 1 ? "s" : ""}`;
+    if (!confirm(`Remove ${edges} of ${room}?\n\nThe 3D house draws its walls there again. Signal doesn't change: an open edge counts for nothing. A signal wall one replaced doesn't come back; it would have to be drawn again.`)) return;
+    const ids = mine.map(x => x.id);
+    if (!(await _openEdgesApply("removed", [], ids))) return;
+    if (ids.includes(ctx.state.maps._selectedBarrierId)) ctx.state.maps._selectedBarrierId = null;
+    ctx.toast(`${room}: ${edges} removed`);
+  });
 
   // ── Sub-zones (subzones.py): named areas inside a room, in metres ──────────
   // Only with settings.subzones_enabled (off: no button, nothing drawn). Drawn
@@ -1918,17 +2259,17 @@ function _edit(ctx, map, allMaps){
     try {
       let doorId = null;
       if (split.before) {
-        await setBarrier({ id: barId, name: bar.name, material: bar.material,
+        await setBarrier({ id: barId, name: bar.name, material: bar.material, rail: bar.rail,
           attenuation_dbm: bar.attenuation_dbm, floor_id: fid, points_m: toMetres(split.before) });
         const r = await setBarrier({ name: `Door — ${bar.name || "Wall"}`, material, attenuation_dbm: atten,
           floor_id: fid, points_m: toMetres(split.middle), linked_entity_id: entityId });
         doorId = r && r.barrier ? r.barrier.id : null;
         if (split.after) {
-          await setBarrier({ name: `${bar.name || "Wall"} (2)`, material: bar.material,
+          await setBarrier({ name: `${bar.name || "Wall"} (2)`, material: bar.material, rail: bar.rail,
             attenuation_dbm: bar.attenuation_dbm, floor_id: fid, points_m: toMetres(split.after) });
         }
       } else if (split.after) {
-        await setBarrier({ id: barId, name: bar.name, material: bar.material,
+        await setBarrier({ id: barId, name: bar.name, material: bar.material, rail: bar.rail,
           attenuation_dbm: bar.attenuation_dbm, floor_id: fid, points_m: toMetres(split.after) });
         const r = await setBarrier({ name: `Door — ${bar.name || "Wall"}`, material, attenuation_dbm: atten,
           floor_id: fid, points_m: toMetres(split.middle), linked_entity_id: entityId });
@@ -1957,12 +2298,15 @@ function _edit(ctx, map, allMaps){
   // --- Right panel (tools) ---
   const right = el("div",{class:"card", style:"margin-top:10px"},[]);
   const _modeHelp = {"receivers":"Double-click map to place radio; drag to reposition","rooms":"Click map to add points; double-click to finish","barriers":"Click to draw wall segments; double-click to finish","measure":"Click two points you know the real distance between","subzones":"Click points around the bed, couch or desk; double-click to finish"};
-  const modeRow = el("div",{style:"display:flex;gap:8px;flex-wrap:wrap;align-items:center"},[
-    el("button",{class:"btn inline"+(ctx.state.maps._mode==="receivers"?" primary":""), onclick:()=>{ ctx.state.maps._mode="receivers"; ctx.state.maps._drawing=null; renderAll(); renderTools(); }}, "Radios"),
-    el("button",{class:"btn inline"+(ctx.state.maps._mode==="rooms"?" primary":""), onclick:()=>{ ctx.state.maps._mode="rooms"; ctx.state.maps._selectedRxId=null; renderAll(); renderTools(); }}, "Rooms"),
-    el("button",{class:"btn inline"+(ctx.state.maps._mode==="barriers"?" primary":""), style:"background:#1a0a0a;border-color:#7f1d1d;color:#fca5a5", onclick:()=>{ ctx.state.maps._mode="barriers"; ctx.state.maps._selectedRxId=null; ctx.state.maps._drawing=null; renderAll(); renderTools(); }}, "RF Barriers"),
-    el("button",{class:"btn inline"+(ctx.state.maps._mode==="measure"?" primary":""), style:"background:#0a1a2a;border-color:#1e4976;color:#7dd3fc", onclick:()=>{ ctx.state.maps._mode="measure"; ctx.state.maps._selectedRxId=null; ctx.state.maps._drawing=null; ctx.state.maps._measurePts=[]; renderAll(); renderTools(); }}, "\ud83d\udccf Measure"),
-    ...(_szOn() ? [el("button",{class:"btn inline"+(ctx.state.maps._mode==="subzones"?" primary":""), onclick:()=>{ ctx.state.maps._mode="subzones"; ctx.state.maps._selectedRxId=null; ctx.state.maps._drawing=null; ctx.state.maps._szDrawing=null; _szLoad(); }}, "Sub-zones")] : []),
+  // Built each time renderTools draws, so the lit tool and the hint follow the
+  // tool in use. A tool's own tint goes while it is lit: as an inline style it
+  // would hide .primary.
+  const modeRow = () => el("div",{style:"display:flex;gap:8px;flex-wrap:wrap;align-items:center"},[
+    _toolOk("receivers") ? el("button",{class:"btn inline"+(ctx.state.maps._mode==="receivers"?" primary":""), "data-edit-tool":"receivers", onclick:()=>{ ctx.state.maps._mode="receivers"; ctx.state.maps._drawing=null; renderAll(); renderTools(); }}, "Radios") : null,
+    _toolOk("rooms") ? el("button",{class:"btn inline"+(ctx.state.maps._mode==="rooms"?" primary":""), "data-edit-tool":"rooms", onclick:()=>{ ctx.state.maps._mode="rooms"; ctx.state.maps._selectedRxId=null; renderAll(); renderTools(); }}, "Rooms") : null,
+    _toolOk("barriers") ? el("button",{class:"btn inline"+(ctx.state.maps._mode==="barriers"?" primary":""), "data-edit-tool":"barriers", style:ctx.state.maps._mode==="barriers"?"":"background:#1a0a0a;border-color:#7f1d1d;color:#fca5a5", onclick:()=>{ ctx.state.maps._mode="barriers"; ctx.state.maps._selectedRxId=null; ctx.state.maps._drawing=null; ctx.state.maps._openEdgeTap=false; renderAll(); renderTools(); }}, "Signal walls") : null,
+    _toolOk("measure") ? el("button",{class:"btn inline"+(ctx.state.maps._mode==="measure"?" primary":""), "data-edit-tool":"measure", style:ctx.state.maps._mode==="measure"?"":"background:#0a1a2a;border-color:#1e4976;color:#7dd3fc", onclick:()=>{ ctx.state.maps._mode="measure"; ctx.state.maps._selectedRxId=null; ctx.state.maps._drawing=null; ctx.state.maps._measurePts=[]; renderAll(); renderTools(); }}, "\ud83d\udccf Measure") : null,
+    ...(_szOn() ? [el("button",{class:"btn inline"+(ctx.state.maps._mode==="subzones"?" primary":""), "data-edit-tool":"subzones", onclick:()=>{ ctx.state.maps._mode="subzones"; ctx.state.maps._selectedRxId=null; ctx.state.maps._drawing=null; ctx.state.maps._szDrawing=null; _szLoad(); }}, "Sub-zones")] : []).filter(() => _toolOk("subzones")),
     el("span",{class:"muted", style:"font-size:12px"}, _modeHelp[ctx.state.maps._mode] || ""),
     helpBtn("maps_edit"),
   ]);
@@ -2029,10 +2373,16 @@ function _edit(ctx, map, allMaps){
     list.textContent = _layoutText(ctx.state.maps._draftReceivers, ctx.state.maps._draftRoomBounds);
   };
 
+  // A name on the stage: over the SVG, not in it (_stageLabelStyle).
+  const _stageLabel = (x, y, text, color)=>{
+    overlay.appendChild(el("div",{class:"maplabel", style:_stageLabelStyle(x, y, color)}, text));
+  };
+
   // --- Rendering helpers ---
   const renderAll = ()=>{
     // SVG rooms
     while(svg.firstChild) svg.removeChild(svg.firstChild);
+    overlay.querySelectorAll(".maplabel").forEach(n=>n.remove());
 
     // Draw saved polys first, then fallback circles (if receiver assigned but no poly yet)
     const rb = ctx.state.maps._draftRoomBounds || {};
@@ -2050,16 +2400,8 @@ function _edit(ctx, map, allMaps){
       poly.setAttribute("stroke-width","0.004");
       svg.appendChild(poly);
 
-      const lab = document.createElementNS("http://www.w3.org/2000/svg","text");
       const centroid = _centroid(b.points);
-      lab.setAttribute("x", centroid[0]);
-      lab.setAttribute("y", centroid[1]);
-      lab.setAttribute("font-size","0.04");
-      lab.setAttribute("text-anchor","middle");
-      lab.setAttribute("dominant-baseline","middle");
-      lab.setAttribute("fill", c);
-      lab.textContent = room;
-      svg.appendChild(lab);
+      _stageLabel(centroid[0], centroid[1], room, c);
     }
 
     // Fallback circles
@@ -2082,6 +2424,7 @@ function _edit(ctx, map, allMaps){
     // Walls — the fabric's, projected onto this photo; dashed by material
     const barriers = _fabricWallsHere();
     const _matColors = _MAT_COLORS;
+    const _oeLabelled = new Set();
     for(let bi = 0; bi < barriers.length; bi++){
       const bar = barriers[bi];
       if(!bar.points || bar.points.length < 2) continue;
@@ -2100,20 +2443,17 @@ function _edit(ctx, map, allMaps){
         bLine.addEventListener("click", (ev)=>{ ev.stopPropagation(); ctx.state.maps._selectedBarrierId = bar.id; renderAll(); renderTools(); });
       }
       svg.appendChild(bLine);
-      // Label at midpoint
-      if(bar.points.length >= 2){
+      // Label at midpoint, in the tool that works on walls: on a phone these
+      // names would otherwise hide a third of the plan in every other tool. A
+      // room's open edges share one, unless one is selected.
+      const _oeName = bar.material === "open" && String(bar.name).startsWith("Open edge — ") ? bar.name : null;
+      if(ctx.state.maps._mode === "barriers" && bar.points.length >= 2 && !(_oeName && _oeLabelled.has(_oeName) && ctx.state.maps._selectedBarrierId !== bar.id)){
+        if(_oeName) _oeLabelled.add(_oeName);
         const loI = Math.floor((bar.points.length - 1) / 2);
         const hiI = Math.ceil((bar.points.length - 1) / 2);
         const midX = (bar.points[loI][0] + bar.points[hiI][0]) / 2;
         const midY = (bar.points[loI][1] + bar.points[hiI][1]) / 2;
-        const blab = document.createElementNS("http://www.w3.org/2000/svg","text");
-        blab.setAttribute("x", clamp01(midX));
-        blab.setAttribute("y", clamp01(midY - 0.02));
-        blab.setAttribute("font-size","0.025");
-        blab.setAttribute("text-anchor","middle");
-        blab.setAttribute("fill", bc);
-        blab.textContent = bar.material === "open" ? "Open (Loft)" : (bar.material||"metal") + " (" + (bar.attenuation_dbm||12) + "dB)";
-        svg.appendChild(blab);
+        _stageLabel(clamp01(midX), clamp01(midY - 0.02), bar.material === "open" ? "Open (Loft)" : (bar.material||"metal") + " (" + (bar.attenuation_dbm||12) + "dB)", bc);
       }
     }
 
@@ -2145,19 +2485,7 @@ function _edit(ctx, map, allMaps){
       svg.appendChild(rpoly);
       const rcx = recoPoly.polygon.reduce((s,p)=>s+p[0],0)/recoPoly.polygon.length;
       const rcy = recoPoly.polygon.reduce((s,p)=>s+p[1],0)/recoPoly.polygon.length;
-      const rlab = document.createElementNS("http://www.w3.org/2000/svg","text");
-      rlab.setAttribute("x", clamp01(rcx));
-      rlab.setAttribute("y", clamp01(rcy));
-      rlab.setAttribute("font-size","0.045");
-      rlab.setAttribute("text-anchor","middle");
-      rlab.setAttribute("dominant-baseline","middle");
-      rlab.setAttribute("fill","#fbbf24");
-      rlab.setAttribute("stroke","#1a0f00");
-      rlab.setAttribute("stroke-width","0.008");
-      rlab.setAttribute("paint-order","stroke fill");
-      rlab.setAttribute("font-family","system-ui,sans-serif");
-      rlab.textContent = "Recommended zone";
-      svg.appendChild(rlab);
+      _stageLabel(clamp01(rcx), clamp01(rcy), "Recommended zone", "#fbbf24");
     }
 
     // Draft drawing polyline
@@ -2191,19 +2519,7 @@ function _edit(ctx, map, allMaps){
         pg.setAttribute("stroke-dasharray","0.010 0.006");
         pg.style.pointerEvents = "none";
         svg.appendChild(pg);
-        const lab = document.createElementNS("http://www.w3.org/2000/svg","text");
-        lab.setAttribute("x", pts.reduce((a,p)=>a+p[0],0)/pts.length);
-        lab.setAttribute("y", pts.reduce((a,p)=>a+p[1],0)/pts.length);
-        lab.setAttribute("font-size","0.025");
-        lab.setAttribute("text-anchor","middle");
-        lab.setAttribute("dominant-baseline","middle");
-        lab.setAttribute("fill","#5eead4");
-        lab.setAttribute("stroke","#0b1a12");
-        lab.setAttribute("stroke-width","0.006");
-        lab.setAttribute("paint-order","stroke fill");
-        lab.style.pointerEvents = "none";
-        lab.textContent = z.name;
-        svg.appendChild(lab);
+        _stageLabel(clamp01(pts.reduce((a,p)=>a+p[0],0)/pts.length), clamp01(pts.reduce((a,p)=>a+p[1],0)/pts.length), z.name, "#5eead4");
       }
       const dpts = ctx.state.maps._szDrawing || [];
       if(dpts.length){
@@ -2270,12 +2586,7 @@ function _edit(ctx, map, allMaps){
         }
         // Label
         const mx = (sm.p1[0] + sm.p2[0]) / 2, my = (sm.p1[1] + sm.p2[1]) / 2;
-        const lab = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        lab.setAttribute("x", mx); lab.setAttribute("y", my - 0.015);
-        lab.setAttribute("text-anchor", "middle"); lab.setAttribute("font-size", "0.025");
-        lab.setAttribute("fill", col); lab.setAttribute("opacity", "0.8");
-        lab.textContent = `${sm.distance_m}m @ ${sm.angle_deg}\u00b0`;
-        svg.appendChild(lab);
+        _stageLabel(clamp01(mx), clamp01(my - 0.015), `${sm.distance_m}m @ ${sm.angle_deg}\u00b0`, col);
       }
       // Current points being placed (pointer-events:none so clicks pass through)
       const mPts = ctx.state.maps._measurePts || [];
@@ -2300,11 +2611,15 @@ function _edit(ctx, map, allMaps){
   };
 
   const renderTools = ()=>{
+    // A tool button pressed from the keyboard keeps the focus over the redraw.
+    const _toolFocused = right.querySelector("[data-edit-tool]:focus")?.getAttribute("data-edit-tool");
     right.innerHTML = "";
-    right.appendChild(modeRow);
+    right.appendChild(modeRow());
+    if(_toolFocused) right.querySelector(`[data-edit-tool="${_toolFocused}"]`)?.focus({preventScroll:true});
+    stage.title = _modeHelp[ctx.state.maps._mode] || "";
 
     // ── Suggest Placement button ──────────────────────────────────────────────
-    {
+    if(!_focused && ctx.state.maps._mode!=="measure"){
       const polyRooms = Object.values(ctx.state.maps._draftRoomBounds||{})
         .filter(b=>b?.type==="poly" && Array.isArray(b.points) && b.points.length>=3);
       const hasData = polyRooms.length >= 1;
@@ -2390,6 +2705,7 @@ function _edit(ctx, map, allMaps){
           lbl,
           roomLbl,
           roomSel,
+          _rxHeightRow(ctx, sel, renderTools),
           el("button",{class:"btn inline", style:"margin-top:8px", onclick:()=>{
             ctx.state.maps._draftReceivers = ctx.state.maps._draftReceivers.filter(x=>x.id!==sel.id);
             ctx.state.maps._selectedRxId = null;
@@ -2404,7 +2720,10 @@ function _edit(ctx, map, allMaps){
       const snap2 = (ctx.state.live && ctx.state.live.snapshot) || null;
       const liveRadios = (snap2 && snap2.ble && Array.isArray(snap2.ble.radios)) ? snap2.ble.radios : [];
       const _sid = ctx.helpers.radioShortId || (src => src.slice(0,3).toUpperCase());
-      right.appendChild(el("div",{class:"muted", style:"margin-top:14px;font-size:12px;font-weight:600"}, "Live BLE Radios"));
+      right.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;margin-top:14px"},[
+        el("div",{class:"muted", style:"font-size:12px;font-weight:600"}, "Live BLE Radios"),
+        !_focused && ctx.actions.openReceivers && (!ctx.actions.canOpen || ctx.actions.canOpen("receivers")) ? el("button",{class:"btn inline", "data-all-receivers":"maps", style:"font-size:10px;padding:2px 8px;margin:0", onclick:()=>ctx.actions.openReceivers()}, "All receivers") : null,
+      ].filter(Boolean)));
       // #88: in Sample mode these are the demo house's radios. Placed on a
       // real plan they'd become phantom scanners at the next Tune → Save.
       const _rxBlock = TSP ? TSP.tuneWriteBlock(ctx.state) : null;
@@ -2483,7 +2802,7 @@ function _edit(ctx, map, allMaps){
         ]));
       }
     } else if(ctx.state.maps._mode==="barriers"){
-      right.appendChild(el("div",{class:"muted", style:"margin-top:10px;font-size:12px"}, "RF Barrier tools"));
+      right.appendChild(el("div",{class:"muted", style:"margin-top:10px;font-size:12px"}, "Signal wall tools"));
 
       // Material selector
       const matSel = document.createElement("select");
@@ -2501,7 +2820,7 @@ function _edit(ctx, map, allMaps){
       ]));
       if (matSel.value === "custom") {
         const dbIn = el("input",{type:"number", class:"input", min:"0", max:"30", step:"1",
-          value:String(_customDb()), style:"width:70px"});
+          value:String(_customDb()), style:"width:70px;box-sizing:content-box"});
         dbIn.addEventListener("change", ()=>{ ctx.state.maps._barrierCustomDb = dbIn.value; dbIn.value = String(_customDb()); });
         right.appendChild(el("div",{style:"margin-top:6px;display:flex;align-items:center;gap:6px;font-size:12px"},
           [el("span",{class:"muted"},"Loss through it"), dbIn, el("span",{class:"muted"},"dB")]));
@@ -2539,8 +2858,43 @@ function _edit(ctx, map, allMaps){
       right.appendChild(el("div",{class:"muted",style:"font-size:11px;margin-top:6px"}, bDrawing
         ? `Drawing: ${bPts} point${bPts!==1?"s":""} placed. Click on map to add, double-click or Finish to complete.`
         : (_wallTx()
-            ? "Click on the map to start drawing a wall. It is stored in metres in the fabric the moment you finish."
+            ? "Click on the map to start drawing a wall. It is stored in metres in the room and receiver layout the moment you finish."
             : "Measure this map first (Measure tool): walls are stored in metres, and this map has no scale yet.")));
+
+      // Open edges: rooms not divided by a wall (a loft, one big open space).
+      const oeRooms = Object.keys(_openEdgeGeom());
+      const oeArmed = !!ctx.state.maps._openEdgeTap;
+      const oeTapBtn = el("button",{class:"btn inline"+(oeArmed?" primary":""), "data-open-edge":"tap",
+        title:"Tap a room's edge on the map: an Open (0 dB) wall goes along the stretch it shares with the room next door, or the whole edge if nothing shares it",
+        onclick:()=>{ ctx.state.maps._openEdgeTap = !oeArmed; ctx.state.maps._drawing = null; renderAll(); renderTools(); }}, "Open edge: tap a room edge");
+      const oeSel = document.createElement("select");
+      oeSel.className = "select"; oeSel.setAttribute("data-open-edge", "room");
+      for (const r of oeRooms) { const o = document.createElement("option"); o.value = r; o.textContent = r; oeSel.appendChild(o); }
+      if (oeRooms.includes(ctx.state.maps._openEdgeRoom)) oeSel.value = ctx.state.maps._openEdgeRoom;
+      oeSel.addEventListener("change", ()=>{ ctx.state.maps._openEdgeRoom = oeSel.value; });
+      const oeAllBtn = el("button",{class:"btn inline", "data-open-edge":"all",
+        title:"Every edge of this room gets an Open (0 dB) wall: a loft, or one big open space. It asks first.",
+        onclick: async ()=>{
+          const room = oeSel.value;
+          if(!room){ ctx.toast("Choose a room first.", true); return; }
+          await _openAllEdges(room); renderAll(); renderTools();
+        }}, "Open all edges");
+      const oeRemoveBtn = el("button",{class:"btn inline", "data-open-edge":"remove",
+        title:"Takes back the open edges this tool marked along this room. It asks first.",
+        onclick: async ()=>{
+          const room = oeSel.value;
+          if(!room){ ctx.toast("Choose a room first.", true); return; }
+          await _removeOpenEdges(room); renderAll(); renderTools();
+        }}, "Remove open edges");
+      right.appendChild(el("div",{style:"margin-top:12px;padding-top:8px;border-top:1px solid #1b3526"},[
+        el("div",{class:"muted",style:"font-size:12px;font-weight:600;margin-bottom:4px"}, "Open edges"),
+        el("div",{style:"display:flex;gap:8px;flex-wrap:wrap;align-items:center"}, oeRooms.length ? [oeTapBtn, oeSel, oeAllBtn, oeRemoveBtn] : [oeTapBtn]),
+        el("div",{class:"muted",style:"font-size:11px;margin-top:6px;line-height:1.4"}, oeArmed
+          ? "Tap a room edge on the map. Only the stretch it shares with the room next door opens; an edge with no neighbour opens whole. An edge two rooms share is marked once."
+          : (oeRooms.length
+            ? "Rooms not divided by a wall (a loft, one big open space): signal already passes where no wall is drawn. Marking the edge open records that on the map, and the 3D house leaves the wall out there."
+            : "Save Layout first: a room's edges can be marked once its outline is saved.")),
+      ]));
 
       // Door/window marking (docs/IDEA_DOOR_WINDOW_BARRIERS.md, step 3):
       // active only while ctx.state.maps._doorMarkBarrierId is set (a
@@ -2660,6 +3014,31 @@ function _edit(ctx, map, allMaps){
             el("div",{class:"muted",style:"font-size:10px"}, bar.material === "open" ? `Open (Loft) · ${(bar.points||[]).length} pts` : `${bar.material} · ${bar.attenuation_dbm}dB · ${(bar.points||[]).length} pts`),
             linkedName ? el("div",{style:"font-size:10px;color:#c4b5fd;margin-top:2px"}, `🚪 ${linkedName}`) : null,
           ]));
+          // An Open (Loft) edge's railing in Live Aboard (2026-11-02): the
+          // barrier's own choice (rail "glass" or "none"). One drawn before
+          // this choice has no rail word and is railed only where it looks
+          // down into a hall that rises past it (live_aboard_house.js
+          // applyBarriers), as before.
+          if(bar.material === "open" && _heightsOn(ctx)){
+            const rawRail = ((ctx.state.model?.rf_barriers_m || []).find(b => b.id === bar.id) || {}).rail;
+            const railNow = rawRail === "glass" ? "glass" : rawRail === "none" ? "none" : null;
+            const railBtn = el("button",{class:"btn tiny" + (railNow === "glass" ? " primary" : "")},
+              railNow === "glass" ? "Railing" : railNow === "none" ? "No railing" : "Railing: as before");
+            railBtn.title = railNow ? "In Live Aboard: a glass railing on this edge, or none. Click to change."
+              : "In Live Aboard this edge is railed only where it looks down into a hall that rises past it (as before this choice). Click for a railing; click again for none.";
+            railBtn.addEventListener("click", async (ev)=>{
+              ev.stopPropagation();
+              const raw = (ctx.state.model?.rf_barriers_m || []).find(b => b.id === bar.id);
+              if(!raw){ ctx.toast("That edge no longer exists.", true); return; }
+              try {
+                await ctx.actions.callWS({ type: "padspan_bright/fabric_rf_barrier_set",
+                  barrier: { ...raw, rail: railNow === "glass" ? "none" : "glass" } });
+                await ctx.actions.modelRefresh();
+                renderAll(); renderTools();
+              } catch (e) { ctx.toast("Could not update: " + (e.message || e), true); }
+            });
+            row.appendChild(railBtn);
+          }
           if(!bar.linked_entity_id){
             const doorBtn = el("button",{class:"btn tiny"},"Door");
             doorBtn.title = "Mark a door/window on this wall";
@@ -2699,7 +3078,7 @@ function _edit(ctx, map, allMaps){
           layersDiv.appendChild(row);
         }
         const clearAllBtn = el("button",{class:"btn inline",style:"margin-top:6px",onclick: async ()=>{
-          if(!confirm(`Delete all ${bList.length} wall(s) on this floor from the fabric?`)) return;
+          if(!confirm(`Delete all ${bList.length} wall(s) on this floor from the layout?`)) return;
           for (const bar of bList) await _removeWall(bar.id);
           ctx.state.maps._selectedBarrierId = null;
           renderAll(); renderTools();
@@ -2708,7 +3087,7 @@ function _edit(ctx, map, allMaps){
         right.appendChild(layersDiv);
       }
 
-    } else {
+    } else if(ctx.state.maps._mode!=="measure"){
       right.appendChild(el("div",{class:"muted", style:"margin-top:10px;font-size:12px"}, "Room boundary tools"));
 
       // Build lookup: rooms already placed on OTHER maps (for warning in dropdown)
@@ -2766,7 +3145,10 @@ function _edit(ctx, map, allMaps){
         renderAll(); refreshList(); renderTools();
       }}, "Clear boundary");
 
-      right.appendChild(roomSel);
+      right.appendChild(el("div",{style:"display:flex;gap:8px;align-items:center;flex-wrap:wrap"},[
+        roomSel,
+        !_focused && (!ctx.actions.canOpen || ctx.actions.canOpen("rooms")) ? el("button",{class:"btn inline", style:"font-size:11px;padding:2px 10px", "data-all-rooms":"edit", title:"Every room's settings on one page (unsaved outlines stay here until you Save)", onclick:()=>ctx.actions.openRooms()}, "All rooms") : null,
+      ]));
 
       // Warning if selected room is already drawn on another map
       const _selRoom = ctx.state.maps._selectedRoom;
@@ -2777,7 +3159,7 @@ function _edit(ctx, map, allMaps){
 
       // "Enclose" button — auto-generate RF barriers along all edges of this room's polygon
       const encloseBtn = el("button",{class:"btn inline", style:"color:#f59e0b;border-color:#92400e",
-        title:"Add weak RF barriers (3 dB) along every edge of this room's boundary polygon — models thin interior walls",
+        title:"Add weak signal walls (3 dB) along every edge of this room's boundary polygon — models thin interior walls",
         onclick: async ()=>{
         const r2 = ctx.state.maps._selectedRoom;
         if(!r2){ ctx.toast("Choose a room first.", true); return; }
@@ -2798,7 +3180,7 @@ function _edit(ctx, map, allMaps){
       }}, "Enclose (3dB walls)");
 
       right.appendChild(el("div",{style:"display:flex;gap:10px;flex-wrap:wrap;margin-top:8px"},[
-        startBtn, undoPt, finishBtn, clearBtn, encloseBtn,
+        startBtn, undoPt, finishBtn, clearBtn, _toolOk("barriers") ? encloseBtn : null,
       ]));
 
       const r = ctx.state.maps._selectedRoom;
@@ -3039,7 +3421,7 @@ function _edit(ctx, map, allMaps){
       const _fabTx = (ctx.state.model?.map_transforms || {})[map.id];
       if (_fabTx && _fabTx.scale_x_m) {
         mPanel.appendChild(el("div",{style:"font-size:11px;color:#52b788;margin-top:8px"},
-          `Current fabric scale: ${_fabTx.scale_x_m.toFixed(1)}m \u00d7 ${_fabTx.scale_y_m.toFixed(1)}m`));
+          `Current layout scale: ${_fabTx.scale_x_m.toFixed(1)}m \u00d7 ${_fabTx.scale_y_m.toFixed(1)}m`));
         mPanel.appendChild(el("div",{style:"font-size:10px;color:#64748b;margin-top:2px"},
           `World origin: (${(_fabTx.origin_x_m||0).toFixed(2)}, ${(_fabTx.origin_y_m||0).toFixed(2)})m \u2014 locked; display edits never move it`));
         // No "Re-anchor origin" button: it sent only the map id, which the
@@ -3048,7 +3430,7 @@ function _edit(ctx, map, allMaps){
         // align editor, which sends the new pose.
       } else if (cal.px_per_meter) {
         mPanel.appendChild(el("div",{style:"font-size:11px;color:#f59e0b;margin-top:8px"},
-          `Legacy map scale: ${cal.px_per_meter.toFixed(1)} px/m (not in fabric yet)`));
+          `Legacy map scale: ${cal.px_per_meter.toFixed(1)} px/m (not in the layout yet)`));
       }
       const resetBtn = el("button",{class:"btn inline",style:"font-size:10px;padding:2px 8px;margin-top:6px;color:#94a3b8"}, "Start Over");
       resetBtn.addEventListener("click", () => { ctx.state.maps._measurePts = []; ctx.state.maps._measurements = []; renderAll(); renderTools(); });
@@ -3063,7 +3445,6 @@ function _edit(ctx, map, allMaps){
   };
 
   // --- Interactions on the stage ---
-  stage.title = (ctx.state.maps._mode==="receivers") ? "Double-click to add receiver; drag to reposition" : "Click to add room points; double-click to finish";
   stage.addEventListener("dblclick", (ev)=>{
     if(ctx.state.maps._mode==="receivers"){
       const rect = overlay.getBoundingClientRect();
@@ -3125,6 +3506,13 @@ function _edit(ctx, map, allMaps){
       if(!ctx.state.maps._doorMarkPts) ctx.state.maps._doorMarkPts = [];
       if(ctx.state.maps._doorMarkPts.length < 2) ctx.state.maps._doorMarkPts.push(snapped);
       renderAll(); renderTools();
+      return;
+    }
+    // Open edge: the tap snaps to the nearest saved room edge and marks it open.
+    if(ctx.state.maps._mode==="barriers" && ctx.state.maps._openEdgeTap){
+      const rect = overlay.getBoundingClientRect();
+      _openEdgeTap(clamp01((ev.clientX - rect.left) / rect.width), clamp01((ev.clientY - rect.top) / rect.height))
+        .then(()=>{ renderAll(); renderTools(); });
       return;
     }
     // Measure mode: collect 2 points (minimal DOM update, no full re-render)
@@ -3299,7 +3687,7 @@ function _edit(ctx, map, allMaps){
   }}, "Trim Image");
 
   // Insert Trim button into the existing title row buttons (direct reference — no fragile querySelector)
-  if (ctx.hass?.user?.is_admin !== false) titleBtns.insertBefore(trimToggleBtn, titleBtns.firstChild);
+  if (!_focused && ctx.hass?.user?.is_admin !== false) titleBtns.insertBefore(trimToggleBtn, titleBtns.firstChild);
 
   // ── Rotate Image Panel ─────────────────────────────────────────────────
   // Bakes rotation directly into the image file (not a CSS transform) so all
@@ -3313,7 +3701,7 @@ function _edit(ctx, map, allMaps){
   const _canRotate = !_hasStackTieIns;
 
   const rotatePanel = el("div",{style:"display:none;margin-top:10px"});
-  if(_canRotate && url && ctx.hass?.user?.is_admin !== false){
+  if(!_focused && _canRotate && url && ctx.hass?.user?.is_admin !== false){
     let _rotAngle = 0;
     const rotStatus = el("div",{class:"mono",style:"font-size:12px;margin-top:6px"}, "0°");
 
@@ -3439,12 +3827,12 @@ function _edit(ctx, map, allMaps){
       picStatus, picInput,
     ]));
   }
-  card.appendChild(rotatePanel);
-  card.appendChild(trimPanel);
+  if(!_focused){ card.appendChild(rotatePanel); card.appendChild(trimPanel); }
   card.appendChild(stage);
   card.appendChild(info);
   card.appendChild(right);
-  card.appendChild(list);
+  // The layout as text is for the full editor, not a view with one tool.
+  if(!_tools) card.appendChild(list);
 
   return card;
 }
@@ -3544,7 +3932,7 @@ function _libraryThumb(m, ctx, reco){
       const pts = g.points_m.map(p => metresToMapFrac(tf, Number(p[0]), Number(p[1]))).filter(Boolean);
       if (pts.length < 3) continue;
       const c = roomColor ? roomColor(room) : "#52b788";
-      s += `<polygon points="${pts.map(p=>`${p[0]},${p[1]}`).join(" ")}" fill="${c}22" stroke="${c}" stroke-width="0.005"/>`;
+      s += `<polygon points="${pts.map(p=>`${p[0]},${p[1]}`).join(" ")}" fill="${ctx.helpers.roomColorAlpha(c, "22")}" stroke="${c}" stroke-width="0.005"/>`;
     }
     for (const p of Object.values(ctx.state.model?.scanner_positions_m || {})) {
       if (!p || String(p.floor_id || "main") !== fid || typeof p.x_m !== "number") continue;
@@ -3556,7 +3944,7 @@ function _libraryThumb(m, ctx, reco){
       if(!b || b.type!=="poly" || !b.points?.length) continue;
       const pts = b.points.map(p=>`${p[0]},${p[1]}`).join(" ");
       const c = roomColor ? roomColor(room) : "#52b788";
-      s += `<polygon points="${pts}" fill="${c}22" stroke="${c}" stroke-width="0.005"/>`;
+      s += `<polygon points="${pts}" fill="${ctx.helpers.roomColorAlpha(c, "22")}" stroke="${c}" stroke-width="0.005"/>`;
     }
     for(const rx of (m.receivers||[])){
       s += `<circle cx="${rx.x||0}" cy="${rx.y||0}" r="0.022" fill="#52b788" opacity="0.9"/>`;
@@ -3951,7 +4339,10 @@ function _export(ctx, active, maps_list){
   const exportMap = maps_list.find(m=>m.id===ctx.state.maps._exportMapId) || maps_list[0];
 
   const card = el("div",{class:"card"});
-  card.appendChild(el("div",{style:"font-weight:700;font-size:15px;margin-bottom:10px"},"Export"));
+  card.appendChild(el("div",{class:"card-head",style:"margin-bottom:10px"},[
+    el("div",{style:"font-weight:700;font-size:15px"},"Export"),
+    ctx.helpers.helpBtn ? ctx.helpers.helpBtn("maps_export") : null,
+  ]));
 
   // Map selector
   const mapSel = document.createElement("select");
@@ -4226,7 +4617,7 @@ const BRIGHT_PRO_MANUAL = [
     "subsections": [
       {
         "heading": "What your licence unlocks",
-        "body": "PadSpan Bright already shows every light on your map. Tap one to switch it, or tap and hold for brightness and colour. Without a Bright Pro key, unplaced lights stay grouped in the middle of their rooms and the placement and styling tools are switched off.\n\nA Bright Pro key lets you place each fixture where it really hangs, rotate it, set its shape and size, and use the Showcase, Isolux, Scene and Ripple map tools. Correcting a light that PadSpan has mistaken for the wrong type is a separate PadSpan Pro feature. Your sidebar does not depend on either key: a Bright build always shows Mapping, Health and Settings.",
+        "body": "PadSpan Bright already shows every light on your map. Tap one to switch it, or tap and hold for brightness and colour. Without a Bright Pro key, unplaced lights stay grouped in the middle of their rooms and the placement and styling tools are switched off.\n\nA Bright Pro key lets you place each fixture where it really hangs, rotate it, set its shape and size, and use the Showcase, Light spread, Scene and Ripple map tools. Correcting a light that PadSpan has mistaken for the wrong type is a separate PadSpan Pro feature. Your sidebar does not depend on either key: a Bright build always shows Mapping, Rooms, Health and Settings.",
         "steps": [],
         "notes": []
       },
@@ -4248,7 +4639,7 @@ const BRIGHT_PRO_MANUAL = [
         "body": "",
         "steps": [
           "The Atlas is its own entry in your sidebar, on by default — that's the one to use day to day, not the PadSpan Mapping tab.",
-          "To turn it off or back on: Settings → UI Structure (Advanced mode), the Atlas card. Tick or untick Show the Atlas in the Home Assistant sidebar, click Save, and restart Home Assistant."
+          "To turn it off or back on: Settings → Atlas (Advanced mode), the Atlas card. Tick or untick Show the Atlas in the Home Assistant sidebar, click Save, and restart Home Assistant."
         ],
         "notes": [
           "It stays the way you leave it after updates."
@@ -4277,7 +4668,7 @@ const BRIGHT_PRO_MANUAL = [
         "heading": "Choose what to show and which floor",
         "body": "The buttons above the map are split into two groups: what to show, and, in a multi-floor home, which floor to show it on.",
         "steps": [
-          "Tap All, Lights, Strips, Fans, Motion, Temps or Air to bring just that kind of device to the front. Everything else dims and stops responding to taps until you tap the same button again, or tap All. Only buttons for devices your house actually has appear.",
+          "Tap a kind (All, Lights, Strips, Fans, Motion, Temps, Humidity, Air, Locks, Doors/Windows and Emergency) to bring just that kind of device to the front. Everything else dims and stops responding to taps until you tap the same button again, or tap All. Only buttons for devices your house actually has appear.",
           "On a home with more than one floor, tap a floor's name to jump straight to it, or All to see every floor again. Each floor button carries a small number showing how much is on up there.",
           "Tap Find active to jump straight to whatever's on or tripped right now."
         ],
@@ -4287,7 +4678,7 @@ const BRIGHT_PRO_MANUAL = [
         "heading": "The light index",
         "body": "Below the map is a table listing every light in the house, whether or not it's placed on the map.",
         "steps": [
-          "Pick a type from the dropdown above the table — All types, Lights, Strips, Fans, Motion, Temps or Air — to show only that kind.",
+          "Pick a type from the dropdown above the table (All types, or any kind your house has, from Lights to Emergency) to show only that kind.",
           "Click a column heading — Code, Light, Room or State — to sort by it. Click the same heading again to reverse the order, and a third click puts the list back in its normal order."
         ],
         "notes": [
@@ -4326,13 +4717,13 @@ const BRIGHT_PRO_MANUAL = [
           "Click Upload & Convert."
         ],
         "notes": [
-          "Upload one plan per floor. Mixing two levels into the same picture makes rooms harder to keep straight.",
-          "Once it uploads, you're taken straight into the Edit tab to start scaling and drawing rooms."
+          "One plan per floor is easiest: mixing two levels into the same picture makes rooms harder to keep straight. A floor can have more than one plan (a wing drawn on its own); only Outside is limited to one.",
+          "In Advanced mode you're then taken into the Edit tab to set the scale and draw rooms. In Basic mode, Open on the plan in the Library starts the Setup Wizard on it; Setup at the top of Mapping guides the whole job."
         ]
       },
       {
         "heading": "Find your plans in the Library",
-        "body": "Every plan you upload shows up in the Library tab, grouped by floor. Each one shows a thumbnail, its pixel size, and whether it's been scaled yet — \"not placed\" means the real-world size still isn't set. Tap Open to jump back into editing it (editing is in Advanced mode, so in Basic mode Open switches to Advanced for you), or Delete to remove it.",
+        "body": "Every plan you upload shows up in the Library tab, grouped by floor. Each one shows a thumbnail, its pixel size, and whether it's been scaled yet — \"not placed\" means the real-world size still isn't set. Tap Open to carry on with it (in Advanced mode it opens in the Edit tab; in Basic mode it starts the Setup Wizard at Set the scale), or Delete to remove it.",
         "steps": [],
         "notes": []
       },
@@ -4340,7 +4731,7 @@ const BRIGHT_PRO_MANUAL = [
         "heading": "Set the scale",
         "body": "Rooms can be drawn on the picture alone, but walls need real-world metres. Set the scale first so distances on the map match distances in your home.",
         "steps": [
-          "In the Edit tab, click Measure.",
+          "In the Edit tab, click 📏 Measure.",
           "Click two points on the map that you know the real distance between — opposite ends of a wall, a doorway, anything you can check with a tape measure.",
           "Type that distance in metres and click Add 1st Measurement.",
           "Click two more points at a different angle from the first pair, and click Add 2nd Measurement. Measuring twice at different angles checks that the photo itself isn't stretched.",
@@ -4360,7 +4751,7 @@ const BRIGHT_PRO_MANUAL = [
           "Click Start drawing, then click around the room's outline on the photo, one point per corner.",
           "Click Undo point if you misclick.",
           "Double-click, or click Finish, once you've placed at least three points, to close the shape.",
-          "Click Save Layout when you're done."
+          "Click Save Layout when you're done: until then the rooms are only a draft."
         ],
         "notes": [
           "Clear boundary removes the shape for whichever room is selected in the dropdown, so you can redraw it.",
@@ -4372,8 +4763,8 @@ const BRIGHT_PRO_MANUAL = [
         "heading": "Add interior walls (optional)",
         "body": "Marking your real interior walls keeps the map an accurate record of your home. This needs the scale set first — without it, there's nowhere to store a wall's real position.",
         "steps": [
-          "In the Edit tab, click RF Barriers.",
-          "Pick the material that matches the real wall: Open (Loft), Brick, Concrete, Metal, or Custom. Open marks a spot with no real wall — a loft railing or open doorway you still want on the map. In Live Aboard an open edge over a hall that rises past it (a mezzanine or gallery, with the floor kept at its normal height in Floor Heights and the hall given its full height with Rises to in Rooms) gets a railing; anywhere else it stays an open gap.",
+          "In the Edit tab, click Signal walls.",
+          "Pick the material that matches the real wall: Open (Loft), Brick, Concrete, Metal, or Custom. Open marks a spot with no real wall — a loft railing or open doorway you still want on the map. An open edge, or no wall drawn at all, already lets signal through for positioning and coverage; what marking it adds is the record on the map, and the 3D house leaves out the wall it would otherwise draw there. In Live Aboard the Railing button on the edge's row gives it a railing, or none; an edge drawn from now on starts with none. One from before keeps what it shows: a railing over a hall that rises past it (a mezzanine or gallery, with the floor kept at its normal height in Floor Heights and the hall given its full height on the Rooms page (Ceiling height) or with Rises to on Mapping → Layout), an open gap anywhere else.",
           "Click along the wall on the photo, one point per corner or bend.",
           "Click Undo point to remove the last point.",
           "Double-click, or click Finish, once you have at least two points."
@@ -4381,6 +4772,7 @@ const BRIGHT_PRO_MANUAL = [
         "notes": [
           "Cancel discards a wall you're still drawing.",
           "A wall saves the moment you finish it — there's no separate Save Layout step for walls.",
+          "Open edges, under the drawing buttons: Open edge: tap a room edge snaps to the nearest saved room edge and marks just that edge open, exactly along it; Open all edges does a whole room, for a loft or one big open space. An edge two rooms share is marked once.",
           "Click a wall on the map, or in the \"Walls on this floor\" list, to select it. Delete removes just that one; Delete all walls on this floor clears every wall on the current floor."
         ]
       }
@@ -4445,7 +4837,7 @@ const BRIGHT_PRO_MANUAL = [
         "body": "",
         "steps": [
           "Click Undo (or press Ctrl+Z) to step back through your unsaved edits one at a time; click Redo (Ctrl+Y) to step forward again.",
-          "Use the filter dropdown above the light index to show only one kind of device at a time — lights, strips, fans, motion sensors, temperature sensors or air-quality sensors.",
+          "Use the filter dropdown above the light index to show only one kind of device at a time: lights, strips, fans, motion, temperature, humidity or air-quality sensors, locks, doors and windows, or emergency lights.",
           "Click a column heading — Code, Light, Room or State — to sort the index by it. Click again to reverse the order; a third click returns to the underlying order, sorted by room and then by name.",
           "Click \"Hide untouched\" to show only the fixtures you've actually resized, rotated, recoloured or given a shape — useful once most of the house is placed and you just want to see what's left to style. Moving a light on its own doesn't count as touching it.",
           "Click Hide on a light's row to drop it off the map entirely — it stays listed in the index. Click Show on a hidden row to bring it back."
@@ -4461,11 +4853,11 @@ const BRIGHT_PRO_MANUAL = [
     "intro": "The buttons above the map change only what you see. They do not change saved placements, sizes or rotations. A marker's outline colour identifies the type of device.",
     "subsections": [
       {
-        "heading": "The view buttons: Showcase, Isolux, Scene and Ripple",
-        "body": "Showcase draws fixtures in their current colours and adds light pools and shadows. It does not move a fixture or stop you from editing it.\n\nFit room appears when Showcase is on. It keeps a fixture's drawing inside its room with a small gap at the walls. Your saved size and rotation do not change.\n\nIsolux adds contour bands showing the estimated spread from each fixture's position and brightness.\n\nScene previews four colour layouts: Sunset, Dusk, Ember and Ocean. Tap Scene to move through them, then tap once more to turn the preview off. The rotate button turns the layout 45° at a time. Your lights do not change until you press Apply; Apply changes only the fixtures that are already on.\n\nRipple waits for you to tap the map, then runs a brightness pulse outward from that point. Only lights that are already on take part.",
+        "heading": "The view buttons: Showcase, Light spread, Scene and Ripple",
+        "body": "Showcase draws fixtures in their current colours and adds light pools and shadows. It does not move a fixture or stop you from editing it.\n\nFit room appears when Showcase is on. It keeps a fixture's drawing inside its room with a small gap at the walls. Your saved size and rotation do not change.\n\nLight spread adds contour bands showing the estimated spread from each fixture's position and brightness.\n\nScene previews four colour layouts: Sunset, Dusk, Ember and Ocean. Tap Scene to move through them, then tap once more to turn the preview off. The rotate button turns the layout 45° at a time. Your lights do not change until you press Apply; Apply changes only the fixtures that are already on.\n\nRipple waits for you to tap the map, then runs a brightness pulse outward from that point. Only lights that are already on take part.",
         "steps": [],
         "notes": [
-          "Showcase, Fit room and Isolux are remembered the next time you open the map. Scene and Ripple are not — they reset when you leave, so a preview never repaints the map on its own."
+          "Showcase, Fit room and Light spread are remembered the next time you open the map. Scene and Ripple are not — they reset when you leave, so a preview never repaints the map on its own."
         ]
       },
       {
@@ -4486,7 +4878,7 @@ const BRIGHT_PRO_MANUAL = [
         "heading": "Class chips and floor tabs",
         "body": "",
         "steps": [
-          "Above the map, tap a class chip — All, Lights, Strips, Fans, Motion, Temps or Air — to isolate that class. Its count shows how many of that class are on the map; everything else dims and stops responding to taps.",
+          "Above the map, tap a class chip (All, Lights, Strips, Fans, Motion, Temps, Humidity, Air, Locks, Doors/Windows and Emergency; only the kinds your house has) to isolate that class. Its count shows how many of that class are on the map; everything else dims and stops responding to taps.",
           "Tap the same chip again, or tap All, to bring everything back.",
           "On a house with more than one storey, floor tabs sit next to the chips: All, then one tab per floor. Each floor's tab carries a dot showing how many of its devices are on, and switches to a motion dot when something up there is tripped.",
           "Tap a floor's tab to work on just that storey — its own zoom and scroll position come back the way you left them.",
@@ -4535,7 +4927,7 @@ const BRIGHT_PRO_MANUAL = [
       },
       {
         "heading": "Checking Health",
-        "body": "Health shows the UI version and build, data mode, refresh time, discovered rooms, scanners and objects, scanner reliability, positioning checks and any problems found by System Critics. Check it when the map is missing data or a scanner or room is behaving unexpectedly.",
+        "body": "Health shows the UI version and build, data mode, refresh time, discovered rooms, scanners and objects, scanner reliability, positioning checks and the Problems found list. Check it when the map is missing data or a scanner or room is behaving unexpectedly.",
         "steps": [],
         "notes": []
       }
@@ -4623,11 +5015,11 @@ function _help(ctx){
     const card = el("div",{class:"card"});
     card.appendChild(el("div",{style:"font-weight:700"},"Presence & BLE mapping"));
     card.appendChild(el("div",{class:"muted", style:"margin-top:8px;line-height:1.5"},[
-      "• Upload any floorplan image; the UI converts it to optimized PNG and stores it under /config/padspan_bright/maps/, where only people logged in to Home Assistant can see it.",
+      "• Floor plans are kept in Home Assistant under /config/padspan_bright/maps/, where only people signed in to Home Assistant can see them.",
       el("br"),
-      "• Place receivers as normalized coordinates (0–1). This is the common industry approach (web GIS, indoor positioning) because it survives resizing.",
+      "• Walls are kept in real metres, so a plan needs its scale (Edit → 📏 Measure) before you draw them. Rotating or trimming a plan moves its receivers and rooms with it.",
       el("br"),
-      "• Next step after this: calibration layers (physical/distortion maps) + per-room fit, then drag-and-drop tag trajectories to validate.",
+      "• After Mapping comes Calibration: walking the house with a phone or beacon so PadSpan learns what each receiver hears from each room.",
     ]));
     wrap.appendChild(card);
   }
@@ -4852,8 +5244,8 @@ function _floorHeights(ctx){
     el("div",{class:"muted",style:"font-size:12px;margin-top:2px"},
       "Floor-to-floor is finished floor to the next finished floor — ceiling plus slab. It sets the vertical gap 3D positioning uses between floors. "+
       "Base elevation is derived by stacking those heights, so leave it blank unless stacking is wrong: a split level or a mezzanine. "+
-      "For a room taller than its floor (a double-height living room, a hall under a mezzanine or a gallery), keep the floor's normal height here and give that room its full height (floor to roof) in Rooms: select it, then Rises to. "+
-      "Live Aboard draws only that room's walls up to it; a gallery or mezzanine above it gets a railing on its open edge, and a mezzanine gets its real base elevation here and sits under the room's roof."),
+      "For a room taller than its floor (a double-height living room, a hall under a mezzanine or a gallery), keep the floor's normal height here and give that room its full height (floor to roof) on the Rooms page (Ceiling height), or on the Layout tab: select it, then Rises to (the same value). "+
+      "Live Aboard draws only that room's walls up to it; a gallery or mezzanine above it gets a railing where you set one (Railing, on its open edge in Signal walls), and a mezzanine gets its real base elevation here and sits under the room's roof."),
   ]);
   if(!floors.length){
     wrap.appendChild(el("div",{class:"muted",style:"font-size:12px;margin-top:8px"},"No floors defined in Home Assistant yet."));
@@ -4886,7 +5278,7 @@ function _floorHeights(ctx){
     el("td",{style:"padding:6px 8px"}, r.base),
     el("td",{style:"padding:6px 8px;color:#94a3b8"}, derived[r.id] != null ? String(derived[r.id]) : "—"),
   ]))));
-  wrap.appendChild(el("div",{style:"overflow-x:auto"}, table));
+  wrap.appendChild(el("div",{class:"table-scroll",style:"overflow-x:auto"}, table));
 
   const _val = (inp) => { const v = parseFloat(inp.value); return isFinite(v) ? v : null; };
   wrap.appendChild(el("div",{style:"margin-top:8px"}, el("button",{class:"btn inline", onclick: async ()=>{
@@ -5057,7 +5449,7 @@ function _stack(ctx, maps, helpBtn){
   }
   const hiddenIds = ctx.state.maps._hiddenMapIds;
 
-  const tableWrap = el("div",{style:"overflow-x:auto;margin-top:8px"});
+  const tableWrap = el("div",{class:"table-scroll",style:"overflow-x:auto;margin-top:8px"});
   const table = document.createElement("table");
   table.style.cssText = "width:100%;border-collapse:collapse;font-size:13px";
   const thead = document.createElement("thead");
@@ -5903,6 +6295,12 @@ function _stack(ctx, maps, helpBtn){
           }
 
           // Per-point residuals using the RAW matrix (exact, no decomposition)
+          // `dist` is in fractions of the reference picture's width and height,
+          // which read as "%" of nothing anyone could see: each point's error
+          // is shown in the reference's metres (`m`; it is placed, or the
+          // modal would not have opened). The colours still go by `pct`.
+          const refPl = _placeOf(refMap.id);
+          const _atM = (fx, fy) => mapFracToMetres(refPl, fx, fy) || [0, 0];
           const perPoint = [];
           const n = Math.min(refPts.length, tgtPts.length);
           for (let i = 0; i < n; i++) {
@@ -5912,7 +6310,9 @@ function _stack(ctx, maps, helpBtn){
             const dx2 = predX - refPts[i].x;
             const dy2 = predY - refPts[i].y;
             const dist = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+            const pm = _atM(predX, predY), rm = _atM(refPts[i].x, refPts[i].y);
             perPoint.push({ idx: i + 1, dist, pct: Math.round(dist * 1000) / 10,
+              m: Math.hypot(pm[0] - rm[0], pm[1] - rm[1]),
               predX, predY, refX: refPts[i].x, refY: refPts[i].y });
             console.log("[PtAlign] Pt " + (i+1) + ": pred=(" +
               predX.toFixed(4) + "," + predY.toFixed(4) + ") ref=(" +
@@ -6123,9 +6523,34 @@ function _stack(ctx, maps, helpBtn){
       title.textContent = "Preview";
       toolbar.appendChild(title);
 
+      // The residual in the reference's metres: the RMS of the per-point
+      // errors the chips below show, as `resPct` is the RMS of the fractions.
+      // The rating still goes by `resPct`, unchanged. It is a share of the
+      // reference picture's width AND depth, so in metres a limit depends on
+      // the direction: from the placement's least stretch to its greatest
+      // (the plan's depth and width, unless it leans). `ptLimits` says so.
+      const resM = perPoint.length ? Math.sqrt(perPoint.reduce((s, p) => s + p.m * p.m, 0) / perPoint.length) : 0;
+      const resText = resM.toFixed(2) + " m";
+      const [stretchLo, stretchHi] = (() => {
+        const pl = _placeOf(refMap.id);
+        const c = mapFracToMetres(pl, 0, 0), ex = mapFracToMetres(pl, 1, 0), ey = mapFracToMetres(pl, 0, 1);
+        if (!c || !ex || !ey) return [0, 0];
+        // The singular values of the fraction-to-metre map (its two columns).
+        const ux = ex[0] - c[0], uy = ex[1] - c[1], vx = ey[0] - c[0], vy = ey[1] - c[1];
+        const a = ux * ux + uy * uy, b = vx * vx + vy * vy, ab = ux * vx + uy * vy;
+        const r = Math.sqrt((a - b) * (a - b) + 4 * ab * ab);
+        return [Math.sqrt(Math.max(0, (a + b - r) / 2)), Math.sqrt((a + b + r) / 2)];
+      })();
+      const _limM = (f) => {
+        const lo = (f * stretchLo).toFixed(2), hi = (f * stretchHi).toFixed(2);
+        return (lo === hi ? lo : lo + "\u2013" + hi) + " m";
+      };
+      const ptLimits = "For this plan: Excellent under " + _limM(0.02) + ", Fair under " + _limM(0.05) +
+        (_limM(0.05).includes("\u2013") ? " (the limits are a share of its width and depth, so they depend on the direction)" : "") + ".";
+
       const stats = document.createElement("span");
       stats.style.cssText = "font-size:11px;color:#94a3b8";
-      stats.textContent = pairs + " pairs | residual " + resPct + "% | scale " +
+      stats.textContent = pairs + " pairs | residual " + resText + " | scale " +
         rScale.toFixed(3) + " | rot " + rRotation.toFixed(1) + "\u00b0" +
         (Math.abs(rStretch - 1.0) > 0.005 ? " | stretch " + Math.round(rStretch * 100) + "%" : "");
       toolbar.appendChild(stats);
@@ -6136,6 +6561,7 @@ function _stack(ctx, maps, helpBtn){
       const qLabel = resPct < 2 ? "Excellent" : resPct < 5 ? "Fair" : "Poor";
       qBadge.style.cssText = "font-size:10px;padding:2px 8px;border-radius:4px;background:" + qColor + "22;color:" + qColor + ";border:1px solid " + qColor + "44";
       qBadge.textContent = qLabel;
+      qBadge.title = ptLimits;
       toolbar.appendChild(qBadge);
 
       const spacer = document.createElement("div");
@@ -6197,7 +6623,7 @@ function _stack(ctx, maps, helpBtn){
                   if(res && res.scale_invalidated){
                     ctx.toast("Baked, but the map scale could not survive rotation + stretch — re-measure the map.", true);
                   } else {
-                    ctx.toast("Baked (" + pairs + " pairs, residual " + resPct + "%)");
+                    ctx.toast("Baked (" + pairs + " pairs, residual " + resText + ")");
                   }
                 })
                 .catch(e => ctx.toast("Bake upload failed: " + (e?.message || e?.code || String(e)), true));
@@ -6235,7 +6661,7 @@ function _stack(ctx, maps, helpBtn){
           if (ctx.actions.telemetryEvent) ctx.actions.telemetryEvent("point_align_applied");
           _close();
           buildStage();
-          ctx.toast("Aligned (" + pairs + " pairs, residual " + resPct + "%)");
+          ctx.toast("Aligned (" + pairs + " pairs, residual " + resText + ")");
         }
       };
       toolbar.appendChild(applyBtn);
@@ -6249,7 +6675,7 @@ function _stack(ctx, maps, helpBtn){
 
       // -- Preview panel: both maps overlaid with the computed transform --
       const previewPanel = document.createElement("div");
-      previewPanel.style.cssText = "flex:1;display:flex;flex-direction:column;align-items:center;" +
+      previewPanel.style.cssText = "flex:1;align-self:stretch;display:flex;flex-direction:column;align-items:center;" +
         "padding:16px;overflow:auto;min-height:0";
 
       const previewStage = document.createElement("div");
@@ -6438,20 +6864,25 @@ function _stack(ctx, maps, helpBtn){
           const chip = document.createElement("span");
           chip.style.cssText = "font-size:10px;padding:2px 6px;border-radius:3px;font-family:monospace;" +
             "background:" + ppColor + "18;color:" + ppColor + ";border:1px solid " + ppColor + "44";
-          chip.textContent = "Pt " + pp.idx + ": " + pp.pct.toFixed(1) + "%";
-          chip.title = "Point pair " + pp.idx + " — distance " + pp.dist.toFixed(4) + " (lower = better fit)";
+          chip.textContent = "Pt " + pp.idx + ": " + pp.m.toFixed(2) + " m";
+          chip.title = "Point pair " + pp.idx + " — " + pp.m.toFixed(2) + " m between the point and where the fit puts it (lower = better fit)";
           ppDiv.appendChild(chip);
         }
         previewPanel.appendChild(ppDiv);
+        const lim = document.createElement("div");
+        lim.style.cssText = "margin-top:4px;font-size:10px;color:#64748b;text-align:center";
+        lim.textContent = ptLimits;
+        previewPanel.appendChild(lim);
         const worstPt = perPoint.reduce((a, b) => b.pct > a.pct ? b : a, perPoint[0]);
         if (worstPt.pct > 3) {
           const tip = document.createElement("div");
           tip.style.cssText = "margin-top:4px;font-size:10px;color:#f59e0b;text-align:center";
-          tip.textContent = "Point " + worstPt.idx + " has high error (" + worstPt.pct.toFixed(1) + "%). Consider going Back and re-placing it.";
+          tip.textContent = "Point " + worstPt.idx + " has high error (" + worstPt.m.toFixed(2) + " m). Consider going Back and re-placing it.";
           previewPanel.appendChild(tip);
         }
       }
 
+      for (const c of previewPanel.children) c.style.flexShrink = "0";
       panelsRow.appendChild(previewPanel);
     };
 
@@ -6780,8 +7211,7 @@ function _stack(ctx, maps, helpBtn){
     else {
       const z = sortedIsoLevels[idx-1];
       ctx.state.maps._stackIsoFocus = z;
-      const opt = levelOptions.find(o=>o.value===z);
-      focusLbl.textContent = opt ? opt.label : `L${z}`;
+      focusLbl.textContent = _stackLevelName(ctx, maps.filter(m=>(m.stack?.z_level||0)===z), levelOptions, z);
     }
     rebuildIso();
   });
@@ -6964,14 +7394,26 @@ function _stack(ctx, maps, helpBtn){
     tbl.appendChild(tbody2);
     roomListPanel.appendChild(tbl);
   } else {
-    roomListPanel.appendChild(el("div",{class:"muted",style:"font-size:12px;padding:8px"},"No rooms drawn yet. Go to Maps → Edit to draw room boundaries."));
+    roomListPanel.appendChild(el("div",{class:"muted",style:"font-size:12px;padding:8px"},"No rooms drawn yet. Go to Mapping → Edit to draw room boundaries."));
   }
   card.appendChild(roomListPanel);
 
   return card;
 }
 
-// Render a single map's room bounds + receivers as an SVG string.
+// Where a name sits on a map stage. A stage's SVG stretches its 0-1 viewBox to
+// the plan's shape, so text inside it comes out stretched and grows with the
+// plan; a name is a fixed-size box over the SVG instead (.maplabel), at the
+// same fractions. The box shifts by as much of itself as the point is across
+// the stage (none at 0, half in the middle, all of it at 1), so the whole name
+// stays on the stage.
+function _stageLabelStyle(x, y, color){
+  const pct = (v) => Math.round(Math.min(1, Math.max(0, Number(v) || 0)) * 10000) / 100;
+  return `left:${pct(x)}%;top:${pct(y)}%;transform:translate(-${pct(x)}%,-${pct(y)}%);border-color:${color}`;
+}
+
+// Render a single map's room bounds + receivers as an SVG string, its names
+// after it (_stageLabelStyle); the caller's box is the stage's size.
 // Used in the Alignment Overlay (both ref and tgt layers) and in Point Align
 // panels. viewBox="0 0 1 1" with preserveAspectRatio="none" matches the
 // normalized coordinate system used by room bounds and receivers.
@@ -6981,6 +7423,8 @@ function _stackMapSVGStr(map, ctx, isTarget, showBg=true){
   const hasRooms = Object.keys(rb).length > 0;
   const borderCol = isTarget ? "#52b78888" : "#1b3526";
 
+  let labels = "";
+  const label = (x, y, text, color) => { labels += `<div class="maplabel" style="${_stageLabelStyle(x, y, color)}">${_escSVG(text)}</div>`; };
   let s = `<svg viewBox="0 0 1 1" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block">`;
   if(showBg){
     s += `<rect x="0.005" y="0.005" width="0.99" height="0.99" fill="${isTarget?"#071008aa":"#071008"}" stroke="${borderCol}" stroke-width="0.012"/>`;
@@ -6996,27 +7440,28 @@ function _stackMapSVGStr(map, ctx, isTarget, showBg=true){
       const alpha = isTarget ? "99" : "33";
       if(b.type==="poly" && Array.isArray(b.points) && b.points.length >= 3){
         const pts = b.points.map(p=>`${p[0]},${p[1]}`).join(" ");
-        s += `<polygon points="${pts}" fill="${color}${alpha}" stroke="${color}" stroke-width="0.006"/>`;
+        s += `<polygon points="${pts}" fill="${ctx.helpers.roomColorAlpha(color, alpha)}" stroke="${color}" stroke-width="0.006"/>`;
         const cx = b.points.reduce((a,p)=>a+p[0],0)/b.points.length;
         const cy = b.points.reduce((a,p)=>a+p[1],0)/b.points.length;
-        s += `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="middle" fill="${color}" font-size="0.05" font-family="system-ui,sans-serif">${_escSVG(room)}</text>`;
+        label(cx, cy, room, color);
       } else if(b.type==="circle"){
         const cx=b.cx||0.5, cy=b.cy||0.5, r=b.r||0.12;
-        s += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${color}${alpha}" stroke="${color}" stroke-width="0.006"/>`;
-        s += `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="middle" fill="${color}" font-size="0.05" font-family="system-ui,sans-serif">${_escSVG(room)}</text>`;
+        s += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${ctx.helpers.roomColorAlpha(color, alpha)}" stroke="${color}" stroke-width="0.006"/>`;
+        label(cx, cy, room, color);
       }
     }
     for(const r of (map.receivers||[])){
       s += `<circle cx="${r.x||0}" cy="${r.y||0}" r="0.022" fill="#52b788" opacity="0.9"/>`;
     }
   } else {
-    s += `<text x="0.5" y="0.43" text-anchor="middle" dominant-baseline="middle" fill="#94a3b8" font-size="0.07" font-family="system-ui,sans-serif">${_escSVG(map.name||map.id)}</text>`;
-    s += `<text x="0.5" y="0.58" text-anchor="middle" dominant-baseline="middle" fill="#4a6052" font-size="0.045" font-family="system-ui,sans-serif">no room bounds yet</text>`;
+    label(0.5, 0.48, map.name||map.id, "#94a3b8");
+    label(0.5, 0.53, "no room bounds yet", "#4a6052");
   }
 
-  s += `<text x="0.97" y="0.97" text-anchor="end" dominant-baseline="auto" fill="${isTarget?"#52b788":"#94a3b8"}" font-size="0.04" font-family="system-ui,sans-serif">${_escSVG(map.name||map.id)}</text>`;
+  // Bottom right; the target's above the reference's, which sits in the same corner.
+  label(0.98, isTarget ? 0.94 : 0.98, map.name||map.id, isTarget?"#52b788":"#94a3b8");
   s += `</svg>`;
-  return s;
+  return s + labels;
 }
 
 // Persistent-pins SVG overlay for the 2D alignment view: shows red target
@@ -7026,6 +7471,7 @@ function _stackMapSVGStr(map, ctx, isTarget, showBg=true){
 function _persistent2dPinsSVGStr(roomBounds, awayObjs){
   if(!awayObjs.length) return "";
   const rb = roomBounds || {};
+  let labels = "";
   let s = `<svg viewBox="0 0 1 1" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" style="position:absolute;top:0;left:0;width:100%;height:100%">`;
   for(const obj of awayObjs){
     const b = rb[obj.room];
@@ -7050,11 +7496,11 @@ function _persistent2dPinsSVGStr(roomBounds, awayObjs){
     s += `<line x1="${cx+gap}" y1="${cy}" x2="${cx+arm}" y2="${cy}" stroke="#ef4444" stroke-width="0.007"/>`;
     s += `<line x1="${cx}" y1="${cy-arm}" x2="${cx}" y2="${cy-gap}" stroke="#ef4444" stroke-width="0.007"/>`;
     s += `<line x1="${cx}" y1="${cy+gap}" x2="${cx}" y2="${cy+arm}" stroke="#ef4444" stroke-width="0.007"/>`;
-    s += `<text x="${cx}" y="${cy+R+0.030}" text-anchor="middle" fill="#fca5a5" font-size="0.038" font-family="system-ui,sans-serif" font-weight="600">${_escSVG(obj.user_label)}</text>`;
+    labels += `<div class="maplabel" style="${_stageLabelStyle(cx, Math.min(1, cy+R+0.030), "#fca5a5")}">${_escSVG(obj.user_label)}</div>`;
     s += `</g>`;
   }
   s += `</svg>`;
-  return s;
+  return s + labels;
 }
 
 // ── 3D Isometric SVG Renderer ─────────────────────────────────────────────────
@@ -7076,7 +7522,6 @@ function _stackIsoSVG(maps, ctx, levelOptions, focusLevel=null, floorGap=200, ho
   const TILE=260, FLOOR_GAP=floorGap, CX=390, CY=740, W=780, BASE_H=1060;
   const LAYER_PAL = ["#52b788","#f59e0b","#60a5fa","#e879f9","#fb923c","#34d399","#f87171","#a78bfa"];
   const roomColor = ctx.helpers.roomColor;
-  const lvlLabel = (z)=>{ const opt=(levelOptions||[]).find(o=>o.value===z); return opt ? opt.label : `L${z}`; };
 
   // Persistent last-seen pins: collect away objects (labeled + have room + stale)
   const showPins = !!(ctx.state.maps && ctx.state.maps._persistentPins);
@@ -7278,8 +7723,12 @@ function _stackIsoSVG(maps, ctx, levelOptions, focusLevel=null, floorGap=200, ho
     const ceil0 = byLevel.get(z)[0].stack?.ceiling_height_m || 2.4;
     s += `<circle cx="18" cy="${ly+11}" r="11" fill="${color}" opacity="0.9"/>`;
     s += `<text x="18" y="${ly+15}" text-anchor="middle" fill="#071008" font-size="12" font-weight="700">${i+1}</text>`;
-    s += `<text x="36" y="${ly+15}" fill="${color}" font-size="18" font-weight="500">${_escSVG(groupLabel)}</text>`;
-    s += `<text x="${W-10}" y="${ly+15}" text-anchor="end" fill="#94a3b8" font-size="15">${_escSVG(lvlLabel(z))} · ${ceil0}m</text>`;
+    const rightLabel = `${_stackLevelName(ctx, byLevel.get(z), levelOptions, z)} · ${ceil0}m`;
+    // SVG text doesn't wrap: a long plan name stops short of the floor name (about 0.6 em a letter).
+    const maxChars = Math.max(8, Math.floor((W - 10 - rightLabel.length*15*0.6 - 12 - 36) / (18*0.6)));
+    const shownLabel = groupLabel.length > maxChars ? groupLabel.slice(0, maxChars-1).trimEnd() + "…" : groupLabel;
+    s += `<text x="36" y="${ly+15}" fill="${color}" font-size="18" font-weight="500"><title>${_escSVG(groupLabel)}</title>${_escSVG(shownLabel)}</text>`;
+    s += `<text x="${W-10}" y="${ly+15}" text-anchor="end" fill="#94a3b8" font-size="15">${_escSVG(rightLabel)}</text>`;
   });
 
   // Outside overlay label
@@ -7289,6 +7738,21 @@ function _stackIsoSVG(maps, ctx, levelOptions, focusLevel=null, floorGap=200, ho
 
   s += `</svg>`;
   return s;
+}
+
+// What the plans at one stack level are called: each plan's own floor. The
+// level number can't say: with no levels set in HA the options are numbered in
+// name order, while plans keep the stack order the user gave them.
+function _stackLevelName(ctx, levelMaps, levelOptions, z){
+  const floors = (ctx.state.model && Array.isArray(ctx.state.model.floors)) ? ctx.state.model.floors : [];
+  const names = levelMaps.map(m => {
+    if(_isOutsideMap(m)) return "Outside";
+    const f = floors.find(x=>String(x.id)===String(m.floor_id));
+    return f ? (f.name || f.id) : null;
+  }).filter(Boolean);
+  if(names.length) return [...new Set(names)].join(" + ");
+  const opt = (levelOptions||[]).find(o=>o.value===z);
+  return opt ? opt.label : `L${z}`;
 }
 
 // Escape a string for safe inclusion in SVG text content.
@@ -7319,7 +7783,7 @@ function _buildRoomBoundsSVG(map, ctx, transparent=false){
     if(!b || b.type!=="poly" || !Array.isArray(b.points) || b.points.length<3) continue;
     const color = roomColor(room);
     const pts = b.points.map(p=>`${p[0]*iw},${p[1]*ih}`).join(" ");
-    s += `<polygon points="${pts}" fill="${color}44" stroke="${color}" stroke-width="2"/>`;
+    s += `<polygon points="${pts}" fill="${ctx.helpers.roomColorAlpha(color, "44")}" stroke="${color}" stroke-width="2"/>`;
     const cx = b.points.reduce((a,p)=>a+p[0],0)/b.points.length*iw;
     const cy = b.points.reduce((a,p)=>a+p[1],0)/b.points.length*ih;
     const fs = Math.max(12, Math.round(iw*0.024));
@@ -7532,6 +7996,11 @@ function _floorZAtVb(svg, x, y) {
     }
   }
   return null;
+}
+
+// A floor is chosen, so the others are drawn faded (iso_lights.js).
+function _aFloorIsFaded(svg) {
+  return !!svg.querySelector('g[data-role="floorghost"]');
 }
 
 // A light belongs to a ROOM, and a room belongs to a floor. That is the floor
@@ -7779,7 +8248,7 @@ export async function _commitDoorCircle(ctx, mapState) {
     const detail = nearestName
       ? ` Nearest wall ("${nearestName}") is ${nearestGapM > 0 ? nearestGapM.toFixed(2) + "m past the circle's own edge" : "already inside the circle, but not crossing its boundary twice"} — floor "${fid}", circle r=${circle.r_m.toFixed(2)}m at (${circle.x_m.toFixed(2)}, ${circle.y_m.toFixed(2)}).`
       : "";
-    ctx.toast("Move or resize the circle so it crosses a wall — either an RF Barrier or a room's own edge." + detail, true);
+    ctx.toast("Move or resize the circle so it crosses a wall — either a signal wall or a room's own edge." + detail, true);
     return;
   }
   const bar = match.bar;
@@ -7815,16 +8284,16 @@ export async function _commitDoorCircle(ctx, mapState) {
   const setBarrier = (barrier) => ctx.actions.callWS({ type: "padspan_bright/fabric_rf_barrier_set", barrier });
   try {
     if (split.before) {
-      await setBarrier({ id: bar.id, name: bar.name, material: bar.material,
+      await setBarrier({ id: bar.id, name: bar.name, material: bar.material, rail: bar.rail,
         attenuation_dbm: bar.attenuation_dbm, floor_id: fid, points_m: split.before });
       await setBarrier({ name: `Door — ${bar.name || "Wall"}`, material, attenuation_dbm: atten,
         floor_id: fid, points_m: split.middle, linked_entity_id: eid });
       if (split.after) {
-        await setBarrier({ name: `${bar.name || "Wall"} (2)`, material: bar.material,
+        await setBarrier({ name: `${bar.name || "Wall"} (2)`, material: bar.material, rail: bar.rail,
           attenuation_dbm: bar.attenuation_dbm, floor_id: fid, points_m: split.after });
       }
     } else if (split.after) {
-      await setBarrier({ id: bar.id, name: bar.name, material: bar.material,
+      await setBarrier({ id: bar.id, name: bar.name, material: bar.material, rail: bar.rail,
         attenuation_dbm: bar.attenuation_dbm, floor_id: fid, points_m: split.after });
       await setBarrier({ name: `Door — ${bar.name || "Wall"}`, material, attenuation_dbm: atten,
         floor_id: fid, points_m: split.middle, linked_entity_id: eid });
@@ -7913,7 +8382,24 @@ export function _wireLightsBuild(ctx, isoDiv, o) {
         // the storey it was dropped on instead of always the lowest one. By
         // geometry (_floorZAtVb) — the plate covers the WHOLE floor, empty
         // ground just outside a room included.
-        o.onDropPlace(v.x, v.y, _floorZAtVb(svg, v.x, v.y));
+        const dropZ = _floorZAtVb(svg, v.x, v.y);
+        // A floor chosen: off its plate, the pin goes home and nothing moves
+        // (as the queue's tap, below). No render follows, so it has to go now.
+        if (dropZ === null && _aFloorIsFaded(svg)) { dropG.removeAttribute("transform"); return; }
+        // A floor chosen, and the pin's light keeps another: refused as the
+        // queue's tap is. Nothing placed, and the queue isn't touched.
+        const pinEid = o.mapState._selLight && o.mapState._selLight.eid;
+        const pinLight = pinEid && o.lightsByEid[pinEid];
+        if (pinLight && _aFloorIsFaded(svg)) {
+          const floors = ctx.state.model?.floors || [];
+          const ownZ = _levelForFloorId(frame, ctx.state.model, floors, _floorIdForLight(ctx, pinEid, dropZ, frame, o.lightsByEid));
+          if (ownZ !== dropZ) {
+            ctx.toast(`${pinLight.code} belongs on ${floorNameAtLevel(frame, ctx.state.model, floors, ownZ) || "another floor"}. Choose that floor first.`);
+            dropG.removeAttribute("transform");
+            return;
+          }
+        }
+        o.onDropPlace(v.x, v.y, dropZ);
       };
       dropG.addEventListener("pointermove", mm);
       dropG.addEventListener("pointerup", up);
@@ -8094,7 +8580,12 @@ export function _wireLightsBuild(ctx, isoDiv, o) {
     const v = toVB(ev);
     const picked = _doorCircleFloorForClick(ctx, o, frame, v);
     mapState._doorCircleM = { x_m: picked.cx, y_m: picked.cy, r_m: 1, floorId: picked.fid };
-    ctx.toast("Drag the circle to position it, drag its edge to resize, then Save opening above.");
+    // The nearest wall can be on a floor that isn't chosen: the circle fades with
+    // that floor and takes no taps, so it's chosen first.
+    const pickedZ = _levelForFloorId(frame, ctx.state.model, ctx.state.model?.floors || [], picked.fid);
+    ctx.toast([...svg.querySelectorAll('g[data-role="floorghost"]')].some(g => Number(g.getAttribute("data-z")) === pickedZ)
+      ? `The nearest wall is on ${floorNameAtLevel(frame, ctx.state.model, ctx.state.model?.floors || [], pickedZ) || "another floor"}. Choose that floor to drag the circle, then Save opening above.`
+      : "Drag the circle to position it, drag its edge to resize, then Save opening above.");
     ctx.actions.renderRooms();
   });
 
@@ -8118,16 +8609,25 @@ export function _wireLightsBuild(ctx, isoDiv, o) {
     let fid = geo && geo.floor_id && !isOutdoorFloorId(geo.floor_id) ? String(geo.floor_id) : null;
     if (!fid) { const prev = ((ctx.state.model || {}).light_positions_m || {})[eid]; fid = prev && prev.floor_id && !isOutdoorFloorId(prev.floor_id) ? String(prev.floor_id) : null; }
     const v = toVB(ev);
+    const hitZ = _floorZAtVb(svg, v.x, v.y);
+    // A floor chosen: a faded floor ignores taps (its names and markers take
+    // none, so the tap lands here), and only a chosen plate takes the light.
+    if (hitZ === null && _aFloorIsFaded(svg)) return;
     if (!fid) {
       // Nothing to anchor a storey from (no room / outdoor room, never
       // placed) — the plate actually tapped, by geometry (_floorZAtVb: the
       // plate covers the whole floor, empty ground included), matching this
       // handler's own comment above. Used to always fall through to the
       // lowest floor regardless of where the tap landed.
-      const hitZ = _floorZAtVb(svg, v.x, v.y);
       fid = _floorIdForZ(ctx, Number.isFinite(hitZ) ? hitZ : (frame.levels[0] || 0), frame);
     }
     const z = _levelForFloorId(frame, ctx.state.model, floors, fid);
+    // A floor chosen, and this light keeps another: the point tapped on this
+    // plate would land off the plan on its own floor. It stays in the queue.
+    if (z !== hitZ && _aFloorIsFaded(svg)) {
+      ctx.toast(`${l.code} belongs on ${floorNameAtLevel(frame, ctx.state.model, floors, z) || "another floor"}. Choose that floor first.`);
+      return;
+    }
     const [x_m, y_m] = frame.isoInv(v.x, v.y, z);
     _pushUndo(o.mapState, [eid]);
     _draftAt(ctx, o, eid, x_m, y_m, fid, "manual");
@@ -8820,16 +9320,22 @@ export function _wireTransformHandles(ctx, svg, g, eid, frame, o, toVB) {
 function _lightsTourSteps(paid){
   const steps = [
     { title: "Welcome to the Atlas builder",
-      body: "Every light starts out clustered at the centre of its room. This is where you tell PadSpan exactly where each one really hangs — and, if you have a key, its shape, size, colour and effects too.",
+      body: "Every light starts out clustered at the centre of its room. This is where you tell PadSpan exactly where each one really hangs, and its shape, size, colour and effects too. That editing needs a PadSpan Bright Pro or PadSpan Pro key.",
       find: null },
-    { title: "Place a light",
-      body: "Drag any light on the map to its real spot. Or click + Place next to its row in the list below the map, then tap the map where it is.",
-      find: (wrap) => wrap.querySelector(".lv-stage") },
-    { title: "Give it a shape",
+    paid
+      ? { title: "Place a light",
+          body: "Drag any light on the map to its real spot. Or click + Place next to its row in the list below the map, then tap the map where it is.",
+          find: (wrap) => wrap.querySelector(".lv-stage") }
+      : { title: "Your lights on the map",
+          body: "Without a key, each light stays at the centre of its room and you can still switch it from the map. Dragging it to its real spot (or + Place in the list) needs a PadSpan Bright Pro or PadSpan Pro key.",
+          find: (wrap) => wrap.querySelector(".lv-stage") },
+    ...(paid ? [{ title: "Give it a shape",
       body: "Click a light in the list below the map (or hold one still on the map itself) to select it. A panel opens underneath with Shape, size and rotation. Pick the glyph that matches the real fixture, or leave it on Auto for PadSpan's own guess.",
-      find: (wrap) => _lightsTourFindTable(wrap) },
+      find: (wrap) => _lightsTourFindTable(wrap) }] : []),
     { title: "Fans, motion, temperature — and WLED",
-      body: "The chips above the map isolate one kind of device at a time — Lights, Strips, Fans, Motion, Temps, Air. A strip with effects (WLED or similar) gets its own colour and effect controls: hold it, on the map or in the sidebar, to open them.",
+      body: "The chips above the map pick one kind of device at a time and dim the rest: All, Lights, Strips, Fans, Motion, Temps, Humidity, Air, Locks, Doors/Windows and Emergency. Only the kinds your house has appear, each with its count. "
+        + (paid ? "A strip with effects (WLED or similar) gets its own colour and effect controls: hold it, on the map or in the sidebar, to open them."
+          : "A strip with effects (WLED or similar) gets its own colour and effect controls with a key."),
       find: (wrap) => wrap.querySelector(".lv-layerbar") },
   ];
   if (paid) {
@@ -8838,11 +9344,11 @@ function _lightsTourSteps(paid){
       find: (wrap) => _lightsTourFindButton(wrap, "Showcase") });
   } else {
     steps.push({ title: "What a key adds",
-      body: "Placement — what you just did — is free. Fixture shapes, sizes and angles, WLED strips, Showcase and Fit room need PadSpan Bright Pro or PadSpan Pro. " + _LIC_PATH + " is where a key goes once you have one.",
+      body: "Without a key, each light stays at the centre of its room, and you can still switch it from the map. Placing it where it really hangs, fixture shapes, sizes and angles, WLED strips, Showcase and Fit room need PadSpan Bright Pro or PadSpan Pro. " + _LIC_PATH + " is where a key goes once you have one.",
       find: null });
   }
   steps.push({ title: "You're set",
-    body: "Undo (Ctrl+Z) and Redo (Ctrl+Y) cover every edit before you save. Save Layout when you're happy — the separate Atlas entry in your sidebar is what your household uses day to day, and it shows exactly what you just built here.",
+    body: "Undo (Ctrl+Z) and Redo (Ctrl+Y) cover every edit before you save. Click Save placements when you're happy — the separate Atlas entry in your sidebar is what your household uses day to day, and it shows exactly what you just built here.",
     find: null });
   return steps;
 }
@@ -9197,8 +9703,11 @@ function _lightsTab(ctx, maps, active) {
   previewApi.openFloor = (z) => openFloorSheet(previewApi, lights, ctx.state.model, z);
 
   // View settings live in mapState so slider positions survive re-renders;
-  // seeded from (and saved to) the SAME settings keys the sidebar uses.
-  if (!mapState._lightsView) mapState._lightsView = {
+  // seeded from (and saved to) the SAME settings keys the sidebar uses. Opened
+  // before the settings came in, it's seeded again when they do, or the saved
+  // floor would be lost until the page is opened again.
+  const settingsIn = Object.keys(ctx.state.settings || {}).length > 0;
+  if (!mapState._lightsView || (mapState._lightsViewEarly && settingsIn)) mapState._lightsView = {
     floorGap: ctx.state.settings?.overview_iso_floor_gap ?? 150,
     horizGap: ctx.state.settings?.overview_iso_horiz_gap ?? 0,
     focusIdx: ctx.state.settings?.overview_iso_focus ?? 0,
@@ -9208,6 +9717,7 @@ function _lightsTab(ctx, maps, active) {
     // in-memory-only zoom reset to 1.0 on every reboot/reload.
     zoom: ctx.state.settings?.overview_iso_zoom ?? 1.0,
   };
+  mapState._lightsViewEarly = !settingsIn;
   const view = mapState._lightsView;
 
   // ── Transform mode ──────────────────────────────────────────────────────
@@ -9236,6 +9746,16 @@ function _lightsTab(ctx, maps, active) {
   // other devices if placed"); wall-linking a lock is a SEPARATE, additive
   // capability (see the Map column below), not a replacement for it.
   const placeableLights = lights.filter(l => !l.isDoor);
+  // The Plans tool's fixture symbol with no placed light: Mapping → Atlas on its
+  // floor, its room's lights chosen, for the person to place it. Nothing is written.
+  const openAtlasRoom = (floorId, room) => {
+    const mine = room ? placeableLights.filter(l => l.area_name === room) : [];
+    mapState._atlasFloorAsk = floorId;
+    mapState._selSet = new Set(mine.map(l => l.entity_id));
+    mapState._focusRow = mine.length ? mine[0].entity_id : null;
+    ctx.toast(room ? `Mapping → Atlas, ${room}: choose a light, then drop its pin where the plan draws it.` : "Mapping → Atlas: choose a light, then drop its pin where the plan draws it.");
+    ctx.actions.setMapsTab("lights");
+  };
   // The builder's checklist: how much of the house is actually placed.
   const nPlaced = placeableLights.filter(l => placements[l.entity_id]).length;
   const nApprox = placeableLights.filter(l => placements[l.entity_id] && placements[l.entity_id].source === "auto").length;
@@ -9528,7 +10048,7 @@ function _lightsTab(ctx, maps, active) {
       && typeof o.y_m === "number" && Number.isFinite(o.y_m))
     .map(o => ({
       key: o.key || o.address || o.entity_id || "",
-      label: o.user_label || o.private_ble_name || o.name || "",
+      label: deviceName(o, ""),
       x_m: o.x_m, y_m: o.y_m,
       floor_id: o.floor_id || null,
       // A tag lent to a guest (o.guest, only while Guest tags are on): the
@@ -9788,6 +10308,7 @@ function _lightsTab(ctx, maps, active) {
     // selection to place — dragging it onto the map otherwise has nothing
     // to do. (Defined above, hoisted so _wireLightsBuild can drive it too.)
     onDropPlace,
+    takeAtlasFloor: () => { const f = mapState._atlasFloorAsk; mapState._atlasFloorAsk = null; return f || null; },
     // Preview-as-sidebar asks the renderer for the use-surface ergonomics
     // (the sidebar's exact options) and wires the sidebar's exact gestures.
     codeChip: preview, hitHalo: preview, collapseUnplaced: preview,
@@ -9891,7 +10412,7 @@ function _lightsTab(ctx, maps, active) {
     // slot and its own remembered choice), only while the setting is on and
     // the tier is Pro.
     house3d: ctx.state.settings && ctx.state.settings.atlas_3d_enabled !== undefined ? {
-      slot: "builder", settings: ctx.state.settings,
+      slot: "builder", settings: ctx.state.settings, sample: ctx.state.dataMode !== "live", admin: ctx.hass?.user?.is_admin !== false,
       states: ctx.hass?.states || {}, config: ctx.hass?.config || null,
       // Mapping → Furnish (P2): the Furnish tool open, and what its flows and
       // "This is a device…" need: the connection, a toast, the entity registry.
@@ -9911,6 +10432,7 @@ function _lightsTab(ctx, maps, active) {
       trails: ctx.state.dataMode !== "live" ? null
         : { read: (msg) => { const { type, ...rest } = msg || {}; return ctx.actions.wsCall(type, rest); } },
       callWS: (msg) => { const { type, ...rest } = msg || {}; return ctx.actions.wsCall(type, rest); },
+      openAtlasRoom,
       // The 3D compass's Save: fabric_bearing_deg alone, straight to the wire
       // like the Settings box (settingsSet would re-render everything).
       saveNorth: async (b) => {
@@ -9941,6 +10463,11 @@ function _lightsTab(ctx, maps, active) {
         .then((r) => { mapState._heightsFile = undefined; _laFileHeights(ctx, mapState, changes && changes.heights_set, r); return r; }) : null,
       // Its heights, on the placement records (_laHeightsPut).
       heights: paid && !preview ? _laHeightsPut(ctx, mapState) : null,
+      // Open (Loft) edges' railing words, {barrier id: word}, each put on its
+      // stored record by the server (live_aboard.js stampEdgeRails: the railings
+      // from before become choices after a Save), on the same gate as Save.
+      barrierRail: paid && !preview ? (rails) => ctx.actions.wsCall("padspan_bright/fabric_rf_barrier_rails_stamp", { rails })
+        .then(async (r) => { await ctx.actions.modelRefresh(); return r; }) : null,
       // The placement records as saved: a height lives on its record; a
       // device dropped here and not yet saved has none (its height is the 3D
       // file's), and this tab's unsaved Height-row values are not saved ones.
@@ -9953,7 +10480,7 @@ function _lightsTab(ctx, maps, active) {
     onIsolux: async (v) => {
       mapState._lightsIsolux = v;
       try { await ctx.actions.settingsSet({ lights_isolux: v }); }
-      catch (e) { ctx.toast("Could not save Isolux: " + String(e), true); }
+      catch (e) { ctx.toast("Could not save Light spread: " + String(e), true); }
       ctx.actions.renderRooms();
     },
     // Automorph (Garry, 2026-09-07): same remembered-rendering-mode pattern
@@ -10062,6 +10589,14 @@ function _lightsTab(ctx, maps, active) {
     vacationModeEnabled: !!ctx.state.settings?.vacation_mode_enabled,
     vacationModeResumed: !!ctx.state.settings?.vacation_mode_pattern_for,
     vacationOptions: vacationOptionsOf(ctx.state.settings),
+    onVacationLights: async () => {
+      try { return (await ctx.actions.callWS({ type: "padspan_bright/vacation_lights" }))?.lights || []; }
+      catch (e) { return null; }
+    },
+    onVacationPreview: async () => {
+      try { return await ctx.actions.callWS({ type: "padspan_bright/vacation_preview" }); }
+      catch (e) { ctx.toast("Could not make the Vacation Mode preview: " + String(e), true); return null; }
+    },
     vacationModeEnds: vacationEndsText(ctx.state.settings),
     onVacationOptions: async (patch) => {
       try { await ctx.actions.settingsSet(patch); return true; }
@@ -10289,10 +10824,24 @@ function _lightsTab(ctx, maps, active) {
   // Mapping → Furnish (P2): the same card, its 3D house in the Furnish tool;
   // the light-placement tools are this tab's, not Furnish's.
   if (furnish) {
+    // Add data via plans (experimental): the vetting map lives in the 3D editor, so with no 3D on
+    // this device (no WebGL, too slow) its list opens here. Same gates as the Plans tool (lights_map.js).
+    const S = ctx.state.settings || {};
+    const plansList = S.ai_plans_enabled === true && ctx.state.dataMode === "live" && ctx.hass?.user?.is_admin !== false
+      && String(S.atlas_3d_ai_task_entity || "").startsWith("ai_task.") && !!la3dCannotHere();
+    const plansBox = plansList ? (mapState._plansListBox || (mapState._plansListBox = el("div", {}))) : null;
+    const plansBtn = plansList ? el("button", { class: "btn inline", style: "margin-left:6px", title: "This device shows no 3D view, so the AI's finds from your plans open as a list", onclick: async () => {
+      if (mapState._plansList) { mapState._plansList.dispose(); mapState._plansList = null; return; }
+      try {
+        mapState._plansList = await la3dPlansList(plansBox, { floors: ctx.state.model?.floors || [], toast: (t, bad) => ctx.toast(t, bad), openAtlasRoom,
+          callWS: (msg) => { const { type, ...rest } = msg || {}; return ctx.actions.wsCall(type, rest); } });
+      } catch (e) { ctx.toast(String((e && e.message) || e), true); }
+    } }, "Add data via plans (experimental)") : null;
     return el("div", {}, [
-      el("div", { class: "card", style: "padding:10px 12px;margin-bottom:12px;font-size:13px;line-height:1.5" },
-        "Furnish Live Aboard: Build adds a piece; drag it into place. Floor ▲ / ▼ moves it to another floor, and Height in room raises it onto a table, a shelf or a wall. Nothing is kept until Save."),
-      mapCardEl]);
+      el("div", { class: "card", style: "padding:10px 12px;margin-bottom:12px;font-size:13px;line-height:1.5" }, [
+        "Furnish Live Aboard: Build adds a piece; drag it into place. Floor ▲ / ▼ moves it to another floor, and Height in room raises it onto a table, a shelf or a wall. Nothing is kept until Save. ",
+        ctx.helpers.helpBtn ? ctx.helpers.helpBtn("aboard_3d") : null, plansBtn]),
+      plansBox, mapCardEl]);
   }
   // The drafting grid on the stage says "editing" without a word.
   if (paid && !preview) { const stage = mapCardEl.querySelector(".lv-stage"); if (stage) stage.classList.add("editing"); }
@@ -10738,12 +11287,16 @@ function _roomsTab(ctx, maps) {
   const fabricFloors = ctx.state.model?.fabric_floors || {};
 
   card.appendChild(el("div", { class: "card-head", style: "margin-bottom:4px" }, [
-    el("div", { style: "font-weight:700;font-size:15px" }, "The Fabric — rooms and scanners, in metres"),
+    el("div", { style: "display:flex;align-items:center;gap:8px" }, [
+      el("div", { style: "font-weight:700;font-size:15px" }, "Room and receiver layout, in metres"),
+      ctx.helpers.helpBtn ? ctx.helpers.helpBtn("maps_layout") : null,
+    ]),
+    (!ctx.actions.canOpen || ctx.actions.canOpen("rooms")) ? el("button", {class:"btn inline", style:"font-size:11px;padding:2px 10px", "data-all-rooms":"rooms", title:"Every room's settings on one page", onclick:()=>ctx.actions.openRooms()}, "All rooms") : null,
   ]));
   card.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:10px" },
     "The real-world model the positioning engine uses — edited directly, in metres, with no floor " +
     "plan involved. Green pins are your scanners: drag one to say where it actually is. " +
-    "Compare the saved fabric against the other forms of truth (your hand-tuned stack alignment, " +
+    "Compare the saved layout against the other forms of truth (your hand-tuned stack alignment, " +
     "or each photo's own calibration), refine, and only then commit the best layout. " +
     "Click a room to select it (Shift-click for a group), drag to move, drag a corner to reshape."));
 
@@ -10751,13 +11304,15 @@ function _roomsTab(ctx, maps) {
   const haFloors = ctx.state.model?.floors || [];
   const floorIds = [];
   const seenF = new Set();
-  const addF = (id, label) => { if (id && !seenF.has(id)) { seenF.add(id); floorIds.push([id, label || id]); } };
+  const outsideLabel = _outsideLabel(haFloors);
+  const addF = (id, label) => { if (id && !seenF.has(id)) { seenF.add(id); floorIds.push([id, label || (id === OUTSIDE_FLOOR_ID ? outsideLabel : id)]); } };
   for (const f of haFloors) addF(String(f.id), f.name || f.id);
   for (const g of Object.values(allGeo)) addF(String(g.floor_id || "main"));
   for (const m of maps) addF(String(m.floor_id || "main"));
   if (!floorIds.length) addF("main", "Main");
   if (!mapState._roomsFloorId || !seenF.has(mapState._roomsFloorId)) mapState._roomsFloorId = floorIds[0][0];
   const floorId = mapState._roomsFloorId;
+  const floorLabel = floorIds.find(([id]) => id === floorId)[1];
 
   const bar = el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px" });
   bar.appendChild(el("span", { class: "muted", style: "font-size:12px" }, "Floor:"));
@@ -10777,7 +11332,7 @@ function _roomsTab(ctx, maps) {
     const addRow = el("div", { style: "display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px" });
     const nameIn = el("input", {
       type: "text", placeholder: "New room name",
-      style: "width:150px;background:#0a150e;color:#e2e8f0;border:1px solid #2d5a3d;border-radius:4px;padding:3px 8px;font-size:12px",
+      style: "width:150px;box-sizing:content-box;background:#0a150e;color:#e2e8f0;border:1px solid #2d5a3d;border-radius:4px;padding:3px 8px;font-size:12px",
     });
     addRow.appendChild(nameIn);
     addRow.appendChild(el("button", {
@@ -10825,7 +11380,7 @@ function _roomsTab(ctx, maps) {
       },
     }, "+ Add room"));
     addRow.appendChild(el("span", { class: "muted", style: "font-size:11px" },
-      "Exists in the fabric only — no Home Assistant area or floor plan required."));
+      "Exists in the layout only — no Home Assistant area or floor plan required."));
     card.appendChild(addRow);
   }
 
@@ -11106,7 +11661,7 @@ function _roomsTab(ctx, maps) {
   // are tellable apart when stacked: fabric solid, placements dotted.
   const _blendLabeledSets = () => {
     const sets = [];
-    if (blendSources.fabric && Object.keys(fabricDraft).length) sets.push({ key: "fabric", label: "Fabric", rooms: fabricDraft, dashKind: null });
+    if (blendSources.fabric && Object.keys(fabricDraft).length) sets.push({ key: "fabric", label: "Saved layout", rooms: fabricDraft, dashKind: null });
     if (blendSources.transforms && candidates.transforms) sets.push({ key: "transforms", label: "Placements", rooms: candidates.transforms.rooms, dashKind: "dot" });
     return sets;
   };
@@ -11172,7 +11727,7 @@ function _roomsTab(ctx, maps) {
       ? ` · ${stats.rooms} rooms · ${stats.clusters > 1 ? "⚠" + stats.clusters : "✓" + (stats.clusters || 0)}`
       : "";
     const fabricStats = { rooms: Object.keys(fabricDraft).length, clusters: _roomClusterCount(Object.entries(fabricDraft)) };
-    const options = [["fabric", "Fabric (saved)", fabricStats]];
+    const options = [["fabric", "Saved layout", fabricStats]];
     if (candidates.transforms) options.push(["transforms", "Map placements", candidates.transforms.stats]);
     if (candidates.blended) options.push(["blended", "Blended", candidates.blended.stats]);
     if (candidates.imported) options.push(["imported", candidates.imported.label, candidates.imported.stats]);
@@ -11192,7 +11747,7 @@ function _roomsTab(ctx, maps) {
       // Which layouts feed the average — the user decides what's credible.
       const srcRow = el("div", { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:11px;color:#94a3b8;margin-left:8px" });
       srcRow.appendChild(el("span", {}, "averaging:"));
-      const srcs = [["fabric", "Fabric", Object.keys(fabricDraft).length > 0],
+      const srcs = [["fabric", "Saved layout", Object.keys(fabricDraft).length > 0],
                     ["transforms", "Placements", !!candidates.transforms]];
       for (const [key, label, avail] of srcs) {
         const lbl = el("label", { style: `display:flex;gap:4px;align-items:center;cursor:pointer;${avail ? "" : "opacity:0.4"}` });
@@ -11267,7 +11822,7 @@ function _roomsTab(ctx, maps) {
           `⚠ “${d.map_name}”: its trace and the saved rooms differ by one shared factor (×${d.ratio_x} across, ×${d.ratio_y} down) — one of the two predates a map change.`));
       }
       dRow.appendChild(el("span", { class: "muted", style: "font-size:10px" },
-        "Compare “Fabric (saved)” and “Map placements” over the photo; commit whichever matches the picture. Health → Auto Diagnostics has the full note."));
+        "Compare “Saved layout” and “Map placements” over the photo; commit whichever matches the picture. Health → Auto Diagnostics has the full note."));
       card.appendChild(dRow);
     }
   }
@@ -11884,7 +12439,7 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
         tools.appendChild(el("button", {
           class: "btn inline", style: "color:#f87171;border-color:#f8717140",
           onclick: async () => {
-            if (!confirm(`Delete room "${only}" from the fabric? Its shape, adjacency and scanner assignments go with it.`)) return;
+            if (!confirm(`Delete room "${only}" from the layout? Its shape, adjacency and scanner assignments go with it.`)) return;
             try {
               await ctx.actions.wsCall("padspan_bright/fabric_room_remove", { room: only });
               ctx.toast(`Deleted "${only}"`);
@@ -11954,7 +12509,7 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
               ok++;
             } catch (err) { fail++; console.warn("fabric_rf_barrier_set failed", b.name, err); }
           }
-          ctx.toast(fail ? `Saved ${ok}, failed ${fail}` : `✔ ${ok} fabric correction${ok !== 1 ? "s" : ""} saved`, !!fail);
+          ctx.toast(fail ? `Saved ${ok}, failed ${fail}` : `✔ ${ok} layout correction${ok !== 1 ? "s" : ""} saved`, !!fail);
           mapState._roomsDraftFloorId = null;   // re-copy from refreshed model
           mapState._roomsTruthCache = null;
           mapState._roomsScannerDraft = null;
@@ -12001,7 +12556,7 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
           const rooms = Object.keys(draft);
           const fabricCount = Object.keys(fabricDraft).length;
           const edited = changedRooms.length ? ` (incl. your ${changedRooms.length} edit${changedRooms.length !== 1 ? "s" : ""})` : "";
-          if (!confirm(`Commit this ${cand.label} layout${edited} to the base fabric for "${floorId}"? ${rooms.length} rooms will be written; ${fabricCount > rooms.length ? (fabricCount - rooms.length) + " fabric-only room(s) stay untouched." : "existing shapes with the same names are replaced."}`)) return;
+          if (!confirm(`Commit this ${cand.label} layout${edited} to the saved layout for "${floorLabel}"? ${rooms.length} rooms will be written; ${fabricCount > rooms.length ? (fabricCount - rooms.length) + " layout-only room(s) stay untouched." : "existing shapes with the same names are replaced."}`)) return;
           const btn = e.currentTarget;
           btn.disabled = true; btn.textContent = "Committing…";
           let ok = 0, fail = 0;
@@ -12020,14 +12575,14 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
               ok++;
             } catch (err) { fail++; console.warn("fabric_correct_room failed", room, err); }
           }
-          ctx.toast(fail ? `Committed ${ok}, failed ${fail}` : `✔ ${cand.label} committed to fabric (${ok} rooms)`, !!fail);
+          ctx.toast(fail ? `Committed ${ok}, failed ${fail}` : `✔ ${cand.label} committed to the layout (${ok} rooms)`, !!fail);
           mapState._roomsDraftFloorId = null;
           mapState._roomsCandDraft = null;
           mapState._roomsTruthCache = null;
           mapState._roomsTruth = "fabric";
           await ctx.actions.modelRefresh();
         },
-      }, `💾 Commit this layout to fabric${changedRooms.length ? ` (${changedRooms.length} edited)` : ""}`));
+      }, `💾 Commit this layout${changedRooms.length ? ` (${changedRooms.length} edited)` : ""}`));
       if (changedRooms.length) {
         pRow.appendChild(el("button", {
           class: "btn inline",
@@ -12047,18 +12602,18 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
           mapState._roomsDraft = merged;
           mapState._roomsTruth = "fabric";
           mapState._roomsSel = [];
-          ctx.toast(`${cand.label} loaded into the Fabric editor — refine, then Save corrections`);
+          ctx.toast(`${cand.label} loaded into the layout editor — refine, then Save corrections`);
           ctx.actions.renderRooms();
         },
-      }, "✏ Load into Fabric editor"));
+      }, "✏ Load into the layout editor"));
       pRow.appendChild(el("span", { class: "muted", style: "font-size:11px" },
-        "Drag/reshape rooms right here — nothing reaches the fabric until you commit."));
+        "Drag/reshape rooms right here — nothing reaches the saved layout until you commit."));
       card.appendChild(pRow);
     }
   } else {
     card.appendChild(el("div", { class: "muted", style: "padding:8px;margin:8px 0" },
       floorMapsAll.length
-        ? "No room shapes saved for this floor yet. Switch Layout above to preview the Stack alignment or System calibration, then Load into editor or Adopt."
+        ? "No room shapes saved for this floor yet. Switch Layout above to Map placements, then Commit this layout or Load into the layout editor."
         : "Nothing on this floor yet. Scanners appear here as soon as Home Assistant sees them — drag one to place it in metres. Room shapes are optional; trace them on a photo in the Edit tab if you want them."));
   }
 
@@ -12076,10 +12631,10 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
         class: "btn inline",
         style: "border-color:#52b788;color:#52b788",
         onclick: async () => {
-          if (!confirm(`Finalize "${floorId}"? The floor's room shapes become locked ground truth: bulk rebuilds from maps are refused (individual corrections stay possible).`)) return;
+          if (!confirm(`Finalize "${floorLabel}"? The floor's room shapes become locked ground truth: bulk rebuilds from maps are refused (individual corrections stay possible).`)) return;
           try {
             await ctx.actions.wsCall("padspan_bright/fabric_floor_finalize", { floor_id: floorId, committed: true });
-            ctx.toast(`🔒 Floor "${floorId}" finalized`);
+            ctx.toast(`🔒 Floor "${floorLabel}" finalized`);
             await refreshAfter();
           } catch (err) { ctx.toast("Finalize failed: " + (err.message || err), true); }
         },
@@ -12092,10 +12647,10 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
       class: "btn inline",
       style: "font-size:11px",
       onclick: async () => {
-        if (!confirm(`Unlock "${floorId}"? This re-allows bulk rebuilds from maps. Only needed if you intend to rebuild the whole floor.`)) return;
+        if (!confirm(`Unlock "${floorLabel}"? This re-allows bulk rebuilds from maps. Only needed if you intend to rebuild the whole floor.`)) return;
         try {
           await ctx.actions.wsCall("padspan_bright/fabric_floor_finalize", { floor_id: floorId, committed: false });
-          ctx.toast(`Floor "${floorId}" unlocked`);
+          ctx.toast(`Floor "${floorLabel}" unlocked`);
           await refreshAfter();
         } catch (err) { ctx.toast("Unlock failed: " + (err.message || err), true); }
       },

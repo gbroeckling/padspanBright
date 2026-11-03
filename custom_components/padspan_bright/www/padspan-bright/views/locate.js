@@ -39,6 +39,7 @@
  * unlike that presentation-only gate, there's a real write to refuse.
  */
 
+const { pickName } = await import(`./device_name.js${new URL(import.meta.url).search}`);
 const { tierAtLeast, currentTier } =
   await import(`./editions.js${new URL(import.meta.url).search}`);
 // The 90-day trial card (trial_offer.js). Optional: a card that fails to load
@@ -92,7 +93,7 @@ export function render(ctx, { targetKey } = {}) {
     const raw = (ctx.state.live?.snapshot?.objects?.list) || [];
     const candidates = raw
       .filter(o => !isScanner(o) && o.room)
-      .map(o => ({ key: o.key || o.address || o.entity_id, label: o.user_label || o.private_ble_name || o.name || o.address || o.entity_id || "?", room: o.room, floor_id: o.floor_id, x_m: o.x_m, y_m: o.y_m, identified: !!o.identified }))
+      .map(o => ({ key: o.key || o.address || o.entity_id, label: pickName(o, "?"), room: o.room, floor_id: o.floor_id, x_m: o.x_m, y_m: o.y_m, identified: !!o.identified }))
       .filter(o => o.key)
       .sort((a, b) => (b.identified - a.identified) || a.label.localeCompare(b.label));
 
@@ -272,7 +273,7 @@ function _buildGuidance(ctx, self, target) {
     card.appendChild(el("div", { style: "font-weight:700;font-size:15px;margin-bottom:6px" },
       `Head toward ${target.room}${floorNote ? "" : ""}`));
     card.appendChild(el("div", { class: "muted", style: "font-size:12px" },
-      `No mapped route between ${self.room} and ${target.room} yet — draw room adjacency in Mapping → Rooms to get turn-by-turn steps here.`));
+      `No mapped route between ${self.room} and ${target.room} yet — draw room adjacency in Mapping → Layout to get turn-by-turn steps here.`));
     return card;
   }
 

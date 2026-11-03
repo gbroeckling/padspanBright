@@ -454,7 +454,9 @@ def test_switch_fields_and_restore_fields_keep_the_span_bookkeeping():
     # kept aside as the stand-in (round 5).
     assert switch_fields({"vacation_mode_enabled": False}, True, now) == {
         "vacation_mode_enabled_at": now, "vacation_mode_pattern": {}, "vacation_mode_pattern_until": 0,
-        "vacation_mode_pattern_prev": {}, "vacation_mode_pattern_for": 0}
+        "vacation_mode_pattern_prev": {}, "vacation_mode_pattern_for": 0,
+        "vacation_mode_pattern_prev_source": "month", "vacation_mode_trip_source": "last_week",
+        "vacation_mode_pattern_end": 0}
     off = switch_fields({"vacation_mode_enabled": True, "vacation_mode_enabled_at": 9000.0}, False, now,
                         {"by": "Nicole", "via": "the Android app", "how": "panel"})
     assert off == {"vacation_mode_periods": [[9000.0, now]], "vacation_mode_enabled_at": 0,
@@ -774,8 +776,8 @@ def test_restoring_an_old_backup_while_home_never_brings_its_pattern_back():
 
 def _trip(start, end, pattern=None, **more):
     """A house that ran Vacation Mode from start to end (epoch-s), on the
-    pattern learned for it."""
-    return {"vacation_mode_enabled": False, "vacation_mode_enabled_at": 0,
+    pattern learned for it (from last week, the default)."""
+    return {"vacation_mode_enabled": False, "vacation_mode_enabled_at": 0, "vacation_mode_pattern_source": "last_week",
             "vacation_mode_periods": [[start, end]], "vacation_mode_pattern": pattern or {"light.a": {"*:1900": 1.0}},
             "vacation_mode_pattern_until": start, "vacation_mode_pattern_built_at": start + 60,
             "vacation_mode_tracked_since": start - 12 * 86400, **more}
@@ -791,7 +793,8 @@ def test_turned_back_on_soon_after_a_trip_it_carries_on_with_that_trips_routine(
     now = off + 11.4 * 86400
     assert resumable(data, now)
     on = switch_fields(data, True, now)
-    assert on == {"vacation_mode_enabled_at": now, "vacation_mode_pattern_for": now}
+    assert on == {"vacation_mode_enabled_at": now, "vacation_mode_pattern_for": now,
+                  "vacation_mode_trip_source": "last_week", "vacation_mode_pattern_end": 0}
     running = {**data, **on, "vacation_mode_enabled": True}
     assert pattern_serves(running)
     # Its closed span stays closed: the dark days were not Vacation Mode's.
@@ -816,12 +819,91 @@ async def test_a_resumed_vacation_switches_on_its_trips_pattern_without_a_rebuil
     now = datetime(2026, 1, 15, 12, 0, 0).timestamp()   # conftest.py's _fake_utcnow
     data = _trip(now - 20 * 86400, now - 86400, {"light.a": {"*:1200": 1.0}})
     data.update(vm.switch_fields(data, True, now), vacation_mode_enabled=True)
+    assert data["vacation_mode_pattern_end"] == 0                      # same source: nothing to learn again
     st = _settings(**data)
     hass = _hass(st, _states(**{"light.a": "off"}))
     await vm._async_tick(hass)
     fetch.assert_not_called()
     assert st.data["vacation_mode_pattern"] == {"light.a": {"*:1200": 1.0}}
     hass.services.async_call.assert_any_call("light", "turn_on", {"entity_id": "light.a"})
+
+
+async def test_a_trip_running_when_the_update_lands_carries_on_untouched(monkeypatch):
+    """A house mid-trip on a routine built (and resumed) before the source
+    choice existed: no stored source at all, the new default last_week in the
+    settings. The update must not learn it again or change what it switches
+    (review 2026-10-31: Garry's own house, resumed Oct 26 on the Oct 6 routine)."""
+    import custom_components.padspan_bright.vacation_mode as vm
+    fetch = AsyncMock(return_value={"light.a": [(1.0, "off")]})
+    monkeypatch.setattr(vm, "_async_fetch_history", fetch)
+    now = datetime(2026, 1, 15, 12, 0, 0).timestamp()   # conftest.py's _fake_utcnow
+    data = _trip(now - 20 * 86400, now - 86400, {"light.a": {"*:1200": 1.0}, "light.b": {"*:1200": 0.0}})
+    del data["vacation_mode_pattern_source"]
+    # What the old switch_fields stored when it was resumed.
+    data.update({"vacation_mode_enabled_at": now - 3600, "vacation_mode_pattern_for": now - 3600,
+                 "vacation_mode_enabled": True})
+    st = _settings(**data)
+    assert vm.chosen_source(st.data) == "last_week"
+    hass = _hass(st, _states(**{"light.a": "off", "light.b": "on"}))
+    await vm._async_tick(hass)
+    fetch.assert_not_called()
+    assert st.data["vacation_mode_pattern"] == {"light.a": {"*:1200": 1.0}, "light.b": {"*:1200": 0.0}}
+    assert not st.data.get("vacation_mode_pattern_end") and not st.data.get("vacation_mode_pattern_source")
+    hass.services.async_call.assert_any_call("light", "turn_on", {"entity_id": "light.a"})
+    hass.services.async_call.assert_any_call("light", "turn_off", {"entity_id": "light.b"})
+    assert vm.routine_word(st.data) == "resumed" and vm.running_source(st.data) == "month"
+
+
+def test_a_trip_from_before_the_choice_keeps_its_routine_when_turned_back_on(monkeypatch):
+    """Turned back on within 3 weeks with no stored source and the new default
+    in the settings: nobody chose against the routine, so nothing is learned
+    again. It carries on as the monthly average it is."""
+    import custom_components.padspan_bright.vacation_mode as vm
+    now = datetime(2026, 1, 15, 12, 0, 0).timestamp()
+    data = _trip(now - 20 * 86400, now - 86400, {"light.a": {"*:1200": 1.0}})
+    del data["vacation_mode_pattern_source"]
+    assert vm.chosen_source(data) == "last_week"
+    fields = vm.switch_fields(data, True, now)
+    assert fields["vacation_mode_pattern_end"] == 0 and fields["vacation_mode_trip_source"] == ""
+    data.update(fields, vacation_mode_enabled=True)
+    assert vm.pattern_serves(data) and vm.running_source(data) == "month"
+    assert vm.built_source(data["vacation_mode_trip_source"]) == "month"
+    # A choice made since the routine was stored still learns it again
+    # (test_vacation_mode_last_week.py).
+    data = _trip(now - 20 * 86400, now - 86400, {"light.a": {"*:1200": 1.0}}, vacation_mode_source="month")
+    data["vacation_mode_pattern_source"] = "last_week"
+    fields = vm.switch_fields(data, True, now)
+    assert fields["vacation_mode_pattern_end"] == now - 20 * 86400
+    # Pressing a choice on a routine from before it (ws_settings) names the
+    # routine: Last week is then a change, Monthly average isn't.
+    data = _trip(now - 20 * 86400, now - 86400, {"light.a": {"*:1200": 1.0}}, vacation_mode_pattern_source="month")
+    assert vm.resume_relearns(data, "last_week") and not vm.resume_relearns(data, "month")
+    fields = vm.switch_fields({**data, "vacation_mode_source": "last_week"}, True, now)
+    assert fields["vacation_mode_pattern_end"] == now - 20 * 86400 and fields["vacation_mode_trip_source"] == "last_week"
+
+
+def test_the_settings_handler_names_a_pre_choice_routine_when_someone_chooses():
+    from pathlib import Path
+    base = Path(__file__).parents[1] / "custom_components" / "padspan_bright"
+    src = (base / "ws_settings.py").read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert ('if st.data.get("vacation_mode_pattern") and st.data.get("vacation_mode_pattern_source") not in _VSRC:\n'
+            '                payload["vacation_mode_pattern_source"] = "month"') in src
+    panel = (base / "www" / "padspan-bright" / "views" / "lights_map.js").read_text(encoding="utf-8")
+    assert "=== v) return;" not in panel        # pressing the lit choice counts as choosing it
+
+
+async def test_the_preview_of_a_pre_choice_trip_says_the_routine_it_will_play(monkeypatch):
+    import custom_components.padspan_bright.vacation_mode as vm
+    built = AsyncMock(return_value={"light.b": {"*:1200": 1.0}})
+    monkeypatch.setattr(vm, "_async_preview_build", built)
+    now = datetime(2026, 1, 15, 12, 0, 0).timestamp()
+    data = _trip(now - 20 * 86400, now - 86400, {"light.a": {"*:1200": 1.0}})
+    del data["vacation_mode_pattern_source"]
+    st = _settings(**data)
+    hass = _hass(st, _states(**{"light.a": "off", "light.b": "off"}))
+    out = await vm.async_preview(hass)
+    built.assert_not_called()
+    assert out["source"] == "month" and out["routine"] == "resumed"
 
 
 def test_who_turned_it_off_is_read_from_the_connection():
@@ -943,7 +1025,8 @@ def test_the_report_says_how_vacation_mode_runs_in_closed_words_only_where_used(
     home = report_buckets(trip, log, now)
     assert home == {"on": "no", "intensity": "50-70", "switches_day": "11-50", "trips_60d": "1",
                     "last_trip_days": "8-14", "last_off": "panel", "after_dark": "no", "end_date": "no",
-                    "pause_home": "no", "bedtime": "no", "max_on": "no"}
+                    "pause_home": "no", "bedtime": "no", "max_on": "no", "max_lights": "no", "anchors": "no",
+                    "source": "last_week"}
     running = {**trip, **switch_fields(trip, True, now), "vacation_mode_enabled": True}
     away = report_buckets(running, log, now + 86400)
     assert away["on"] == "yes" and away["pattern"] == "resumed" and away["lights"] == "1-5"

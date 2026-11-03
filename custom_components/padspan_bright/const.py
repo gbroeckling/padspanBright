@@ -19,7 +19,7 @@ Organisation:
 
 DOMAIN = "padspan_bright"
 NAME = "PadSpan Bright"
-VERSION = "0.38.199"
+VERSION = "0.38.224"
 
 # ── Config-flow option keys ───────────────────────────────────────────────────
 CONF_ENABLE_CLOUD = "enable_cloud"
@@ -72,6 +72,7 @@ DATA_CAPTURE = "capture"                     # RSSI vector session recorder (opt
 DATA_WLED_LOOKS = "wled_looks"               # wled_exact.WledLooksStore — each WLED device's remembered look
 DATA_HOUSE3D = "house3d"                     # house3d_store.House3dStore — Live Aboard (3D house); loaded on first use
 DATA_SUBZONES = "subzones"                   # subzones.SubzoneStore — named areas inside rooms; loaded on first use
+DATA_PLAN_AI = "plan_ai"                     # plan_ai.PlanAiStore — the plan AI's suggestions and verdicts (experimental); loaded on first use
 
 # ── HA Storage file keys (.storage/<key>) ─────────────────────────────────────
 SETTINGS_STORE_KEY = "padspan_bright.settings"
@@ -80,6 +81,7 @@ MODEL_STORE_KEY = "padspan_bright.model"
 FABRIC_STORE_KEY = "padspan_bright.fabric"
 OBJECT_STORE_KEY = "padspan_bright.objects"
 FINDMY_STORE_KEY = "padspan_bright.findmy_bridge"   # findmy.py — which address each known Find My tag uses now
+LABEL_LINKS_STORE_KEY = "padspan_bright.label_links"   # label_follow.py — which address a named device uses on screen; what it may be, never who it is
 CALIBRATION_STORE_KEY = "padspan_bright.calibration"
 ALERTS_STORE_KEY = "padspan_bright.follow_alerts"
 MOVEMENT_STORE_KEY = "padspan_bright.movement_history"
@@ -87,7 +89,8 @@ LOST_AND_FOUND_STORE_KEY = "padspan_bright.lost_and_found"
 ADAPTIVE_STORE_KEY = "padspan_bright.adaptive"
 BACKUPS_STORE_KEY = "padspan_bright.backups"
 OBJECT_HISTORY_STORE_KEY = "padspan_bright.object_history"
-VENDOR_CACHE_STORE_KEY = "padspan_bright.vendor_cache"
+VENDOR_CACHE_STORE_KEY = "padspan_bright.vendor_cache"          # the retired online maker lookup's answers: removed at start and by a Factory Reset
+PUBLIC_ADDRESSES_STORE_KEY = "padspan_bright.public_addresses"   # bluetooth_live.py — addresses a radio confirmed as public (the built-in maker list counts as fact for these only)
 TRACEBACK_STORE_KEY = "padspan_bright.traceback"
 FORENSICS_STORE_KEY = "padspan_bright.forensics"
 # Manifest only — session frames live in .storage/padspan_bright.capture_sessions/
@@ -96,6 +99,7 @@ WLED_LOOKS_STORE_KEY = "padspan_bright.wled_looks"   # wled_exact.py — keyed b
 HOUSE3D_STORE_KEY = "padspan_bright.house3d"         # house3d_store.py — Live Aboard's own file; never written while atlas_3d_enabled is off
 EMERGENCY_TEST_STORE_KEY = "padspan_bright.emergency_test"   # emergency_test.py — a running test and its kept-on tags
 SUBZONES_STORE_KEY = "padspan_bright.subzones"       # subzones.py — sub-zones (bed, couch, desk); no file until one is added
+PLAN_AI_STORE_KEY = "padspan_bright.plan_ai"         # plan_ai.py — what the plan AI suggested and what was said of it; no file until a session runs
 
 # ── Filesystem / map defaults ─────────────────────────────────────────────────
 DEFAULT_FLOOR_ID = "main"

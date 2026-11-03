@@ -15,6 +15,8 @@
 // Cache for critics data — refreshed when view is active
 let _criticsCache = null;
 let _criticsFetchTs = 0;
+// The data mode the caches below were read in: Sample mode's sample house is never shown as Live's.
+let _cacheMode = null;
 const _CRITICS_TTL_MS = 30000; // refresh every 30s
 
 export function render(ctx){
@@ -25,13 +27,21 @@ export function render(ctx){
   const snap = ctx.state.live.snapshot;
   const rooms = snap?.rooms?.length ?? Object.keys(ctx.state.roomTagMap||{}).length;
   const tags = snap?.tags?.length ?? Object.values(ctx.state.roomTagMap||{}).reduce((a,b)=>a+(b?.length||0),0);
-  const radios = snap?.radios?.length ?? 0;
+  // The server copies ble.radios to the top level (snapshot_builder.py); the
+  // sample house's snapshot has only ble.radios, so Sample read 0 without this.
+  const radios = snap?.radios?.length ?? snap?.ble?.radios?.length ?? 0;
 
-  root.appendChild(el("div",{class:"grid"},[
+  // Header
+  root.appendChild(el("div",{class:"row",style:"align-items:center;gap:8px;margin-bottom:14px"},[
+    el("h2",{},"Health"),
+    ctx.helpers.helpBtn("health"),
+  ]));
+
+  root.appendChild(el("div",{class:"grid grid-wide"},[
     el("div",{class:"card"},[
       el("div",{style:"font-weight:700"},"System"),
       el("div",{class:"mono"}, `UI v${ctx.state.version} • build ${ctx.state.buildId}`),
-      el("div",{class:"mono"}, `Data mode: ${ctx.state.dataMode.toUpperCase()}`),
+      el("div",{class:"mono"}, `Data mode: ${ctx.state._dataModeKnown ? ctx.state.dataMode.toUpperCase() : "…"}`),
       el("div",{class:"mono"}, `Refresh: ${ctx.state.timing.lastRefreshMs ?? "\u2014"}ms`),
     ]),
     el("div",{class:"card"},[
@@ -39,7 +49,7 @@ export function render(ctx){
       el("div",{class:"mono"}, `Rooms: ${rooms}`),
       el("div",{class:"mono"}, `Radios: ${radios}`),
       el("div",{class:"mono"}, `Tags/Objects: ${tags}`),
-      el("div",{class:"muted", style:"margin-top:8px"},"For deeper validation, open Diagnostics and paste the JSON into chat."),
+      el("div",{class:"muted", style:"margin-top:8px"},"To send details to support, open Diagnostics (QA \u2192 Go to Diagnostics) and email its report to hello@traks.ca, or attach it to a GitHub issue (issues are public: remove personal details first)."),
     ]),
   ]));
 
@@ -49,7 +59,7 @@ export function render(ctx){
   if (deaf.length) {
     root.appendChild(el("div",{class:"card",style:"margin-top:12px;font-size:11px"},[
       el("div",{style:"font-weight:700;margin-bottom:4px"},"Hearing less than usual"),
-      el("div",{}, deaf.map(r => r.name || r.source).join(", ")),
+      el("div",{}, deaf.map(r => r.display_name || r.name || r.source).join(", ")),
       el("div",{class:"muted",style:"margin-top:4px"},
         "For over 10 minutes this scanner has heard far fewer Bluetooth advertisements than it usually does, while the others are normal. Rooms near it can be wrong. Restarting it often helps; on ESPHome, check its version and Wi-Fi."),
     ]));
@@ -68,10 +78,13 @@ export function render(ctx){
     const _sid = ctx.helpers.radioShortId;
     const liveRadios = (snap?.ble?.radios) || [];
     const nameMap = {};
-    for (const r of liveRadios) { if(r.source && r.name) nameMap[r.source] = r.name; }
+    for (const r of liveRadios) { if(r.source && (r.display_name || r.name)) nameMap[r.source] = r.display_name || r.name; }
     const entries = Object.entries(sh).sort((a,b) => a[1].reliability - b[1].reliability);
     const shCard = el("div",{class:"card",style:"margin-top:12px"});
-    shCard.appendChild(el("div",{style:"font-weight:700;margin-bottom:8px"},"Scanner Health"));
+    shCard.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:8px"},[
+      el("div",{style:"font-weight:700"},"Scanner Health"),
+      ctx.actions.openReceivers && (!ctx.actions.canOpen || ctx.actions.canOpen("receivers")) ? el("button",{class:"btn inline","data-all-receivers":"health",style:"font-size:11px;padding:2px 10px;margin:0",onclick:()=>ctx.actions.openReceivers()},"All receivers") : null,
+    ].filter(Boolean)));
     const tbl = el("div",{style:"display:grid;grid-template-columns:auto 1fr auto auto auto;gap:4px 10px;font-size:11px;align-items:center"});
     // Header
     for(const h of ["","Scanner","Room","Agreement","Weight"]){
@@ -111,7 +124,7 @@ export function render(ctx){
 
   // ── Fabric Health (Phase 1-3 decoupling) ────────────────────────────────
   root.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;margin-top:16px"},[
-    el("div",{style:"font-weight:700;font-size:14px;color:#52b788"},"Positioning Fabric"),
+    el("div",{style:"font-weight:700;font-size:14px;color:#52b788"},"Room and receiver layout"),
   ]));
   const fabricContainer = el("div",{id:"health-fabric",style:"margin-top:8px"});
   root.appendChild(fabricContainer);
@@ -119,7 +132,7 @@ export function render(ctx){
 
   // ── Phase 4: System Critics ─────────────────────────────────────────────
   root.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;margin-top:16px"},[
-    el("div",{style:"font-weight:700;font-size:14px;color:#52b788"},"System Critics"),
+    el("div",{style:"font-weight:700;font-size:14px;color:#52b788"},"Problems found"),
     ctx.helpers.helpBtn("health_critics"),
   ]));
   const criticsContainer = el("div",{id:"health-critics",style:"margin-top:8px"});
@@ -136,6 +149,13 @@ export function render(ctx){
 // The rules are the backend's (bright_import.py): back up first, refuse a
 // non-empty house, never merge, reload after. This card only says what the
 // backend will do and shows what it said.
+
+// A floor as people know it: Home Assistant's name, not the id behind it.
+function _floorLabel(ctx, fid) {
+  if (fid === "__outside__") return "Outside";
+  const f = (ctx.state.model?.floors || []).find(x => String(x.id) === String(fid));
+  return f ? (f.name || f.id) : fid;
+}
 
 async function _fetchAndRenderBrightImport(ctx, container) {
   const { el } = ctx.helpers;
@@ -196,12 +216,13 @@ const _FABRIC_TTL_MS = 15000;
 async function _fetchAndRenderFabric(ctx, container) {
   const { el } = ctx.helpers;
   const now = Date.now();
+  if (_cacheMode !== ctx.state.dataMode) { _cacheMode = ctx.state.dataMode; _fabricCache = null; _criticsCache = null; }
   if (_fabricCache && (now - _fabricFetchTs) < _FABRIC_TTL_MS) {
     _renderFabric(ctx, container, _fabricCache);
     return;
   }
   container.innerHTML = "";
-  container.appendChild(el("div",{class:"card",style:"text-align:center;color:#94a3b8;padding:16px"},"Loading fabric diagnostics\u2026"));
+  container.appendChild(el("div",{class:"card",style:"text-align:center;color:#94a3b8;padding:16px"},"Loading layout checks\u2026"));
   try {
     const res = await ctx.actions.callWS({ type: "padspan_bright/fabric_health" });
     _fabricCache = res;
@@ -225,7 +246,7 @@ function _renderFabric(ctx, container, data) {
   if (scanner_positions_m?.length || room_geometry_m?.length) {
     container.appendChild(el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:6px 10px;background:rgba(82,183,136,.06);border:1px solid #52b78833;border-radius:8px"},[
       el("span",{style:"color:#52b788;font-size:13px"},"✅"),
-      el("span",{style:"font-size:12px;color:#52b788;font-weight:600"},"Fabric active"),
+      el("span",{style:"font-size:12px;color:#52b788;font-weight:600"},"Layout active"),
       el("span",{style:"font-size:11px;color:#94a3b8"},
         `${scanner_positions_m?.length || 0} scanners · ${room_geometry_m?.length || 0} rooms`),
     ]));
@@ -236,7 +257,7 @@ function _renderFabric(ctx, container, data) {
   if (Object.keys(_fabricFloors).length) {
     const _ffCard = el("div",{class:"card",style:"margin-bottom:8px;padding:12px"});
     _ffCard.appendChild(el("div",{style:"font-weight:700;font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px"},
-      "Room Fabric by Floor"));
+      "Room layout by floor"));
     const _ffTbl = el("div",{style:"display:grid;grid-template-columns:1fr auto auto auto auto;gap:3px 10px;font-size:10px;align-items:center"});
     for (const h of ["Floor","Rooms","Footprint","Clusters","Status"]) {
       _ffTbl.appendChild(el("div",{style:"font-weight:600;color:#64748b;text-transform:uppercase"},h));
@@ -244,7 +265,7 @@ function _renderFabric(ctx, container, data) {
     for (const [fid, f] of Object.entries(_fabricFloors).sort()) {
       const _cl = f.clusters;
       const _clBad = typeof _cl === "number" && _cl > 1;
-      _ffTbl.appendChild(el("div",{style:"color:#e2e8f0;font-weight:600"},fid));
+      _ffTbl.appendChild(el("div",{style:"color:#e2e8f0;font-weight:600"},_floorLabel(ctx, fid)));
       _ffTbl.appendChild(el("div",{class:"mono",style:"text-align:right"},String(f.rooms ?? 0)));
       _ffTbl.appendChild(el("div",{class:"mono",style:"color:#94a3b8"},
         f.bbox_w_m != null ? `${f.bbox_w_m}m × ${f.bbox_h_m}m` : "—"));
@@ -262,7 +283,7 @@ function _renderFabric(ctx, container, data) {
   const bg = summary.healthy ? "rgba(82,183,136,.08)" : "rgba(248,113,113,.08)";
   container.appendChild(el("div",{class:"card",style:`border:1px solid ${color}33;background:${bg};margin-bottom:12px`},[
     el("div",{style:`display:flex;align-items:center;gap:8px`},[
-      el("div",{style:`font-weight:800;font-size:14px;color:${color}`},"Fabric Status"),
+      el("div",{style:`font-weight:800;font-size:14px;color:${color}`},"Layout status"),
       el("div",{class:"pill",style:`background:${color}22;color:${color};font-size:10px;padding:2px 8px`},
         summary.healthy ? "ALL PASS" : `${summary.failed} ISSUE${summary.failed!==1?"S":""}`),
     ]),
@@ -272,7 +293,7 @@ function _renderFabric(ctx, container, data) {
 
   // ── Check results by group ─────────────────────────────────────────────
   const groups = [
-    { key: "fabric_sync", label: "Phase 1 \u2014 Scanner Fabric" },
+    { key: "fabric_sync", label: "Phase 1 \u2014 Receiver layout" },
     { key: "spatial", label: "Phase 2 \u2014 Spatial Model (metres)" },
     { key: "calibration", label: "Phase 3 \u2014 Calibration" },
     { key: "identity", label: "Device Identity Registry" },
@@ -285,7 +306,7 @@ function _renderFabric(ctx, container, data) {
     if (!gc.length) continue;
     const card = el("div",{class:"card",style:"margin-bottom:8px;padding:12px"});
     card.appendChild(el("div",{style:"font-weight:700;font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px"},g.label));
-    const tbl = el("div",{style:"display:grid;grid-template-columns:18px 1fr auto;gap:4px 8px;font-size:11px;align-items:center"});
+    const tbl = el("div",{class:"health-checks"});
     for (const c of gc) {
       const dot = c.ok ? "\u2705" : "\u274c";
       tbl.appendChild(el("div",{style:"font-size:13px;line-height:1"},dot));
@@ -293,7 +314,7 @@ function _renderFabric(ctx, container, data) {
         el("span",{style:"font-weight:600;color:#e2e8f0"},c.name),
         el("span",{style:"color:#64748b;margin-left:6px"},c.detail),
       ]));
-      tbl.appendChild(el("div",{class:"mono",style:`color:${c.ok?"#52b788":"#fca5a5"};font-weight:600;white-space:nowrap`},String(c.value)));
+      tbl.appendChild(el("div",{class:"mono",style:`color:${c.ok?"#52b788":"#fca5a5"};font-weight:600`},String(c.value)));
     }
     card.appendChild(tbl);
     container.appendChild(card);
@@ -313,7 +334,7 @@ function _renderFabric(ctx, container, data) {
       tbl.appendChild(el("div",{class:"mono",style:"text-align:right"},p.x_m != null ? p.x_m.toFixed(2) : "\u2014"));
       tbl.appendChild(el("div",{class:"mono",style:"text-align:right"},p.y_m != null ? p.y_m.toFixed(2) : "\u2014"));
       tbl.appendChild(el("div",{class:"mono",style:"text-align:right"},p.z_m != null ? p.z_m.toFixed(1) : "\u2014"));
-      tbl.appendChild(el("div",{class:"mono",style:"color:#64748b"},p.floor_id));
+      tbl.appendChild(el("div",{class:"mono",style:"color:#64748b"},_floorLabel(ctx, p.floor_id)));
       tbl.appendChild(el("div",{style:`color:${p.origin==="manual"?"#f59e0b":"#52b788"}`},p.origin));
     }
     card.appendChild(tbl);
@@ -334,7 +355,7 @@ function _renderFabric(ctx, container, data) {
       tbl.appendChild(el("div",{style:"color:#e2e8f0;font-weight:600"},g.room));
       tbl.appendChild(el("div",{class:"mono"},g.type));
       tbl.appendChild(el("div",{class:"mono",style:"color:#94a3b8"},cStr));
-      tbl.appendChild(el("div",{class:"mono",style:"color:#64748b"},g.floor_id));
+      tbl.appendChild(el("div",{class:"mono",style:"color:#64748b"},_floorLabel(ctx, g.floor_id)));
       tbl.appendChild(el("div",{style:`color:${g.origin==="manual"?"#f59e0b":"#52b788"}`},g.origin));
     }
     card.appendChild(tbl);
@@ -371,7 +392,7 @@ function _renderFabric(ctx, container, data) {
       const typeColor = s.source_type === "manual" ? "#f59e0b" : "#52b788";
       tbl.appendChild(el("div",{style:"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e2e8f0"},s.source));
       tbl.appendChild(el("div",{style:"color:#94a3b8"},s.room));
-      tbl.appendChild(el("div",{class:"mono",style:"color:#64748b"},s.floor_id));
+      tbl.appendChild(el("div",{class:"mono",style:"color:#64748b"},_floorLabel(ctx, s.floor_id)));
       tbl.appendChild(el("div",{style:`color:${typeColor};font-weight:600`},s.source_type));
     }
     card.appendChild(tbl);
@@ -386,14 +407,14 @@ function _renderFabric(ctx, container, data) {
     const rfCheck = checks.find(c => c.name === "RF Model");
     if (rfCheck) {
       const rfBtn = el("button",{class:"btn",style:"width:auto;padding:4px 14px;font-size:11px"},
-        `Retrain RF (${rfCheck.value})`);
+        `Retrain learned model (${rfCheck.value})`);
       rfBtn.addEventListener("click", async () => {
         rfBtn.disabled = true; rfBtn.textContent = "Retraining\u2026";
         try {
           const r = await ctx.actions.callWS({type:"padspan_bright/calibration_retrain_rf"});
-          ctx.toast(`RF retrained: ${r.use_metres ? "metres" : "fractions"}, ${r.point_count} pts`);
+          ctx.toast(`Learned model retrained: ${r.use_metres ? "metres" : "fractions"}, ${r.point_count} pts`);
           _fabricCache = null; _fabricFetchTs = 0; _fetchAndRenderFabric(ctx, container);
-        } catch(e) { ctx.toast(`Failed: ${e.message||e}`); rfBtn.disabled = false; rfBtn.textContent = "Retrain RF"; }
+        } catch(e) { ctx.toast(`Failed: ${e.message||e}`); rfBtn.disabled = false; rfBtn.textContent = "Retrain learned model"; }
       });
       actCard.appendChild(rfBtn);
     }
@@ -471,7 +492,7 @@ function _renderFabric(ctx, container, data) {
       tbl.appendChild(el("div",{class:"mono",style:"text-align:center"},String(m.has_receivers)));
       tbl.appendChild(el("div",{class:"mono",style:"text-align:center"},String(m.has_room_bounds)));
       tbl.appendChild(el("div",{class:"mono",style:"text-align:center"},String(m.has_rf_barriers)));
-      tbl.appendChild(el("div",{class:"mono",style:"color:#64748b"},m.floor_id));
+      tbl.appendChild(el("div",{class:"mono",style:"color:#64748b"},_floorLabel(ctx, m.floor_id)));
     }
     card.appendChild(tbl);
     container.appendChild(card);
@@ -497,7 +518,7 @@ function _renderFabric(ctx, container, data) {
   container.appendChild(auditBtn);
 
   // ── Refresh button ─────────────────────────────────────────────────────
-  const btn = el("button",{class:"btn",style:"margin-top:8px;margin-left:8px;width:auto;padding:6px 16px"},"Refresh Fabric");
+  const btn = el("button",{class:"btn",style:"margin-top:8px;margin-left:8px;width:auto;padding:6px 16px"},"Refresh layout");
   btn.addEventListener("click", () => { _fabricCache = null; _fabricFetchTs = 0; _fetchAndRenderFabric(ctx, container); });
   container.appendChild(btn);
 }
@@ -553,7 +574,7 @@ function _renderRadioAudit(ctx, container, data) {
       _row("ESPHome", d.is_esphome ? `Yes (${(d.esphome_names||[]).join(", ")||"?"})` : "No",
         d.is_esphome ? "#52b788" : "#64748b");
       _row("HA Area", d.ha_area || "(none)", d.ha_area ? "#e2e8f0" : "#f87171");
-      _row("HA Floor", d.ha_floor || "(none)", d.ha_floor ? "#e2e8f0" : "#f87171");
+      _row("HA Floor", d.ha_floor ? _floorLabel(ctx, d.ha_floor) : "(none)", d.ha_floor ? "#e2e8f0" : "#f87171");
 
       // MACs
       if (d.macs && d.macs.length) {
@@ -578,14 +599,14 @@ function _renderRadioAudit(ctx, container, data) {
     const f = r.fabric;
     if (f) {
       rCard.appendChild(el("div",{style:"font-size:10px;color:#64748b;margin-top:2px"},
-        `Fabric: ${f.room} (${f.floor_id}) [${f.source_type}]`));
+        `Layout: ${f.room} (${_floorLabel(ctx, f.floor_id)}) [${f.source_type}]`));
     }
 
     // Position
     const p = r.position_m;
     if (p) {
       rCard.appendChild(el("div",{style:"font-size:10px;color:#64748b"},
-        `Position: (${p.x_m?.toFixed(1)}, ${p.y_m?.toFixed(1)}, z=${p.z_m?.toFixed(1)}) [${p.floor_id}]`));
+        `Position: (${p.x_m?.toFixed(1)}, ${p.y_m?.toFixed(1)}, z=${p.z_m?.toFixed(1)}) [${_floorLabel(ctx, p.floor_id)}]`));
     }
 
     // Mismatches
@@ -610,6 +631,7 @@ async function _fetchAndRenderCritics(ctx, container) {
   const now = Date.now();
 
   // Use cache if fresh enough
+  if (_cacheMode !== ctx.state.dataMode) { _cacheMode = ctx.state.dataMode; _fabricCache = null; _criticsCache = null; }
   if (_criticsCache && (now - _criticsFetchTs) < _CRITICS_TTL_MS) {
     _renderCritics(ctx, container, _criticsCache);
     return;
@@ -629,7 +651,7 @@ async function _fetchAndRenderCritics(ctx, container) {
   } catch (err) {
     container.innerHTML = "";
     container.appendChild(el("div",{class:"card",style:"color:#fca5a5"},
-      `Failed to load system critics: ${err.message || err}`
+      `Could not check for problems: ${err.message || err}`
     ));
   }
 }
@@ -661,7 +683,6 @@ function _renderCritics(ctx, container, data) {
     style:`border:1px solid ${bannerColor}33;background:${bannerBg};margin-bottom:12px`
   },[
     el("div",{style:`display:flex;align-items:center;gap:8px`},[
-      el("div",{style:`font-weight:800;font-size:15px;color:${bannerColor}`},"System Critics"),
       el("div",{class:"pill",style:`background:${bannerColor}22;color:${bannerColor};font-size:10px;padding:2px 8px`},
         summary.healthy ? "HEALTHY" : `${summary.total} ISSUE${summary.total !== 1 ? "S" : ""}`
       ),
@@ -703,7 +724,7 @@ function _renderCritics(ctx, container, data) {
   // ── Room Confusion Matrix ───────────────────────────────────────────────
   if (confusion_matrix && confusion_matrix.length) {
     const cmCard = el("div",{class:"card",style:"margin-top:12px"});
-    cmCard.appendChild(el("div",{style:"font-weight:700;margin-bottom:8px"},"Room Confusion Matrix"));
+    cmCard.appendChild(el("div",{style:"font-weight:700;margin-bottom:8px"},"Room mix-ups"));
     cmCard.appendChild(el("div",{class:"muted",style:"font-size:11px;margin-bottom:8px"},
       "Bidirectional transitions between room pairs. High counts suggest the system oscillates between these rooms."
     ));
@@ -758,7 +779,7 @@ function _renderCritics(ctx, container, data) {
   }
 
   // ── Refresh button ──────────────────────────────────────────────────────
-  const refreshBtn = el("button",{class:"btn",style:"margin-top:12px;width:auto;padding:6px 16px"}, "Refresh Critics");
+  const refreshBtn = el("button",{class:"btn",style:"margin-top:12px;width:auto;padding:6px 16px"}, "Check again");
   refreshBtn.addEventListener("click", () => {
     _criticsCache = null;
     _criticsFetchTs = 0;
@@ -820,9 +841,9 @@ function _renderCapture(ctx, container) {
   // gauge, which a click-on-image picker would depend on. Left blank, the
   // mark behaves exactly as before (room label only).
   const markX = el("input", {class:"input", type:"number", step:"0.1", placeholder:"x (m)",
-    style:"width:64px;padding:3px 6px;font-size:11px"});
+    style:"width:64px;box-sizing:content-box;padding:3px 6px;font-size:11px"});
   const markY = el("input", {class:"input", type:"number", step:"0.1", placeholder:"y (m)",
-    style:"width:64px;padding:3px 6px;font-size:11px"});
+    style:"width:64px;box-sizing:content-box;padding:3px 6px;font-size:11px"});
   row.appendChild(recBtn); row.appendChild(markSel); row.appendChild(markX); row.appendChild(markY);
   row.appendChild(markBtn);
 
@@ -996,11 +1017,11 @@ async function _renderReplayPanel(ctx, panel, sessionId) {
 
   const abRow = el("div", {style:"display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap"});
   const qIn = el("input", {class:"input", type:"number", step:"0.01", placeholder:"kalman_q",
-    style:"width:80px;padding:2px 6px;font-size:10px"});
+    style:"width:80px;box-sizing:content-box;padding:2px 6px;font-size:10px"});
   const rIn = el("input", {class:"input", type:"number", step:"0.5", placeholder:"kalman_r",
-    style:"width:80px;padding:2px 6px;font-size:10px"});
+    style:"width:80px;box-sizing:content-box;padding:2px 6px;font-size:10px"});
   const dIn = el("input", {class:"input", type:"number", step:"1", placeholder:"room_change_delay_s",
-    style:"width:120px;padding:2px 6px;font-size:10px"});
+    style:"width:120px;box-sizing:content-box;padding:2px 6px;font-size:10px"});
   const abBtn = el("button", {class:"btn", style:"width:auto;padding:2px 10px;font-size:10px"}, "Run A/B");
   abRow.appendChild(qIn); abRow.appendChild(rIn); abRow.appendChild(dIn); abRow.appendChild(abBtn);
   panel.appendChild(abRow);

@@ -34,6 +34,7 @@ function svg(tag, attrs = {}, children = []) {
 }
 
 let _cache = null;            // last stats payload, so a re-render is not a refetch
+let _cacheMode = null;        // the data mode it was read in (Sample mode answers its own)
 let _loading = false, _error = null;
 let _stamp = "";              // "generated …" line, so a re-render keeps it
 const _tables = new Set();    // cards showing their table instead of the chart (kept across re-renders)
@@ -53,6 +54,7 @@ function isUnlocked() {
 export function render(ctx) {
   const { el } = ctx.helpers;
   const root = el("section", { id: "installbase" });
+  if (_cacheMode !== ctx.state.dataMode) { _cacheMode = ctx.state.dataMode; _cache = null; _error = null; _stamp = ""; }
   root.appendChild(styleEl());
   if (!isUnlocked()) {
     root.appendChild(pinGate(el, () => {
@@ -101,7 +103,7 @@ function renderUnlocked(ctx, root) {
   root.appendChild(el("header", { class: "ib-hero" }, [
     el("div", { class: "ib-kicker" }, "PadSpan opt-in reports"),
     el("div", { class: "ib-title-row" }, [el("h1", { class: "ib-h1" }, "Install Base"), helpBtn("installbase")]),
-    el("p", { class: "ib-lede" }, "What the usage reports add up to, from installs that turned the report on (Settings → Presence). Every figure is a count across homes; nothing here says who or where anyone is. Hover a row to see the report's own name for it."),
+    el("p", { class: "ib-lede" }, "What the usage reports add up to, from installs that turned the report on (Settings → Tracking). Every figure is a count across homes; nothing here says who or where anyone is. Hover a row to see the report's own name for it."),
   ]));
 
   if (String(settings.tier || "") !== "pro") {
@@ -189,8 +191,14 @@ function renderUnlocked(ctx, root) {
     // Today's figure is the honest one: a caller is a distinct IP, and IPv6
     // privacy addresses rotate, so the 30-day figure counts some installs
     // more than once.
+    const _days = s.per_day || [];
+    const homesYesterday = _days.length > 1 ? _days[_days.length - 2].pings : null;
     const tiles = el("div", { class: "ib-tiles" }, [
-      tile(el, "Running today", pg.distinct_today ?? "–", `installs that checked for an update so far today, opted in or not · ${fmt(pg.distinct_window ?? 0)} over ${W} days (some counted twice when their address changes)`),
+      // Homes running: the last FULL day's update checks, by address (a
+      // home's address rarely changes within a day). The 30-day figure counts
+      // addresses, which rotate, so one home shows up many times: never homes
+      // (2026-10-29: read as "1,600 homes" when about 400 run PadSpan).
+      tile(el, "Homes running", homesYesterday ?? "–", `different homes that checked for an update yesterday, opted in or not · ${fmt(pg.distinct_today ?? 0)} so far today`),
       tile(el, "Active", ins.active ?? 0, `sent a usage report in the last ${s.active_days} days`),
       tile(el, "Ever reported", ins.lifetime ?? 0, "installs that have ever sent a usage report"),
       tile(el, "New", ins.new_window ?? 0, `first report in the last ${W} days`),
@@ -206,10 +214,10 @@ function renderUnlocked(ctx, root) {
     section("Reach", "How many homes run PadSpan. Every install checks for updates (a ping), which is how all of them are counted; only the ones that turned the usage report on say anything more.", [
       el("div", { class: "ib-figs" }, [hero, tiles]),
       grid([
-        columnCard(el, "Installs running, per day", "Installs that checked for an update that day (all installs)", days, d => d.pings, d => d.day),
+        columnCard(el, "Homes running, per day", "Different homes that checked for an update that day (all installs, opted in or not)", days, d => d.pings, d => d.day),
         columnCard(el, "Installs reporting, per day", "Installs that sent a usage report that day (opted in only)", days, d => d.installs, d => d.day),
       ], true),
-    ], `${fmt(ins.reporting_window ?? 0)} sharing · ${fmt(pg.distinct_today ?? 0)} running today · ${fmt(ins.new_window ?? 0)} new · ${fmt(ins.lapsed ?? 0)} gone quiet`);
+    ], `${fmt(homesYesterday ?? 0)} homes running · ${fmt(ins.reporting_window ?? 0)} sharing a report · ${fmt(ins.new_window ?? 0)} new · ${fmt(ins.lapsed ?? 0)} gone quiet`);
 
     // ── needs attention ──
     // What a reader should look at first, worked out from the numbers below:
@@ -282,7 +290,7 @@ function renderUnlocked(ctx, root) {
         barCard(el, { title: "Licence", ask: "Free, Pro, or Bright (the Atlas-only edition)", map: dist.tier, total: n, kind: "tier" }),
         barCard(el, { title: "Country", ask: "The country set in Home Assistant (? = not set, or PadSpan older than 0.38.148)", map: dist.country, total: n }),
         barCard(el, { title: "Language", ask: "Home Assistant's language (? = PadSpan older than 0.38.148)", map: dist.language, total: n }),
-        barCard(el, { title: "Running, by version", ask: `Every install that checked for an update in ${W} days, opted in or not (– = too old to say)`, map: pg.by_version, total: pg.distinct_window || 1, unit: "installs", limit: 8 }),
+        barCard(el, { title: "Versions running (by address)", ask: `Addresses that checked for an update in ${W} days, by the version they run: addresses change, so a home can count more than once; read it for the mix of versions, not for how many (– = too old to say)`, map: pg.by_version, total: pg.distinct_window || 1, unit: "addresses", limit: 8 }),
       ]),
     ], (() => {
       const v = top(dist.version), h = top(dist.ha_version), c = top(dist.country);
@@ -296,6 +304,25 @@ function renderUnlocked(ctx, root) {
                                    ["irks", "Phone keys", "iPhones and others added by their key (IRK), so they can be followed"], ["walls", "Walls", "Walls drawn on the plans"],
                                    ["placed_lights", "Lights on the map", "Lights placed on a floor plan"], ["objects_total", "Devices seen", "Bluetooth devices PadSpan has seen (most are neighbours' and passers-by)"]]) {
       homeCards.push(barCard(el, { title: label, ask: `${ask}, grouped (≤ 4 means up to 4)`, map: orderBuckets(dist[k]), total: n, ranked: false }));
+    }
+    // Nested in env, so stats.php's fold has added them up (s.fields).
+    const envSums = (k) => (((s.fields || {}).env || {})[k] || {}).sums || {};
+    const rTypes = envSums("scanner_types");
+    if (Object.keys(rTypes).length) {
+      homeCards.push(barCard(el, { title: "What the receivers are", ask: "Every receiver, by what kind of device it is. Says who passes on an address type or a full broadcast", map: rTypes, total: Object.values(rTypes).reduce((a, b) => a + (Number(b) || 0), 0), unit: "receivers", kind: "receiver" }));
+    }
+    const detail = envSums("object_detail");
+    if (detail.total) {
+      homeCards.push(kvCard(el, "How much devices say about themselves", "Bluetooth devices across all homes that have each of these", [
+        ["A real name", detail.named || 0, detail.total],
+        ["A maker", detail.maker || 0, detail.total],
+        ["  ↳ from the company number in its broadcast", detail.maker_company_id || 0, detail.total],
+                ["  ↳ from ESPresense's id", detail.maker_espresense || 0, detail.total],
+        ["  ↳ from the address list, address confirmed", detail.maker_address || 0, detail.total],
+        ["  ↳ from the address list, \"probably\"", detail.maker_guess || 0, detail.total],
+        ["No maker, uses a company's service", detail.maker_service_uuid || 0, detail.total],
+        ["A type (what it is)", detail.type || 0, detail.total],
+      ]));
     }
     const most = (k) => { const t = top(dist[k]); return t ? t[0].replace("<=", "≤").replace(">=", "≥") : "?"; };
     section("Homes", "How big the houses are and what else runs in them, from each install's latest report. Numbers are grouped, never exact.", [grid(homeCards)],
@@ -369,8 +396,8 @@ function renderUnlocked(ctx, root) {
     const ovSettings = Object.fromEntries(Object.entries(ovMap).filter(([k]) => !/^screens?(_listed)?:/.test(k)));
     const ovScreens = Object.fromEntries(Object.entries(ovMap).filter(([k]) => /^screens?(_listed)?:/.test(k)));
     // Things people did, things PadSpan did by itself, and what the panel saw of its screen.
-    const _auto = /^(irk_resolved|irk_unresolved_rpa|irk_cache_cleared|scan_mode_flip|lost_and_found|tagged_(arrived|departed)|findmy_|mqtt_publish_failed|proxy_rate_drops|vacation_resumed|bermuda_history_purged|house3d_fallback|map_placement_refused|weather_note|weather_source|weather_shown|wall_reload|view_link|ui_error_while)/;
-    const _screen = /^(client_|wall_screen:|overview_shown:)/;
+    const _auto = /^(irk_resolved|irk_unresolved_rpa|irk_cache_cleared|scan_mode_flip|lost_and_found|tagged_(arrived|departed)|findmy_|label_link_(linked|asked|held|old_back|wrong_after_undo|capped)|mqtt_publish_failed|proxy_rate_drops|vacation_resumed|bermuda_history_purged|house3d_fallback|map_placement_refused|weather_note|weather_source|weather_shown|wall_reload|view_link|ui_error_while)/;
+    const _screen = /^(client_|wall_screen:|overview_shown:|house3d_wall_draw:)/;
     const usePeople = {}, useAuto = {}, useScreen = {};
     for (const [k, v] of Object.entries(s.usage || {})) (_screen.test(k) ? useScreen : _auto.test(k) ? useAuto : usePeople)[k] = v;
     section("Usage", `What people actually use, over the last ${W} days. The first number is how many times; the person icon is how many installs.`, [
@@ -406,7 +433,7 @@ function renderUnlocked(ctx, root) {
           ["  ↳ paused: the licence no longer reaches Pro (0.38.191)", s.fixes.forensics_paused_licence, s.fixes.forensics_on],
         ])] : []),
         pairCard(el, "Warnings in the Home Assistant log", "Warning lines PadSpan wrote, by the part of PadSpan that wrote them", s.errors, "lines", 12, "module"),
-        barCard(el, { title: "Panel errors, by tab", ask: "Errors the PadSpan panel caught in each tab", map: s.ui_errors, unit: "errors", limit: 12, kind: "view" }),
+        barCard(el, { title: "Panel errors, by where", ask: "Errors the PadSpan panel caught: by the file that threw on 0.38.85 and later, by the open tab before that (when any error on the page counted)", map: s.ui_errors, unit: "errors", limit: 12, kind: "view" }),
       ]),
     ], (() => {
       const t = top(s.tabs, "count"), a = top(usePeople, "count");
@@ -418,7 +445,7 @@ function renderUnlocked(ctx, root) {
     // one row each: what it is, how many homes sent it, and what they said.
     // A field added to the report later turns up here by itself.
     const shownElsewhere = new Set(["scanners", "floors", "rooms", "maps", "calibration_points", "irks", "walls", "placed_lights",
-      "objects_total", "integrations", "scanner_kinds", "scan_modes", "scan_modes_requested", "scan_mode_installs", "ai", "screens",
+      "objects_total", "object_detail", "device_ids", "integrations", "scanner_kinds", "scanner_types", "scan_modes", "scan_modes_requested", "scan_mode_installs", "ai", "screens",
       "stairs", "calibration_no_floor", "install_age", "setup_stage", "country", "language",
       "crypto_ok", "ble_callback_active", "ble_diag_ok", "maps_geometry_faulted", "geometry_anchor_faulted", "stack_desync", "irks_silent",
       "has_metre_anchor", "floors_all_default", "scanner_z_uniform", "radios_ambiguous", "radios_unresolved", "calibration_points_vanished",
@@ -430,7 +457,7 @@ function renderUnlocked(ctx, root) {
         const bits = [];
         if (f.above_zero || f.sum) bits.push(`above zero in ${fmt(f.above_zero)} · sum ${fmt(Math.round(f.sum * 10) / 10)}`);
         const vals = Object.entries(f.values || {}), sums = Object.entries(f.sums || {});
-        if (vals.length) bits.push(vals.slice(0, 6).map(([v, c]) => `${v} ${fmt(c)}`).join(" · ") + (vals.length > 6 ? ` · +${vals.length - 6}` : ""));
+        if (vals.length) bits.push(vals.slice(0, 6).map(([v, c]) => `${W_FIELD_VALUE[`${k}.${v}`] || v} ${fmt(c)}`).join(" · ") + (vals.length > 6 ? ` · +${vals.length - 6}` : ""));
         if (sums.length) bits.push(sums.slice(0, 6).map(([v, c]) => `${v} Σ${fmt(Math.round(c * 10) / 10)}`).join(" · ") + (sums.length > 6 ? ` · +${sums.length - 6}` : ""));
         fieldRows.push([word("field", k), sec, fmt(f.installs), bits.join("  |  ") || "–", `${sec}.${k}`]);
       }
@@ -490,6 +517,7 @@ const W_FEATURE = {
   beacon_profiling_enabled: "Beacon profiling (learns fixed beacons)",
   ha_entity_tracker_enabled: "Home Assistant: a tracker per device",
   update_check_enabled: "Checks for PadSpan updates",
+  vendor_lookup_enabled: "Looks up device makers online",
   ha_entity_area_enabled: "Home Assistant: a room sensor per device",
   ha_entity_distance_enabled: "Home Assistant: a distance sensor per device",
   beacon_auto_calibrate: "Calibrates itself from pinned beacons",
@@ -504,7 +532,7 @@ const W_FEATURE = {
   quiet_mode: "Quiet mode (hides unnamed devices)",
   forensics_enabled: "Forensics (Pro)",
   adaptive_floor_detection: "Learns how much each floor blocks signal",
-  distortion_map_enabled: "Distortion Map tab",
+  distortion_map_enabled: "Signal distortion map tab",
   bermuda_ignore: "Ignores Bermuda's data",
   overview_2d_mode: "Overview drawn flat (2D)",
   ha_entity_occupancy_enabled: "Home Assistant: a sensor per room that says if it's occupied",
@@ -537,6 +565,8 @@ const W_FEATURE = {
   heatmap: "Atlas heat map", subzones: "Zones inside rooms", plan_scan_import: "Imports a phone room scan",
   wall_fully: "Wall screen: Fully Kiosk support", wall_floor_cycle: "Wall screen: cycles through floors",
   director: "3D house: camera flies to events", scale: "Optimize for several wall screens",
+  ai_backup: "AI: a backup AI Task is set",
+  ai_plans: "AI map-building research is on (experimental)",
   guest_tags: "Guest tags", room_walk: "Calibration: Walk a room", day_theme: "Day colour theme (Pro)",
   fusion: "Combines position and signal for the room",
   tasmota_ble_enabled: "Tasmota Bluetooth receivers",
@@ -544,10 +574,10 @@ const W_FEATURE = {
   enhanced_security: "Enhanced security",
 };
 const W_TAB = {
-  overview: "Overview", maps: "Maps", calibration: "Calibration", follow: "Follow", purelive: "Pure Live",
+  overview: "Overview", maps: "Maps", calibration: "Calibration", follow: "Follow", purelive: "Live Tracker",
   settings: "Settings", manage: "Manage", training: "Training", devices: "Devices", occupancy: "Occupancy",
   health: "Health", bluetooth: "Bluetooth", monitor: "Monitor", traceback: "Traceback", presence: "Presence",
-  qa: "QA", installbase: "Install Base (this page)", sandbox: "Sandbox", forensics: "Forensics", insights: "Insights",
+  qa: "QA", rooms: "Rooms", receivers: "Receivers", installbase: "Install Base (this page)", sandbox: "Sandbox", forensics: "Forensics", insights: "Insights",
   "maps/edit": "Maps › Edit", "maps/rooms": "Maps › Rooms", "maps/stack": "Maps › Floor stack",
   "maps/library": "Maps › Library", "maps/upload": "Maps › Upload a plan", "maps/lights": "Maps › Lights",
   "maps/export": "Maps › Export", "maps/help": "Maps › Help",
@@ -569,6 +599,10 @@ const W_FLAG = {
 const W_INTEGRATION = {
   bluetooth: "Bluetooth", mobile_app: "Home Assistant phone app", mqtt: "MQTT", ibeacon: "iBeacon tracker",
   esphome: "ESPHome", bermuda: "Bermuda", private_ble_device: "Private BLE Device",
+};
+const W_RECEIVER = {
+  esphome: "ESPHome proxy", shelly: "Shelly", ha_adapter: "Home Assistant's own adapter", ruuvi: "Ruuvi gateway",
+  espresense: "ESPresense", tasmota: "Tasmota", other: "Something else",
 };
 const W_MODULE = {
   ws_notify: "Notifications", __init__: "Start-up", ws_calibration: "Calibration",
@@ -644,8 +678,14 @@ const W_SURFACE = {
   atlas: "the Atlas", busy_times: "Busy times", locate: "Locate", maps: "Maps", milestone: "a setup milestone",
   settings: "Settings", sidebar: "the sidebar", update_banner: "the update banner", overview: "the Overview",
 };
+// Add data via plans (telemetry.PLAN_AI_EVENTS, experimental): the kinds it suggests.
+const W_PLAN_KIND = { stairs: "stairs", railing: "a railing hint", light: "a light" };
 const W_EVENT = {
   stale_receivers_listed: "Opened the stale-receiver list (Mapping › 3D Stack)",
+  status_dot_open: "Opened Health from the top bar's status dot",
+  receivers_page_edit: "Saved a height or signal adjustment on the Receivers page",
+  preview_open: "Opened Preview a finished house (the sample house)", preview_back: "Went back to their own house from the preview",
+  ai_backup_used: "AI read by the backup AI Task (the main one was away)", ai_backup_failed: "The backup AI Task failed too",
   backup_created: "Made a backup", beacon_tune_saved: "Saved a beacon position (Beacon Tune)",
   bermuda_history_purged: "Cleared Bermuda's old history", calibration_point_added: "Added a calibration point",
   client_screen_seen: "Screens seen", companion_tx_sent: "Phone app set to broadcast (setup wizard)",
@@ -656,8 +696,20 @@ const W_EVENT = {
   findmy_back_on_day_key: "Find My tag back on its daily key",
   findmy_moved_back: "Find My tag went back to an earlier address",
   findmy_moved_back_addrs: "Links undone when a Find My tag went back",
+  label_link_linked: "A name moved to a device's new address, on screen",
+  label_link_asked: "Asked whether a new address is a named device",
+  label_link_held: "Held a question back: one a day for each device, none for a week after a No",
+  label_link_yes: "Answered yes: same device", label_link_no: "Answered no: a different device",
+  label_link_undone: "Undid a name's move to a new address",
+  label_link_wrong_after_undo: "An undone move proved wrong: both addresses heard at once",
+  label_link_old_back: "A name went back by itself: the old address came back",
+  label_link_capped: "A very large home reached the cap on a name's search, so it waited a turn",
   forensics_query: "Ran a Forensics search", free_pro_card_shown: "Saw the free-Pro card",
   getting_started_shown: "Saw the Getting Started card", house3d_opened: "Opened the 3D house",
+  "house3d_wall_draw:high": "Wall: every pixel, always",
+  "house3d_wall_draw:high_still": "Wall: every pixel, less while moving",
+  "house3d_wall_draw:high_capped": "Wall: about 1440p, always",
+  "house3d_wall_draw:low": "Wall: Low quality",
   "house3d_fallback:context_lost": "3D house fell back: the browser dropped 3D graphics",
   irk_added: "Added a phone key (IRK)", irk_cache_cleared: "Phone keys reloaded after a change",
   irk_resolved: "A phone's changing address recognised", irk_unresolved_rpa: "A changing address no key recognised",
@@ -669,11 +721,16 @@ const W_EVENT = {
   scan_mode_flip_auto: "A receiver switched to auto scanning", scan_mode_flip_pinned: "A receiver's scan mode pinned",
   tagged_arrived: "Tagged device arrived home", tagged_departed: "Tagged device left home",
   vacation_resumed: "Vacation Mode resumed after a restart", wall_placed: "Drew a wall", wall_removed: "Removed a wall",
+  vacation_rule_max_lights: "Vacation Mode held a light back (most lights on at once)", vacation_anchor_on: "Vacation Mode kept an evening light on",
+  vacation_rule_max_on: "Vacation Mode turned a light off (longest on)",
+  setup_done: "Finished the guided Setup", vacation_preview: "Looked at the Vacation Mode preview", vacation_preview_empty: "Vacation Mode preview had nothing to show",
+  companion_ids_unreadable: "A phone's beacon ID couldn't be read", device_identity_refused: "A device key already belonged to another device",
   "view_link:kept": "A ?view= link opened its tab", "view_link:forensics_off": "A ?view= link went to the menu (Forensics off)",
   "view_link:edition": "A ?view= link went to the menu (not in this edition)",
   "ha_sidebar:hidden": "Hid Home Assistant's sidebar", "ha_sidebar:shown": "Brought the sidebar back",
   "weather_note:warning_ignored": "Weather: a leak sensor chosen as the warning, ignored",
   "weather_note:sensor_overruled": "Weather: a wet rain sensor under clear sky, ignored",
+  "weather_note:sensor_stale": "Weather: a rain sensor that stopped reporting, ignored",
   wizard_calib_step_setup: "Calibration wizard: setup", wizard_calib_step_model: "Calibration wizard: house model",
   wizard_calib_step_roam: "Calibration wizard: walk around", wizard_calib_step_tune: "Calibration wizard: tune",
   wizard_calib_step_finish: "Calibration wizard: finished", wizard_calib_exited_early: "Calibration wizard: left early",
@@ -683,6 +740,9 @@ const W_EVENT = {
   wizard_tiers_step_free: "Editions tour: Free", wizard_tiers_step_ladder: "Editions tour: compare",
   wizard_tiers_step_upgrade: "Editions tour: upgrade", wizard_tiers_completed: "Editions tour: finished",
   wizard_la_opened: "3D house setup: opened", wizard_la_finished: "3D house setup: finished",
+  menu_more_tools_open: "Opened More tools in the menu",
+  cal_results_opened: "Opened Calibration Results",
+  rooms_page_edit: "Rooms page: a colour, ceiling height or split level saved",
 };
 const W_GS_STEP = { upload: "add a floor plan", scale: "set the scale", rooms: "draw rooms", scanners: "place receivers",
                     calibrate: "calibrate", positioned: "see devices placed" };
@@ -721,6 +781,10 @@ const W_FIELD = {
   pinned_movers_n: "Followed devices pinned in place", usage_dropped: "Usage counts left out to fit the report",
   perf: "How hard PadSpan works the machine", runs: "PadSpan's background jobs",
 };
+// A field's value in words, where its own word is not plain ("field.value").
+const W_FIELD_VALUE = {
+  "vacation.source:last_week": "plays last week", "vacation.source:month": "monthly average",
+};
 function word(kind, k) {
   const key = String(k);
   const [a, b, c] = key.split(":");
@@ -730,6 +794,7 @@ function word(kind, k) {
     case "tab": return W_TAB[key] || tidy(key);
     case "flag": return W_FLAG[key] || tidy(key);
     case "integration": return W_INTEGRATION[key] || tidy(key);
+    case "receiver": return W_RECEIVER[key] || tidy(key);
     case "module": return W_MODULE[b || a] ? `${W_MODULE[b || a]}${b && a !== "WARNING" ? ` (${a.toLowerCase()})` : ""}` : tidy(b || a);
     case "view": return W_VIEW[key] || W_TAB[key] || tidy(key);
     case "stage": return W_STAGE[key] || tidy(key);
@@ -765,7 +830,53 @@ function word(kind, k) {
       if (a === "stair_read") return { found: "AI found stairs on a floor plan", none: "AI found no stairs on a plan",
                                         bad_answer: "AI's stair answer unreadable", error: "AI stair read failed",
                                         no_ai_task: "AI stair read refused: no AI Task" }[b] || tidy(key);
+      if (a === "stair_box") return { kept: "AI stair box kept as a staircase", dropped: "AI stair box dropped (not a staircase's size)",
+                                       past_edge: "AI stair box ran past the picture (answered in another frame)" }[b] || tidy(key);
+      if (a === "open_edge") return { tap: "Open edges: a stretch tapped open", all: "Open edges: a whole room opened",
+                                       replaced: "Open edges: a signal wall replaced by an open edge",
+                                       removed: "Open edges: a room's open edges taken back" }[b] || tidy(key);
+      if (a === "rail_stamped") return { glass: "Open edge from before: its railing made its own setting",
+                                          none: "Open edge from before: no railing made its own setting" }[b] || tidy(key);
+      if (a === "plan_ai_session") return `Plan AI session ${{ started: "started", done: "finished", no_read: "read nothing (no answer on any plan)", cancelled: "cancelled", failed: "failed", out_of_time: "ran out of time" }[b] || b}`;
+      if (a === "plan_ai_no_read") return `Plan AI session read nothing: ${{ no_media: "the media folder couldn't take the plan", no_picture: "the plans' pictures wouldn't open", unreachable: "the AI couldn't be reached", timeout: "no answer in time", bad_answer: "nothing usable in the answers" }[b] || b}`;
+      if (a === "plan_ai_budget_cut") return `Plan AI's time ran out during ${{ tiles: "the light tiles", light_crop: "the lights' second looks", whole: "the whole-plan reads", crop: "the second looks", railing: "the railing questions" }[b] || b}`;
+      if (a === "plan_ai_cancel_why") return `Plan AI session cut short: ${{ user: "cancelled by the person", switch_off: "the switch went off", house3d_off: "Live Aboard went off",
+        licence: "the licence lapsed", plan_gone: "a plan was removed", plan_changed: "a plan moved", restart: "Home Assistant restarted" }[b] || b}`;
+      if (a === "plan_ai_model") return `Plan AI read by a ${{ local: "local", cloud: "cloud", unknown: "(unknown where)" }[b] || b} AI`;
+      if (a === "plan_ai_frame") return `Plan AI answered in a ${{ probed: "measured (Ollama)", named: "named" }[b] || b} picture frame`;
+      if (a === "plan_ai_plans") return `Plan AI session over ${{ "1": "1 plan", "2_3": "2–3 plans", "4_6": "4–6 plans", gt6: "over 6 plans" }[b] || b}`;
+      if (a === "plan_ai_reads") return `Plan AI session of ${{ "1_5": "1–5", "6_15": "6–15", "16_40": "16–40", gt40: "over 40" }[b] || b} reads`;
+      if (a === "plan_ai_read_secs") return `Plan AI took ${{ lt5: "under 5 s", "5_15": "5–15 s", "15_45": "15–45 s", gt45: "over 45 s" }[b] || b} to answer one read`;
+      if (a === "plan_ai_error") return `Plan AI read failed: ${{ no_ai_task: "no AI Task set up", bad_answer: "nothing usable in the answer", timeout: "no answer in time",
+        unreachable: "the AI couldn't be reached", no_media: "the media folder couldn't take the plan", no_picture: "a plan's picture wouldn't open", budget: "the session's time ran out", suspect_frame: "answered 0–1000 (position unsure)" }[b] || b}`;
+      if (a === "plan_ai_crop") return `Plan AI second look ${{ kept: "kept a find where it was", placed: "placed a find from its crop", dropped: "dropped a find (not there)", light_kept: "kept a light where it was", light_placed: "placed a light from its crop", light_dropped: "dropped a light (not there)" }[b] || b}`;
+      if (a === "plan_ai_fixtures") return `Plan AI plan said to draw light fixtures: ${{ yes: "yes", no: "no", unsure: "not sure" }[b] || b}`;
+      if (a === "plan_ai_tiles") return `Plan AI session with lights asked for read ${{ none: "no tiles", "1_9": "1–9 tiles", "10_27": "10–27 tiles", gt27: "over 27 tiles" }[b] || b}`;
+      if (a === "plan_ai_suggested") return `Plan AI suggested ${W_PLAN_KIND[b] || b}`;
+      if (a === "plan_ai_duplicate") return `Plan AI found ${W_PLAN_KIND[b] || b} already in the house`;
+      if (a === "plan_ai_verdict") { const i = String(b).lastIndexOf("_"), k = String(b).slice(0, i), v = String(b).slice(i + 1);
+        return `Plan AI ${W_PLAN_KIND[k] || k} marked ${{ failure: "wrong", later: "later", right: "right", settled: "gone with its stair", new: "new (kept)", correction: "a correction (kept)" }[v] || v}`; }
+      if (a === "plan_ai_taken_back") { const i = String(b).lastIndexOf("_"), k = String(b).slice(0, i), v = String(b).slice(i + 1);
+        return `Plan AI ${W_PLAN_KIND[k] || k} verdict taken back (${{ failure: "wrong", later: "later", right: "right", settled: "gone with its stair" }[v] || v})`; }
+      if (a === "plan_ai_failure_why") { const i = String(b).indexOf("_"), k = String(b).slice(0, i), w = String(b).slice(i + 1);
+        return `Plan AI ${W_PLAN_KIND[k] || k} wrong because: ${{ wrong_place: "wrong place", nothing_there: "nothing there", already_here: "already here", wrong_kind: "wrong kind", cant_tell: "can't tell" }[w] || w}`; }
+      if (a === "plan_ai_held") return `Plan AI position held as coarse (${{ frame: "picture size unknown", eye: "plan placed by eye" }[b] || b})`;
+      if (a === "plan_ai_correction_target") return `Plan AI correction aimed at ${b === "hand" ? "a hand-placed" : "an AI-placed"} stair`;
+      if (a === "plan_ai_correction_taken") return `Plan AI correction taken on ${b === "hand" ? "a hand-placed" : "an AI-placed"} stair`;
+      if (a === "plan_ai_stacked") return `Plan AI stacked stairwell ${b === "offered" ? "offered" : "taken"}`;
+      if (a === "plan_ai_moved_after_accept") return `Plan AI ${W_PLAN_KIND[b] || b} kept, then moved over 30 cm before Save`;
+      if (a === "plan_ai_missing_added") return `Plan AI ${W_PLAN_KIND[b] || b} added by hand after the what's-missing pass`;
+      if (a === "plan_ai_rail_side") return `Plan AI railing kept on ${b === "ai" ? "the side the AI said" : "a side the person chose"}`;
+      if (a === "plan_ai_commit") return `Plan AI keep ${{ done: "written", rev_mismatch: "refused: the list had changed", already_committed: "refused: already kept", changed_since: "refused: a target changed since",
+        not_open: "refused: item no longer open", stair_first: "refused: railing before its stair", invalid: "refused: not a valid item", backup_failed: "stopped: no safety backup", save_failed: "stopped: the write failed" }[b] || b}`;
+      if (a === "plan_ai_undo") return `Plan AI undo: ${{ batch: "a batch taken back", put_back: "an undo put back", item_skipped: "an item left, changed since", stairs: "a stair taken back", railing: "a railing taken back", light: "a light's kind taken back", already_undone: "refused: already undone", save_failed: "stopped: the write failed" }[b] || b}`;
+      if (key === "plan_ai_stale") return "Plan AI item changed since it was read (stale)";
+      if (key === "plan_ai_light_unmatched") return "Plan AI fixture symbol with no placed light (not an AI failure)";
+      if (key === "plan_ai_tiles_slow") return "Plan AI light tiles skipped: its first read took over 45 s";
+      if (key === "plan_ai_no_floor") return "Plan AI find left out: no floor for it to climb from";
       if (a === "photo_subject") return `AI read a photo of ${{ furniture: "furniture", tag: "a tag", scanner: "a receiver", person: "a person" }[b] || b}`;
+      if (a === "photo_quick") return { ok: "AI photo read quickly (a quick look, then its kind)",
+                                         fallback: "AI photo needed the full read (the quick look wasn't sure)" }[b] || tidy(key);
       if (a === "photo_secs") return `AI took ${{ lt5: "under 5 s", "5_15": "5–15 s", "15_45": "15–45 s", gt45: "over 45 s" }[b] || b} to answer`;
       if (a === "stairs_outcome") return { all_ok: "Stairs: every flight lands in a room", some_landing: "Stairs: one lands in no room (check where)",
                                             some_nofloor: "Stairs: one has no floor above to reach" }[b] || tidy(key);
@@ -777,6 +888,13 @@ function word(kind, k) {
       if (a === "tip_shown" || a === "tip_opened" || a === "tip_hidden") {
         const tip = { floor_heights: "floor heights", receiver_heights: "receiver heights", scale: "a real-world scale", all: "all of them" }[b] || b;
         return `Accuracy tip ${{ tip_shown: "shown", tip_opened: "followed to its fix", tip_hidden: "hidden" }[a]}: ${tip}`;
+      }
+      if (a === "cal_results_action") return `Calibration Results: ${{ scale: "went to measure a floor plan", start: "started calibrating", receiver_heights: "went to receiver heights",
+        floor_heights: "went to floor heights", compute: "went to work out the accuracy", room_empty: "went to add points in an empty room",
+        room_weak: "went to add points in a weak room", stale: "walked the house again", matrix: "opened Accuracy by spot", guided: "opened Guided calibration" }[b] || b}`;
+      if (a === "setup_step" || a === "setup_skip") {
+        const step = { plan: "floor plan", scale: "scale", floors: "floors and heights", rooms: "rooms", receivers: "receivers", calibration: "calibration" }[b] || b;
+        return `Setup: ${a === "setup_step" ? "reached" : "skipped"} the ${step} step`;
       }
       if (a === "proxy_rate_drops") return `A receiver's reading rate dropped (${b} a day)`;
       return tidy(key);

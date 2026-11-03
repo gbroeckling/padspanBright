@@ -60,7 +60,7 @@ _SHOWCASE_THEMES = (
     "material_you", "neon_precision", "luxury_realestate",
     "wabi_sabi", "hygge", "aurora", "automotive_hud", "art_deco",
     "swiss_style", "bauhaus", "holographic", "retro_futurism",
-    "obsidian_noir",
+    "obsidian_noir", "west_coast_forest",
 )
 
 
@@ -148,6 +148,12 @@ def _atlas_3d_look(value: Any) -> str:
 def _atlas_3d_ai_task(value: Any) -> str:
     """An ai_task.* entity id, or "" (none chosen)."""
     return _weather_entity(value, ("ai_task.",))
+
+
+def _atlas_3d_ai_task_backup(value: Any, main: Any) -> str:
+    """The backup AI Task: an ai_task.* entity id that is not the main one, or "" (no backup)."""
+    v = _atlas_3d_ai_task(value)
+    return "" if v and v == _atlas_3d_ai_task(main) else v
 
 
 # The sidebar's Live Aboard goes back to its home view after this long
@@ -462,7 +468,7 @@ def _sanitize_whole_house_presets(presets_in: Any) -> list[dict[str, Any]]:
 # does for the whole home.
 _EVERYONE_KEYS = frozenset({
     "whatsnew_seen_version", "telemetry_asked", "trial_nudge_done", "tester_nudge_done",
-    "onboarding_completed", "health_reminder_last_ts", "locate_self_key", "followed_addrs",
+    "onboarding_completed", "setup_progress", "health_reminder_last_ts", "locate_self_key", "followed_addrs",
     "hidden_map_ids", "lights_hidden", "maps_iso_floor_gap", "maps_iso_horiz_gap", "maps_iso_focus",
     "overview_iso_floor_gap", "overview_iso_horiz_gap", "overview_iso_focus", "overview_iso_zoom",
     "traceback_house_focus", "overview_show_walls", "overview_show_outdoor", "overview_show_trails",
@@ -493,7 +499,6 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("trial_nudge_done"): bool,               # the Overview trial milestone card was answered; never again
         vol.Optional("tester_nudge_done"): bool,              # the Overview tester card was shown; never again
         vol.Optional("whatsnew_seen_version"): str,           # version the what's-new card last reported
-        vol.Optional("vendor_lookup_enabled"): bool,
         vol.Optional("room_change_delay_s"): vol.Coerce(float),
         vol.Optional("away_timeout_m"): vol.Coerce(float),
         vol.Optional("ref_power"): vol.Coerce(float),
@@ -546,8 +551,10 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("atlas_3d_people"): bool,
         vol.Optional("atlas_3d_tags"): bool,
         vol.Optional("atlas_3d_ai_task_entity"): vol.Any(str, None),
+        vol.Optional("atlas_3d_ai_task_backup_entity"): vol.Any(str, None),
         vol.Optional("ai_photos_enabled"): bool,
         vol.Optional("ai_stairs_enabled"): bool,
+        vol.Optional("ai_plans_enabled"): bool,
         vol.Optional("atlas_3d_library"): bool,
         vol.Optional("atlas_3d_weather"): bool,
         vol.Optional("atlas_3d_showcase"): bool,
@@ -580,6 +587,9 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("vacation_mode_pause_home"): bool,
         vol.Optional("vacation_mode_bedtime"): str,
         vol.Optional("vacation_mode_max_on_min"): vol.Coerce(int),
+        vol.Optional("vacation_mode_max_lights"): vol.Coerce(int),
+        vol.Optional("vacation_mode_anchors"): list,
+        vol.Optional("vacation_mode_source"): str,
         vol.Optional("adaptive_learning_enabled"): bool,
         vol.Optional("adaptive_floor_detection"): bool,
         vol.Optional("signal_loss_linger_s"): vol.Coerce(int),
@@ -657,6 +667,8 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("onboarding_completed"): bool,
         # The Overview's accuracy tips hidden (setup_checks.TIPS), or "all": the card off.
         vol.Optional("accuracy_tips_hidden"): list,
+        # The guided Setup's place (setup_checks.clean_setup_progress).
+        vol.Optional("setup_progress"): dict,
         # Radio map visualization parameters (clamped in handler below)
         vol.Optional("heatmap_gain"): vol.Coerce(int),        # -20 to +20 dB
         vol.Optional("heatmap_contrast"): vol.Coerce(int),    # -15 to +15
@@ -740,7 +752,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                 from .perf_sampler import async_runs_opted_out  # noqa: PLC0415
                 await async_runs_opted_out(hass)
         if ("atlas_3d_library" in msg or "atlas_3d_ai_task_entity" in msg or "ai_photos_enabled" in msg
-                or "ai_stairs_enabled" in msg):
+                or "ai_stairs_enabled" in msg or "ai_plans_enabled" in msg or "atlas_3d_ai_task_backup_entity" in msg):
             # Live Aboard's shared library and a cloud AI Task reading photos
             # both let data leave the house: an administrator's call, like the
             # usage report above.
@@ -771,8 +783,6 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             # a bug or a probe; store an empty string rather than the input.
             _wn = str(msg.get("whatsnew_seen_version") or "").strip()
             payload["whatsnew_seen_version"] = _wn if re.fullmatch(r"\d+\.\d+\.\d+", _wn) else ""
-        if "vendor_lookup_enabled" in msg:
-            payload["vendor_lookup_enabled"] = bool(msg.get("vendor_lookup_enabled"))
         if "room_change_delay_s" in msg:
             payload["room_change_delay_s"] = max(0.0, min(300.0, float(msg["room_change_delay_s"])))
         if "away_timeout_m" in msg:
@@ -928,6 +938,15 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             payload["atlas_3d_look"] = _atlas_3d_look(msg["atlas_3d_look"])
         if "atlas_3d_ai_task_entity" in msg:
             payload["atlas_3d_ai_task_entity"] = _atlas_3d_ai_task(msg["atlas_3d_ai_task_entity"])
+        if "atlas_3d_ai_task_entity" in msg or "atlas_3d_ai_task_backup_entity" in msg:
+            # The backup AI Task: an ai_task.* that is not the main one. A main
+            # changed to the backup's own entity leaves no backup.
+            _have = (st.data if st is not None else {}) or {}
+            _main = payload.get("atlas_3d_ai_task_entity", _have.get("atlas_3d_ai_task_entity"))
+            _bk = _atlas_3d_ai_task_backup(
+                msg.get("atlas_3d_ai_task_backup_entity", _have.get("atlas_3d_ai_task_backup_entity")), _main)
+            if "atlas_3d_ai_task_backup_entity" in msg or _bk != (_have.get("atlas_3d_ai_task_backup_entity") or ""):
+                payload["atlas_3d_ai_task_backup_entity"] = _bk
         if "atlas_3d_home_idle_s" in msg:
             payload["atlas_3d_home_idle_s"] = _atlas_3d_idle(msg["atlas_3d_home_idle_s"])
         if "atlas_3d_carries" in msg and isinstance(msg["atlas_3d_carries"], dict):
@@ -1006,6 +1025,25 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
         if "traceback_house_focus" in msg:
             payload["traceback_house_focus"] = max(0, min(64, int(msg["traceback_house_focus"])))
         _vac_event, _vac_who, _vac_now = "", {}, 0.0
+        # Where each weekday's routine comes from (Garry, 2026-10-31): read
+        # when Vacation Mode is turned on, never mid-trip. Admin-only like
+        # the other options; checked here so a turn-on in the same message
+        # uses it.
+        if "vacation_mode_source" in msg:
+            _user = getattr(connection, "user", None)
+            if _user is not None and getattr(_user, "is_admin", True) is False:
+                connection.send_error(msg["id"], "unauthorized", "Only an administrator can change Vacation Mode")
+                return
+            from .vacation_mode import SOURCES as _VSRC  # noqa: PLC0415
+            if msg["vacation_mode_source"] not in _VSRC:
+                connection.send_error(msg["id"], "invalid_format", "Choose last_week or month")
+                return
+            payload["vacation_mode_source"] = msg["vacation_mode_source"]
+            # Someone chose. A routine from before the choice existed gets its
+            # name (the monthly average), so a different choice is learned at
+            # the next turn-on (vacation_mode.resume_relearns).
+            if st.data.get("vacation_mode_pattern") and st.data.get("vacation_mode_pattern_source") not in _VSRC:
+                payload["vacation_mode_pattern_source"] = "month"
         if "vacation_mode_enabled" in msg:
             # Admin-only: unlike a saved Whole House Preset (a one-shot,
             # user-initiated apply), this autonomously operates real lights
@@ -1033,7 +1071,9 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             elif _vac_was and not payload["vacation_mode_enabled"]:
                 _vac_event = "off"
                 _vac_who = who_from_connection(hass, connection)
-            payload.update(switch_fields(st.data, payload["vacation_mode_enabled"], _vac_now,
+            payload.update(switch_fields({**st.data, **{k: v for k, v in payload.items()
+                                                         if k in ("vacation_mode_source", "vacation_mode_pattern_source")}},
+                                         payload["vacation_mode_enabled"], _vac_now,
                                          _vac_who if _vac_event == "off" else None))
         if "vacation_mode_intensity" in msg:
             payload["vacation_mode_intensity"] = max(5, min(100, int(msg["vacation_mode_intensity"])))
@@ -1055,7 +1095,8 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
         # The trip options (vacation_mode.OPTION_DEFAULTS): admin-only like
         # Vacation Mode itself — an end date or a pause can stop it.
         _vac_opts = ("vacation_mode_dark_only", "vacation_mode_dark_offset_min", "vacation_mode_end_at",
-                     "vacation_mode_pause_home", "vacation_mode_bedtime", "vacation_mode_max_on_min")
+                     "vacation_mode_pause_home", "vacation_mode_bedtime", "vacation_mode_max_on_min",
+                     "vacation_mode_max_lights", "vacation_mode_anchors")
         if any(k in msg for k in _vac_opts):
             _user = getattr(connection, "user", None)
             if _user is not None and getattr(_user, "is_admin", True) is False:
@@ -1085,6 +1126,16 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             if "vacation_mode_max_on_min" in msg:
                 _mx = int(msg["vacation_mode_max_on_min"] or 0)
                 payload["vacation_mode_max_on_min"] = 0 if _mx <= 0 else max(MAX_ON_RANGE[0], min(MAX_ON_RANGE[1], _mx))
+            if "vacation_mode_max_lights" in msg:
+                from .vacation_mode import MAX_LIGHTS_RANGE  # noqa: PLC0415
+                _ml = int(msg["vacation_mode_max_lights"] or 0)
+                payload["vacation_mode_max_lights"] = (0 if _ml <= 0
+                                                       else max(MAX_LIGHTS_RANGE[0], min(MAX_LIGHTS_RANGE[1], _ml)))
+            if "vacation_mode_anchors" in msg:
+                # Lights only, never a lock or a cover (anchor_ids holds it
+                # again at every tick); at most ANCHORS_MAX.
+                from .vacation_mode import anchor_ids  # noqa: PLC0415
+                payload["vacation_mode_anchors"] = anchor_ids({"vacation_mode_anchors": msg["vacation_mode_anchors"]})
         if "lights_isolux" in msg:
             payload["lights_isolux"] = bool(msg["lights_isolux"])
         if "lights_automorph_enabled" in msg:
@@ -1185,7 +1236,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     "overview_atlas", "lights_panel_enabled", "atlas_emergency_button", "atlas_live_colours", "bermuda_ignore", "bright_reveal_presence",
                     "atlas_weather_enabled", "atlas_alert_pulse", "atlas_heatmap_enabled",
                     "atlas_3d_enabled", "atlas_3d_people", "atlas_3d_tags", "atlas_3d_library",
-                    "atlas_3d_weather", "atlas_3d_showcase", "ai_photos_enabled", "ai_stairs_enabled",
+                    "atlas_3d_weather", "atlas_3d_showcase", "ai_photos_enabled", "ai_stairs_enabled", "ai_plans_enabled",
                     "tags_room_events_enabled", "tags_nfc_identify_enabled",
                     "tags_phone_autolink_enabled", "quiet_mode", "light_theme", "day_theme", "theme_follow_sun", "wall_pixel_shift", "wall_fully",
                     "beacon_auto_calibrate", "overview_persistent_pins", "overview_show_walls",
@@ -1244,6 +1295,9 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             from .setup_checks import TIPS as _TIPS  # noqa: PLC0415
             raw = msg["accuracy_tips_hidden"]
             payload["accuracy_tips_hidden"] = sorted({str(x) for x in raw if str(x) in _TIPS or str(x) == "all"}) if isinstance(raw, list) else []
+        if "setup_progress" in msg:
+            from .setup_checks import clean_setup_progress  # noqa: PLC0415
+            payload["setup_progress"] = clean_setup_progress(msg["setup_progress"])
         if "espresense_companion_url" in msg:
             # Admin-only (Phase 2i security audit, 2026-09-19): this URL is
             # later fetched server-side, verbatim, by the admin-only
@@ -1352,7 +1406,8 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                         bump(hass, "vacation_off_not_pushed")
                 hass.async_create_task(_vac_notice())
         elif any(k in payload for k in ("vacation_mode_end_at", "vacation_mode_pause_home", "vacation_mode_dark_only",
-                                         "vacation_mode_bedtime", "vacation_mode_max_on_min")):
+                                         "vacation_mode_bedtime", "vacation_mode_max_on_min",
+                                         "vacation_mode_max_lights", "vacation_mode_anchors", "vacation_mode_source")):
             from .vacation_mode import refresh_status  # noqa: PLC0415
             refresh_status(hass)
 

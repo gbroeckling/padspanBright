@@ -36,6 +36,7 @@ from .const import (
     ADAPTIVE_STORE_KEY,
     OBJECT_STORE_KEY,
     FINDMY_STORE_KEY,
+    LABEL_LINKS_STORE_KEY,
     MAPS_STORE_KEY,
     MODEL_STORE_KEY,
     FABRIC_STORE_KEY,
@@ -43,6 +44,8 @@ from .const import (
     MOVEMENT_STORE_KEY,
     DATA_TRACEBACK,
     TRACEBACK_STORE_KEY,
+    PUBLIC_ADDRESSES_STORE_KEY,
+    VENDOR_CACHE_STORE_KEY,
 )
 from .bluetooth_live import get_bluetooth_live
 
@@ -118,7 +121,7 @@ async def ws_factory_reset(hass: HomeAssistant, connection, msg) -> None:
         # PadSpan reset does not touch — a reset mid-vacation closes the span
         # so the next vacation's pattern still leaves it out.
         import time as _time
-        from .vacation_mode import learned_pattern, switch_fields
+        from .vacation_mode import learned_pattern, learned_source, switch_fields
         _live = _live_settings.data if _live_settings else {}
         _vac_now = _time.time()
         _vac_was_on = bool(_live.get("vacation_mode_enabled"))
@@ -131,6 +134,8 @@ async def ws_factory_reset(hass: HomeAssistant, connection, msg) -> None:
                 "vacation_mode_pattern_until": _live.get("vacation_mode_pattern_until") or 0,
                 "vacation_mode_pattern_built_at": _live.get("vacation_mode_pattern_built_at") or 0,
                 "vacation_mode_pattern_for": _live.get("vacation_mode_pattern_for") or 0,
+                "vacation_mode_pattern_source": _live.get("vacation_mode_pattern_source") or "",
+                "vacation_mode_pattern_prev_source": learned_source(_live),
                 "vacation_mode_last_off": _live.get("vacation_mode_last_off") or {},
                 **switch_fields(_live, False, _vac_now, {"how": "reset"})}
         _vac.pop("vacation_mode_enabled_at", None)
@@ -291,6 +296,19 @@ async def ws_factory_reset(hass: HomeAssistant, connection, msg) -> None:
         _LOGGER.warning("Factory reset: Find My links — %s", e)
         errors.append(FINDMY_STORE_KEY)
 
+    # ── 6c. Name links — which address a named device uses on screen (label_follow.py) ──
+    try:
+        _old_ll = domain.pop("label_links_store", None)
+        if _old_ll is not None:
+            await _old_ll.async_save({})
+        st = _St(hass, 1, LABEL_LINKS_STORE_KEY)
+        await st.async_save({})
+        cleared += 1
+        domain.pop("label_links", None)
+    except Exception as e:
+        _LOGGER.warning("Factory reset: name links — %s", e)
+        errors.append(LABEL_LINKS_STORE_KEY)
+
     # ── 7. AlertStore — reset to {} ───────────────────────────────────────
     try:
         st = _St(hass, 1, ALERTS_STORE_KEY)
@@ -393,6 +411,21 @@ async def ws_factory_reset(hass: HomeAssistant, connection, msg) -> None:
     except Exception as e:
         _LOGGER.warning("Factory reset: subzones — %s", e)
         errors.append("padspan_bright.subzones")
+
+    # ── 9a'''. The plan AI's store (plan_ai.py) — only a file that exists, emptied ───
+    try:
+        from .const import DATA_PLAN_AI, PLAN_AI_STORE_KEY  # noqa: PLC0415
+        from .plan_ai import empty as _plan_ai_empty  # noqa: PLC0415
+        from .ws_common import _store_file_written  # noqa: PLC0415
+        if await _store_file_written(hass, PLAN_AI_STORE_KEY):
+            await _St(hass, 1, PLAN_AI_STORE_KEY).async_save(_plan_ai_empty())
+            cleared += 1
+        pa_obj = domain.get(DATA_PLAN_AI)
+        if pa_obj is not None:
+            pa_obj.data = _plan_ai_empty()
+    except Exception as e:
+        _LOGGER.warning("Factory reset: plan_ai — %s", e)
+        errors.append("padspan_bright.plan_ai")
 
     # ── 9a''. Robot vacuum (vacuum_import.py) — the link, the walker and its
     # review pile; only a file that exists, emptied, and its polling stopped.
@@ -520,8 +553,29 @@ async def ws_factory_reset(hass: HomeAssistant, connection, msg) -> None:
             _bl._seen_by_source.clear()
             _bl._radio_last_heard.clear()
             _bl._last_reseed = None
+            _bl._address_types.clear()
     except Exception:
         pass
+
+    # The addresses a radio confirmed as public (bluetooth_live), removed through
+    # the store the live object writes with, so a save still pending can't write
+    # it back; and any makers an older version's online lookup kept. Both
+    # outlived a reset, though the help says it erases all of PadSpan's data.
+    try:
+        _bl = get_bluetooth_live(hass)
+        if _bl is not None:
+            _bl._public.clear()
+        await (getattr(_bl, "_public_store", None) or _St(hass, 1, PUBLIC_ADDRESSES_STORE_KEY)).async_remove()
+        cleared += 1
+    except Exception as e:
+        _LOGGER.warning("Factory reset: public addresses — %s", e)
+        errors.append(PUBLIC_ADDRESSES_STORE_KEY)
+    try:
+        await _St(hass, 1, VENDOR_CACHE_STORE_KEY).async_remove()
+        cleared += 1
+    except Exception as e:
+        _LOGGER.warning("Factory reset: vendor cache — %s", e)
+        errors.append(VENDOR_CACHE_STORE_KEY)
 
     _LOGGER.warning(
         "FACTORY RESET executed by %s — cleared %d stores",

@@ -20,6 +20,7 @@
 // the panel's poll calls (panel.js _render, fromPoll), so it never goes stale
 // the way the static room grid does.
 
+const { deviceName } = await import(`./device_name.js${new URL(import.meta.url).search}`);
 const okRoom = (r) => typeof r === "string" && r !== "" && r !== "unknown" && r !== "not_home";
 const up = (a) => String(a || "").toUpperCase();
 
@@ -81,7 +82,7 @@ export function whoIsWhere(snap, scanners, opts = {}){
     const phone = !known && o.kind === "private_ble" && o.private_ble_name;
     const r = okRoom(o.room) ? roomOf(o.room) : (known || phone) ? noRoom : null;
     if (!r) continue;
-    if (known) r.people.push({ name: String(o.user_label || o.private_ble_name || o.name || "a device"), key, track: false });
+    if (known) r.people.push({ name: String(deviceName(o, "a device")), key, track: false });
     else if (phone) r.people.push({ name: String(o.private_ble_name), key, track: true });
     else r.others += 1;
   }
@@ -128,7 +129,8 @@ export function whosWhereCard(ctx){
   card.appendChild(el("div", { style: "display:flex;align-items:baseline;gap:10px;flex-wrap:wrap" }, [
     el("div", { class: "h2", style: "margin:0" }, "Who's where now"),
     el("span", { class: "muted", style: "font-size:12px" }, "From your Bluetooth scanners and the Home Assistant area each one is in. No floor plan needed."),
-  ]));
+    ctx.helpers.helpBtn ? ctx.helpers.helpBtn("whos_where") : null,
+  ].filter(Boolean)));
   const lineEl = el("div", { style: "font-size:12px;margin:8px 0" });
   const roomsEl = el("div", { style: "display:grid;gap:6px" });
   const awayEl = el("div", { style: "margin-top:8px" });
@@ -246,13 +248,10 @@ export function whosWhereCard(ctx){
 
   const foot = el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:10px" });
   const mapBtn = el("button", { class: "btn inline", style: "font-size:12px", title: "Upload a floor plan (or a photo of one) and trace your rooms" }, "Make it a map");
-  mapBtn.addEventListener("click", () => {
-    ctx.state.view = "maps";
-    const maps = ctx.state.maps?.list || [];
-    ctx.state._mapsWizard = { step: 1, mapId: (maps[0] && maps[0].id) || null };
-    ctx.actions.renderRooms();
-  });
-  const demoBtn = el("button", { class: "btn inline", style: "font-size:12px", title: "A made-up house with every feature set up. Your own house is one click away." }, "Preview a finished house");
+  // The guided Setup (views/setup.js): plan, scale, floors, rooms, receivers,
+  // calibration, in order, each opening its own tool.
+  mapBtn.addEventListener("click", () => ctx.actions.showView("setup"));
+  const demoBtn = el("button", { class: "btn inline", style: "font-size:12px", title: "A sample house with every feature set up. Your own house is one click away." }, "Preview a finished house");
   demoBtn.addEventListener("click", () => ctx.actions.setDataMode("sample"));
   foot.appendChild(mapBtn);
   foot.appendChild(demoBtn);

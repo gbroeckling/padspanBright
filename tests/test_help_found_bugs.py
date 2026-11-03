@@ -1,0 +1,117 @@
+# PadSpan Bright — BLE Room-Presence Tracking for Home Assistant
+# Copyright (C) 2026 Garry Broeckling
+# Licensed under the GNU General Public License v3.0
+"""Five bugs found while auditing the help (2026-10-31).
+
+  events    Manage → Events' room log read state.followHistory, which nothing
+            writes (Follow moved onto the server's movement history), so it
+            was always empty: now a line and Open History → Movement
+  health    Health → Live Discovery "Radios" read only the top-level radios,
+            which the sample house's snapshot lacks: Sample showed 0
+  diag      Diagnostics counted the snapshot's top-level keys as devices.
+            Listing objects.list by "a name or a room" let every passing
+            device in (the server names each by its address and rooms each
+            heard one), so it lists your own devices (Monitor's _isMine);
+            phones' IRKs are hidden in it and in Monitor → Export for
+            support; the screen says what the report names
+  offset    Bluetooth → Scanners' RSSI offset took ±30 where every other
+            screen takes ±20; a stored value outside ±20 is kept as it is.
+            Settings → Tracking → Receivers and the Receivers page clamped
+            even an unedited stored value to ±20 on Save (1 m Reference
+            Calibration saves what it measures): now the same rule
+  compare   Compare Maps threw on a visible plan with rooms but no placement;
+            its error read "%" (of a world unit): now metres, same rating
+
+Two more from the same audit, in their own harness or here:
+  Point Align's preview read each point's error and the residual as "%" of
+  the reference picture's width and height: now metres, the rating as it was
+  with its limits in metres for the plan (tests/js/point_align_metres.mjs).
+  The standalone Events view (?view=events, a session log) had its "?" on
+  manage_events, the room-change alerts: now its own session_log topic.
+
+tests/js/help_found_bugs.mjs renders each of them.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+WWW = ROOT / "custom_components" / "padspan_bright" / "www" / "padspan-bright"
+
+
+@pytest.fixture(scope="module")
+def got() -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    r = subprocess.run([node, str(ROOT / "tests" / "js" / "help_found_bugs.mjs"), str(ROOT).replace("\\", "/")],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, r.stderr[-2000:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("prefix", ["events:", "health:", "diag:", "offset:", "compare:"])
+def test_each_bug_is_covered_and_fixed(got, prefix) -> None:
+    mine = {k: v for k, v in got.items() if k.startswith(prefix)}
+    assert mine, (prefix, sorted(got))
+    bad = {k: v for k, v in mine.items() if not v["ok"]}
+    assert not bad, json.dumps(bad, indent=2, ensure_ascii=False)
+
+
+def test_nothing_reads_the_unwritten_follow_history() -> None:
+    for f in [WWW / "panel.js", *(WWW / "views").glob("*.js")]:
+        assert "followHistory" not in re.sub(r"//.*", "", f.read_text(encoding="utf-8")), f.name
+
+
+def test_the_help_says_what_manage_events_has() -> None:
+    help_src = (WWW / "help_content.js").read_text(encoding="utf-8")
+    block = help_src[help_src.index("  manage_events: {"):help_src.index("  manage_logs: {")]
+    assert "this session" not in block and "clears when you reload" not in block
+    assert "Open History" in block and "History → Movement" in block
+    assert "this session's room" not in help_src
+
+
+def test_the_help_says_what_the_diagnostics_report_holds() -> None:
+    help_src = (WWW / "help_content.js").read_text(encoding="utf-8")
+    block = help_src[help_src.index("  diagnostics: {"):help_src.index("  maps_edit: {")]
+    assert "a name or a room" not in block
+    assert "your own devices seen in the last 24 hours" in block
+    assert "with their Bluetooth addresses" in block and "IRKs, are left out" in block
+
+
+def test_the_help_gives_compare_maps_in_metres() -> None:
+    help_src = (WWW / "help_content.js").read_text(encoding="utf-8")
+    line = next(ln for ln in help_src.splitlines() if "Compare Maps (Advanced, two or more plans)" in ln)
+    assert "%" not in line and "in metres" in line
+
+
+def test_point_align_gives_each_points_error_in_metres() -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    r = subprocess.run([node, str(ROOT / "tests" / "js" / "point_align_metres.mjs"), str(ROOT).replace("\\", "/")],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert not out["failures"] and len(out["cases"]) == 12, out["failures"]
+
+
+def test_the_help_gives_point_align_in_metres() -> None:
+    help_src = (WWW / "help_content.js").read_text(encoding="utf-8")
+    line = next(ln for ln in help_src.splitlines() if "POINT ALIGN — For a close fit" in ln)
+    assert "%" not in line and "in metres" in line and "the limits for your plan" in line
+
+
+def test_the_events_view_has_its_own_help() -> None:
+    src = (WWW / "views" / "events.js").read_text(encoding="utf-8")
+    assert 'helpBtn("session_log")' in src and "manage_events" not in src
+    help_src = (WWW / "help_content.js").read_text(encoding="utf-8")
+    block = help_src[help_src.index("  session_log: {"):help_src.index("  qa: {")]
+    assert "Navigation" in block and "Data" in block and "Tag" in block and "gone when you reload" in block

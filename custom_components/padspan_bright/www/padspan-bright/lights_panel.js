@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.199";
-const BUILD_ID = "20261029T215152Z";
+const APP_VERSION = "0.38.224";
+const BUILD_ID = "20261103T155048Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -26,7 +26,7 @@ const { ensureLightsRegistry, gatherLights, buildLightsMapCard, buildLightsTable
         sunAmbient, toggleEntity, atlasLookFromSettings,
         wireUseSurface, openControlCard, controlApiFor, openRoomSheet, openFloorSheet, openActivityCalendar, setManyStates, doorInvertOf,
         wireHoverHud, screenHeight, captureWholeHouse, applyWholeHouse, ensureExactDevices,
-        vacationOptionsOf, vacationEndsText } =
+        vacationOptionsOf, vacationEndsText, layChildren } =
   await import(`./views/lights_map.js${new URL(import.meta.url).search}`);
 const { keepSubscribed } =
   await import(`./views/push_subscription.js${new URL(import.meta.url).search}`);
@@ -136,6 +136,7 @@ try {
   if (_reloadNote) sessionStorage.removeItem("padspan_reload_how");
 } catch(e) {}
 
+const NO_FLOORS = [];
 const LS_HIDDEN = "padspan_bright_lights_hidden";
 // The one-time coach mark ("tap to switch · code or hold for controls") —
 // per browser, because that is where the hands are.
@@ -234,7 +235,10 @@ class PadSpanLightsApp extends HTMLElement {
     this._settingsTs = Date.now();
     this._render();
     this._loadEmergency().then(()=>this._render());
-    this._loadModel().then(()=>this._render());
+    // The saved floor comes into view once, on the card the new model makes
+    // (lights_map.js). A failed read makes none: the request goes with it, or
+    // some later card would move the page.
+    this._loadModel().then(()=>{ this._render(); this._view.scrollToChosen = false; });
     // Clear again AFTER the awaits: two overlapping boots (a second Refresh
     // click while the first is still loading) both pass the clear above before
     // either assigns, and the first timer would be orphaned beyond reach.
@@ -279,7 +283,9 @@ class PadSpanLightsApp extends HTMLElement {
     // live-updating for good.
     const active = this.shadowRoot && this.shadowRoot.activeElement;
     if(active && /^(INPUT|SELECT)$/.test(active.tagName)) return;
-    if(this._pointerDown) return;
+    // ... and a hold no one ends within 30 s is taken as over (a wall screen
+    // must never stop updating for good).
+    if(this._pointerDown && Date.now() - (this._pointerDownAt || 0) < 30000) return;
     // The build check, every 10 minutes (staleBuildAction above). Not as the
     // panel's Overview (_embedded): the panel runs its own.
     if(!this._embedded && Date.now() - (this._versionTs || 0) > 600000){
@@ -319,7 +325,9 @@ class PadSpanLightsApp extends HTMLElement {
     const emergShown = !this.state._emergButtonHidden || !!(emerg && emerg.test && emerg.test.active);
     const emergEvery = (emerg && emerg.available && emergShown) ? 10000 : 300000;
     if(Date.now() - (this._emergTs || 0) > emergEvery) await this._loadEmergency();
-    this._render();   // registry staleness handled inside _buildUI
+    this._pollRender = true;
+    try { this._render(); }   // registry staleness handled inside _buildUI
+    finally { this._pollRender = false; }
   }
 
   async _loadModel(){
@@ -368,6 +376,8 @@ class PadSpanLightsApp extends HTMLElement {
         // panel is set up once and left running unattended; an in-memory
         // zoom reset to 1.0 on every reboot/reload.
         this._view.zoom     = s.overview_iso_zoom      ?? 1.0;
+        // When the page opens, and never again: not on Refresh, which comes here too.
+        if(!this._openScrollAsked){ this._openScrollAsked = true; this._view.scrollToChosen = true; }
       }
       // Per-light shape overrides — set in the Mapping → Lights tab, read here
       // so both views draw the same fixture outlines.
@@ -792,12 +802,16 @@ class PadSpanLightsApp extends HTMLElement {
     openControlCard(this._hass, eid, {
       toast:(m,e)=>this._toast(m,e),
       rerender:()=>this._render(),
-      onEdit: this._isAdmin() ? (e)=>this._gotoBuilder(e) : null,
+      // Not in Basic: Mapping → Atlas (the builder) is an expert screen,
+      // and Basic's Mapping would put the link back on Library.
+      onEdit: this._isAdmin() && !this._basicMode() ? (e)=>this._gotoBuilder(e) : null,
       ...controlApiFor(this._regStore?.reg, eid, { tier: this.state._tier, isAdmin: this._isAdmin() }),
     });
   }
 
   _isAdmin(){ return !!(this._hass && this._hass.user && this._hass.user.is_admin); }
+  // The PadSpan panel's Basic / Advanced choice, kept in this browser (panel.js).
+  _basicMode(){ try { return localStorage.getItem("padspan_complexity") === "basic"; } catch (_) { return false; } }
   // Deep-link into the builder: the panel reads ?view= (existing), ?tab= and
   // ?light= (panel.js) and lands on Mapping → Lights with the light selected.
   _gotoBuilder(eid){
@@ -838,25 +852,40 @@ class PadSpanLightsApp extends HTMLElement {
     if(!this.shadowRoot) return;
     const $c=this.shadowRoot.querySelector("#content");
     if(!$c) return;
-    while($c.firstChild) $c.removeChild($c.firstChild);
-    $c.appendChild(this._buildUI());
+    // The lights' index and the map card stay on screen from one update to
+    // the next (lights_map.js buildLightsTable, host.keepTable, and
+    // buildLightsMapCard, host.keepCard): each is laid out again only where
+    // something in it changed. Everything else comes out first and is built
+    // again, as ever.
+    const kept=[this._tableKeep && this._tableKeep.root, this._cardKeep && this._cardKeep.card].filter(Boolean);
+    let root=$c.firstChild;
+    if(root && kept.some(k=>k.parentNode===root) && root===$c.lastChild){
+      for(const n of [...root.childNodes]) if(!kept.includes(n)) root.removeChild(n);
+    }else{
+      while($c.firstChild) $c.removeChild($c.firstChild);
+      root=null;
+    }
+    const parts=this._buildUI();
+    if(!root){ root=el("div",{}); $c.appendChild(root); }
+    layChildren(root, parts);
     if(this._emergCard) this._emergCard.refresh();
   }
 
   _buildUI(){
     this._wallOn();
-    const root=el("div",{});
+    const parts=[];   // the page, top to bottom (_render lays them)
 
     // ── Header ────────────────────────────────────────────────────────────────
     // The lv- vocabulary from styles.css (loaded in this shadow root), so the
     // sidebar and the Mapping tab wear the same face.
-    root.appendChild(el("div",{class:"lv-hero"},[
+    parts.push(el("div",{class:"lv-hero"},[
       el("div",{class:"lv-hero-title"},"Atlas"),
       el("span",{class:"lv-ver"},`v${APP_VERSION}`),
       el("span",{class:"lv-hint"},"Tap a light to switch it \u00b7 tap its code or hold for controls \u00b7 tap a room name for the whole room \u00b7 motion, temperature and air-quality tiles are read-only"),
       // Admin only: the pencil to the builder. Same map, the other tool.
+      // Not in Basic, as a light's ✎ (Basic's Mapping would land on Library).
       el("span",{style:"margin-left:auto"}),
-      ...(this._isAdmin() ? [el("button",{class:"lv-act",title:"Open Mapping \u2192 Atlas",
+      ...(this._isAdmin() && !this._basicMode() ? [el("button",{class:"lv-act",title:"Open Mapping \u2192 Atlas",
         onclick:()=>this._gotoBuilder(null)},"\u270e Edit map")] : []),
       // Home Assistant's sidebar, hidden or shown (ha_sidebar.js): with it
       // hidden, this is the way back from the Atlas. Not on a phone, where
@@ -872,7 +901,7 @@ class PadSpanLightsApp extends HTMLElement {
     ]));
     // One-time coach mark. Dismissed once per browser; never again.
     if(!this.state._coachSeen){
-      root.appendChild(el("div",{class:"lv-coach"},[
+      parts.push(el("div",{class:"lv-coach"},[
         el("span",{},"\u{1F4A1} Tap a light to switch it. Tap its code, or press and hold, for brightness, colour, effects and fan speed. Hold a dimmable light and slide up or down to dim it. Tap a room name for everything in the room. Motion, temperature and air-quality tiles are read-only — they just show what's happening."),
         el("button",{class:"lv-act",onclick:()=>{
           this.state._coachSeen=true;
@@ -897,8 +926,8 @@ class PadSpanLightsApp extends HTMLElement {
       new Set((this.state.model?.rf_barriers_m || []).map(b => b.linked_entity_id).filter(Boolean)));
 
     if(!lights.length){
-      root.appendChild(el("div",{class:"muted",style:"padding:8px"},"No light entities found."));
-      return root;
+      parts.push(el("div",{class:"muted",style:"padding:8px"},"No light entities found."));
+      return parts;
     }
     const lightsByEid={};
     for(const l of lights) lightsByEid[l.entity_id]=l;
@@ -912,7 +941,8 @@ class PadSpanLightsApp extends HTMLElement {
     }
 
     // ── The shared map card — identical map to the Mapping → Lights tab ──────
-    const floors=this.state.model.floors||[];
+    // The same empty list every render: the map's patch keys on it (lights_map.js drawStageSvg).
+    const floors=this.state.model.floors||NO_FLOORS;
     // Door/window/lock click-to-control (Garry, 2026-09-22) — same gate as
     // maps.js's own barrierHit (_isPro there): Bright or Pro, never free.
     const paid=["bright","pro"].includes(String(this.state._tier||"").toLowerCase());
@@ -1009,6 +1039,16 @@ class PadSpanLightsApp extends HTMLElement {
       vacationModeEnabled: !!this.state._vacationModeEnabled,
       vacationModeResumed: !!this.state._vacationModeResumed,
       vacationOptions: vacationOptionsOf(this.state._vacationSettings),
+      onVacationLights: async () => {
+        if (!this._hass) return null;
+        try { return (await this._ws({ type: "padspan_bright/vacation_lights" }))?.lights || []; }
+        catch (e) { return null; }
+      },
+      onVacationPreview: async () => {
+        if (!this._hass) return null;
+        try { return await this._ws({ type: "padspan_bright/vacation_preview" }); }
+        catch (e) { return null; }
+      },
       vacationModeEnds: vacationEndsText(this.state._vacationSettings),
       onVacationOptions: async (patch) => {
         if (!this._hass) return false;
@@ -1160,6 +1200,16 @@ class PadSpanLightsApp extends HTMLElement {
         .filter(b => b.linked_entity_id).map(b => b.linked_entity_id)),
       doorInvertByEid: doorInvertOf(this.state.model),
       view: this._view,
+      // Every poll builds this card afresh: the map's drawing is patched from
+      // the last one (lights_map.js drawStageSvg), not parsed again whole.
+      patchSvg: true,
+      // The index under the map, kept between updates (buildLightsTable);
+      // on the poll's update a row holding the focused control stays as it is.
+      keepTable: this._tableKeep || (this._tableKeep = {}),
+      // The map card above it too (buildLightsMapCard): the same card while
+      // it is built from the same, its drawing and stage kept as they are.
+      keepCard: this._cardKeep || (this._cardKeep = {}),
+      keepFocused: !!this._pollRender,
       saveView: ()=>this._saveSettings(),
       callWS: (msg)=>this._ws(msg),
       toast: (m,isErr)=>this._toast(m,isErr),
@@ -1275,24 +1325,26 @@ class PadSpanLightsApp extends HTMLElement {
     };
 
     const mapCard=buildLightsMapCard(host);
-    root.appendChild(mapCard);
+    parts.push(mapCard);
     // "Test emergency lighting" floats over the map's TOP-right corner (the
     // map's top is on screen when the Atlas opens; its bottom often is not):
     // a zero-height anchor right before the stage, so nothing moves.
+    // A kept card (host.keepCard) still holds the last one: it comes out first.
     const emerg=this._emergencyOverlay();
+    for(const n of [...mapCard.childNodes]) if(n.classList && n.classList.contains("lv-emerg-anchor")) mapCard.removeChild(n);
     const stage=emerg && mapCard.querySelector(".lv-stage");
     if(stage) stage.parentNode.insertBefore(emerg, stage);
 
     // ── The 90-day trial, under the free map it would unlock ──────────────────
     if(!paid){
       const trial=this._trialCard();
-      if(trial) root.appendChild(trial);
+      if(trial) parts.push(trial);
     }
 
     // ── Unassigned notice + light index table (shared with the Mapping tab) ──
-    root.appendChild(buildLightsTable(host, lights));
+    parts.push(buildLightsTable(host, lights));
 
-    return root;
+    return parts;
   }
 
   // The trial card (views/trial_offer.js) with this panel as its host. Null
@@ -1367,9 +1419,16 @@ class PadSpanLightsApp extends HTMLElement {
     // (dragging a slider is the case that actually bites).
     if(!this._pointerWired){
       this._pointerWired = true;
-      this.addEventListener("pointerdown", ()=>{ this._pointerDown = true; });
-      window.addEventListener("pointerup", ()=>{ this._pointerDown = false; });
-      window.addEventListener("pointercancel", ()=>{ this._pointerDown = false; });
+      // In the capture phase: a map marker's own pointerdown stops the event
+      // there (wirePress), so heard on the way up this never saw a hold on a
+      // light, and a poll landing mid-hold cut the dim short. The release is
+      // heard first on the way down too, so no handler can leave it stuck.
+      this.addEventListener("pointerdown", ()=>{ this._pointerDown = true; this._pointerDownAt = Date.now(); }, true);
+      // A release that never arrives (a context menu, the window left mid-hold)
+      // must not stop the updates: leaving the window ends the hold.
+      window.addEventListener("blur", ()=>{ this._pointerDown = false; });
+      window.addEventListener("pointerup", ()=>{ this._pointerDown = false; }, true);
+      window.addEventListener("pointercancel", ()=>{ this._pointerDown = false; }, true);
     }
     // Uncaught errors with PadSpan code on the stack, counted for the opt-in
     // report as ui_error:<module> + ui_error_while:atlas. The backend drops
@@ -1419,6 +1478,7 @@ class PadSpanLightsApp extends HTMLElement {
         :host([data-wall][data-wall-rotate]){position:fixed;top:0;left:0;width:100vh;height:100vw;transform-origin:top left}
         :host([data-wall][data-wall-rotate="90"]){transform:rotate(90deg) translateY(-100%)}
         :host([data-wall][data-wall-rotate="270"]){transform:rotate(-90deg) translateX(-100%)}
+        :host([data-wall][data-wall-rotate]) .lv-mapcard.lv-display.lv-wall{height:100vw}
         :host([data-wall]) #content{padding:0}
         :host([data-wall]) .lv-hero, :host([data-wall]) .lv-coach{display:none}
         /* The wall is the map: the lights' table under it stays on the desk's
@@ -1464,6 +1524,12 @@ class PadSpanLightsApp extends HTMLElement {
       return;
     }
     this.setAttribute("data-wall", "");
+    // The wall is the whole screen: Home Assistant's own sidebar goes too, on
+    // this browser (Hide HA's switch; Show HA on the Atlas brings it back).
+    if(HA_SIDEBAR && this._hass && this.isConnected && !this._wallHidHa && !HA_SIDEBAR.haHidden(this._hass)){
+      this._wallHidHa = true;
+      HA_SIDEBAR.toggleHaSidebar(this, this._hass);
+    }
     const size = ()=>{
       const p = WALLS.wallParams(location.search, this.state?._wall);
       // A screen hung on its side whose TV can't turn its picture

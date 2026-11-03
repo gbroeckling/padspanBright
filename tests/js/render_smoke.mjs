@@ -312,6 +312,10 @@ const VARIANTS = {
     { name: "features-no-key-trial", state: { _settingsTab: "features", settings: { tier: "free", pro_has_key: false } } },
     { name: "features-lapsed", state: { _settingsTab: "features",
       settings: { tier: "free", pro_has_key: true, pro_active: false, license_is_trial: true } } },
+    // The Atlas tab (2026-10-30), and UI Structure with its pointer to it.
+    { name: "atlas-pro", state: { _settingsTab: "atlas", settings: { tier: "pro", atlas_3d_enabled: true } } },
+    { name: "atlas-free", state: { _settingsTab: "atlas", settings: { tier: "free" } } },
+    { name: "ui", state: { _settingsTab: "ui" } },
   ],
   // The Pro gates, with the trial card under them (no key at all).
   "locate.js": [null, { name: "free-trial", state: { settings: { tier: "free", pro_has_key: false } } }],
@@ -381,7 +385,9 @@ const VARIANTS = {
     { name: "lights-tour-paid-step6", state: { mapsTab: "lights", settings: { tier: "pro" }, _lightsTour: { step: 6 } } },
   ],
   "calibration.js": [
-    null, // default cs.tab === "tune"
+    null, // default cs.tab === "results" (Calibration opens on Results)
+    { name: "tune",   state: { view: "calibration", _calib: CALIB_STATE({ tab: "tune" }) } },
+    { name: "results-sample", state: { view: "calibration", dataMode: "sample", _dataModeKnown: true, _calib: CALIB_STATE({ tab: "results" }) } },
     { name: "setup",  state: { view: "calibration", _calib: CALIB_STATE({ tab: "setup" }) } },
     { name: "pin-unguarded",  state: { view: "calibration", _calib: CALIB_STATE({ tab: "pin" }) } },
     { name: "pin-ready",      state: { view: "calibration", _calib: CALIB_STATE({ tab: "pin", deviceId: "AA:BB:CC:DD:EE:01", mapId: "ground" }) } },

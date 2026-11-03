@@ -147,7 +147,8 @@ export function currentEdition(settings) {
 // The classification. `lighting` is what PadSpan Bright is; `presence` is
 // everything the lighting product does not show. Health and Settings are
 // lighting because a Bright install still has to be diagnosed and configured
-// — both trim themselves by edition inside.
+// — both trim themselves by edition inside, as Rooms does (no receivers or
+// people in Bright: views/rooms.js).
 export const SURFACE_CLASS = Object.freeze({
   overview:    "presence",
   purelive:    "presence",
@@ -159,6 +160,7 @@ export const SURFACE_CLASS = Object.freeze({
   history:     "presence",
   monitor:     "presence",
   maps:        "lighting",
+  rooms:       "lighting",      // the Rooms page (2026-10-30); in Bright it trims itself to the lighting fields
   events:      "presence",
   health:      "lighting",
   settings:    "lighting",
@@ -168,11 +170,13 @@ export const SURFACE_CLASS = Object.freeze({
   qa:          "presence",
   training:    "presence",
   calibration: "presence",
+  receivers:   "presence",    // Bluetooth receivers: the presence build's
   traceback:   "presence",
   forensics:   "presence",
   sandbox:     "presence",
   occupancy:   "presence",
   guests:      "presence",      // guest tags (0.38.178): a tag lent to a guest is presence
+  setup:       "presence",      // the guided Setup: receivers and calibration are presence
   // The developer's install-base dashboard is about BOTH builds' installs,
   // but it is a presence-build surface: Bright has no Pro key to present.
   installbase: "presence",

@@ -21,7 +21,7 @@ export function render(ctx){
     helpBtn("qa"),
   ]));
 
-  const grid = el("div",{class:"grid"});
+  const grid = el("div",{class:"grid grid-wide"});
 
   // ── Config Health ──
   const healthCard = el("div",{class:"card"});
@@ -49,14 +49,14 @@ export function render(ctx){
       label: "Maps configured",
       pass: maps.length > 0,
       detail: maps.length > 0 ? `${maps.length} map${maps.length>1?"s":""}` : "No maps uploaded",
-      fix: "Upload a floor plan in the Maps tab.",
+      fix: "Upload a floor plan in Mapping \u2192 Upload.",
       fixView: "maps",
     },
     {
       label: "Receivers on maps",
       pass: maps.some(m => (m.receivers || []).length > 0),
       detail: maps.some(m => (m.receivers || []).length > 0) ? "At least one map has receivers" : "No receivers placed on maps",
-      fix: "Place scanners on your map in Maps \u2192 3D Stack.",
+      fix: "Place receivers on your floor plan in Mapping \u2192 Edit \u2192 Radios.",
       fixView: "maps",
     },
     {
@@ -83,7 +83,7 @@ export function render(ctx){
       label: "Objects tagged",
       pass: objects.some(o => o.user_label),
       detail: objects.filter(o => o.user_label).length + " tagged",
-      fix: "Tag devices in the Objects tab.",
+      fix: "Tag devices in Devices → By Room.",
       fixView: "objects",
     },
     {
@@ -161,7 +161,7 @@ export function render(ctx){
     if(unmapped.length > 0){
       const chips = el("div",{style:"display:flex;flex-wrap:wrap;gap:4px;margin-top:4px"});
       for(const s of unmapped){
-        const chipLabel = (_sid(s.source||"") ? _sid(s.source||"")+" " : "") + (s.name||s.source);
+        const chipLabel = (_sid(s.source||"") ? _sid(s.source||"")+" " : "") + (s.display_name||s.name||s.source);
         const chip = el("span",{style:"font-size:11px;color:#ffd54f;cursor:pointer;text-decoration:underline;text-decoration-style:dotted"}, chipLabel);
         chip.addEventListener("click", ()=>ctx.actions.showScannerDetail(s));
         chips.appendChild(chip);
@@ -402,7 +402,7 @@ export function render(ctx){
           `  R = <span style="color:#5eead4">${ctx.helpers.esc(s.kalman_r||"8.0")}</span> (measurement noise \u2014 higher = more smoothing)`,
           ``,
           `<b style="color:#e2e8f0">Adaptive Blending:</b>`,
-          `  ${s.adaptive_enabled ? `Enabled \u2014 maturity <span style="color:#5eead4">${Math.round((s.adaptive_maturity||0)*100)}%</span> \u2014 max influence ${Math.round(Math.min(40,((s.adaptive_maturity||0)*50)))}%` : "Disabled \u2014 enable in Settings \u2192 Presence"}`,
+          `  ${s.adaptive_enabled ? `Enabled \u2014 maturity <span style="color:#5eead4">${Math.round((s.adaptive_maturity||0)*100)}%</span> \u2014 max influence ${Math.round(Math.min(40,((s.adaptive_maturity||0)*50)))}%` : "Disabled \u2014 enable in Settings \u2192 Tracking"}`,
         ].join("<br>");
         detailDiv.appendChild(mathDiv);
       }
@@ -566,7 +566,7 @@ export function render(ctx){
         const otherSet = radioDevSets[r2.source] || new Set();
         let shared = 0;
         for(const addr of devSet) if(otherSet.has(addr)) shared++;
-        if(shared > 0) overlaps.push({ source: r2.source, name: r2.name || r2.source, shared });
+        if(shared > 0) overlaps.push({ source: r2.source, name: r2.display_name || r2.name || r2.source, shared });
       }
       overlaps.sort((a,b) => b.shared - a.shared);
 
@@ -796,7 +796,7 @@ export function render(ctx){
       ].filter(Boolean)));
 
       // Row 2: full radio name (no truncation)
-      const nameLink = el("span",{style:"font-weight:600;color:#e2e8f0;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;word-break:break-word"}, esc(r.name || r.source));
+      const nameLink = el("span",{style:"font-weight:600;color:#e2e8f0;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;word-break:break-word"}, esc(r.display_name || r.name || r.source));
       nameLink.addEventListener("click", (ev)=>{ ev.stopPropagation(); ctx.actions.showScannerDetail(r); });
       summary.appendChild(el("div",{style:"padding-left:42px;margin-top:3px"},[nameLink]));
 
@@ -840,8 +840,8 @@ export function render(ctx){
             const delta = hwRaw[a.src] - hwRaw[bestNeighbor.src];
             if(Math.abs(delta) >= 2){
               const note = delta > 0
-                ? `This radio's hardware outperforms ${esc(bestNeighbor.radio.name||bestNeighbor.src)} by ~${Math.abs(delta).toFixed(1)} dBm on average for shared devices, suggesting a better antenna or Bluetooth chipset.`
-                : `${esc(bestNeighbor.radio.name||bestNeighbor.src)} outperforms this radio by ~${Math.abs(delta).toFixed(1)} dBm on shared devices \u2014 may have a better antenna or chipset.`;
+                ? `This radio's hardware outperforms ${esc(bestNeighbor.radio.display_name||bestNeighbor.radio.name||bestNeighbor.src)} by ~${Math.abs(delta).toFixed(1)} dBm on average for shared devices, suggesting a better antenna or Bluetooth chipset.`
+                : `${esc(bestNeighbor.radio.display_name||bestNeighbor.radio.name||bestNeighbor.src)} outperforms this radio by ~${Math.abs(delta).toFixed(1)} dBm on shared devices \u2014 may have a better antenna or chipset.`;
               rankGrid.appendChild(el("div",{class:"muted",style:"font-size:11px;margin-top:4px;font-style:italic"}, note));
             }
           }

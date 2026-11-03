@@ -28,6 +28,7 @@ from .const import (
     MODEL_STORE_KEY,
     FABRIC_STORE_KEY,
 )
+from .ble_enrichment import with_model_maker as _with_model_maker
 from .calibration_store import CalibrationStore
 from .snapshot_builder import _live_snapshot
 from .ws_backup import _auto_backup
@@ -255,12 +256,15 @@ async def ws_calibration_save_point(hass: HomeAssistant, connection, msg) -> Non
             "total_points": _total, "total_scanners": _scanners,
         })
     except Exception as e:
-        _LOGGER.warning("Calibration save failed: %s", e)
         # Why, as a word (0.38.177): the floor has no metre scale, or anything else.
         from .calibration_store import NoScaleError  # noqa: PLC0415
         if isinstance(e, NoScaleError):
+            # A refusal, not a failure: the panel shows the user why and what
+            # to do (measure the map), so the log only repeats it per click.
+            _LOGGER.debug("Calibration point refused: %s", e)
             _bump(hass, "calibration_save_refused_no_scale")
         else:
+            _LOGGER.warning("Calibration point could not be saved: %s", e)
             _bump(hass, "calibration_save_failed_other")
         connection.send_error(msg["id"], "save_failed", str(e))
 
@@ -673,7 +677,7 @@ async def ws_calibration_beacon_profiles(hass: HomeAssistant, connection, msg) -
     try:
         snap = await _live_snapshot(hass)
         obj_list = (snap.get("objects") or {}).get("list") or []
-        profiles = cal.compute_beacon_profiles(snapshot_objects=obj_list)
+        profiles = cal.compute_beacon_profiles(snapshot_objects=[_with_model_maker(o) for o in obj_list])
         connection.send_result(msg["id"], profiles)
     except Exception as e:
         _LOGGER.error("PadSpan Bright calibration_beacon_profiles failed: %s", e)

@@ -8,6 +8,10 @@
  * the output small enough to paste into a chat or AI conversation.
  */
 
+// Monitor → Export for support's rules: whose devices are "mine", and phones'
+// identity keys (IRKs) left out of anything meant to be sent.
+const { _isMine, hideIrks } = await import(`./monitor.js${new URL(import.meta.url).search}`);
+
 export function render(ctx){
   const { el } = ctx.helpers;
   const root = el("section",{id:"diagnostics"});
@@ -22,20 +26,27 @@ export function render(ctx){
   let includedDevices = 0;
   if (snap && typeof snap === "object") {
     trimmedSnap = {};
-    const keys = Object.keys(snap);
-    totalDevices = keys.length;
-    for (const k of keys) {
-      const d = snap[k];
-      if (!d) continue;
-      const hasLabel = !!(d.user_label || d.name || d.identified);
-      const hasRoom = !!(d.room);
-      if (!hasLabel && !hasRoom) continue;
-      // Skip very stale entries (oldest source age > 24h)
-      const sources = d.sources || [];
-      const minAge = sources.length
-        ? Math.min(...sources.map(s => s.age_s || Infinity))
-        : Infinity;
-      if (minAge > MAX_AGE_S) continue;
+    // The devices are the snapshot's objects.list. (This loop went over the
+    // snapshot's own top-level keys, rooms, ble, objects and so on, so the
+    // report counted those as "devices" and listed almost none.)
+    const list = (snap.objects && Array.isArray(snap.objects.list)) ? snap.objects.list : [];
+    totalDevices = list.length;
+    for (const d of list) {
+      if (!d || typeof d !== "object") continue;
+      const k = d.key || d.address || d.entity_id;
+      if (!k) continue;
+      // The person's own devices only: named by them, linked to Home
+      // Assistant, or a phone known by its key (monitor.js _isMine). "A name
+      // or a room" let everything in: the server names every Bluetooth object
+      // (its address when nothing else) and gives every heard one the room of
+      // its loudest receiver, so the report held every passing device
+      // (thousands on a busy street, built again on every 5 s update).
+      if (!_isMine(d)) continue;
+      // Skip very stale entries: the freshest age the object or its sources
+      // report is over 24 h. Nothing reported (an entity) is kept.
+      const ages = [d.age_s, ...(Array.isArray(d.sources) ? d.sources.map(s => s && s.age_s) : [])]
+        .filter(a => typeof a === "number" && Number.isFinite(a));
+      if (ages.length && Math.min(...ages) > MAX_AGE_S) continue;
       // Compact: strip all_addresses if huge (e.g. Pixel phone with 200+ MACs)
       const copy = Object.assign({}, d);
       if (copy.all_addresses && copy.all_addresses.length > 10) {
@@ -71,13 +82,13 @@ export function render(ctx){
       maps: ctx.state.maps.list,
     },
     snapshot: {
-      _summary: `${includedDevices} of ${totalDevices} devices (labelled/confirmed, seen <24h)`,
+      _summary: `${includedDevices} of ${totalDevices} devices (labelled/confirmed/known phones, seen <24h)`,
       devices: trimmedSnap,
     },
     autoDiagnostics: ctx.state.diag,
   };
 
-  const text = JSON.stringify(payload, null, 2);
+  const text = hideIrks(JSON.stringify(payload, null, 2));
 
   // Use a textarea so manual select/copy always works (even on http:// where
   // navigator.clipboard is often blocked).
@@ -146,12 +157,17 @@ export function render(ctx){
   });
 
   const sizeKb = Math.round(text.length / 1024);
-  root.appendChild(el("div",{class:"grid"},[
+  root.appendChild(el("div",{class:"grid grid-wide"},[
     el("div",{class:"card"},[
       el("div",{style:"display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"},[
         el("div",{},[
-          el("div",{style:"font-weight:700"}, "Diagnostics"),
-          el("div",{class:"muted"}, `${includedDevices} devices · ${sizeKb} KB — paste into chat when something breaks`),
+          el("div",{style:"display:flex;align-items:center;gap:8px"},[
+            el("div",{style:"font-weight:700"}, "Diagnostics"),
+            ctx.helpers.helpBtn("diagnostics"),
+          ]),
+          el("div",{class:"muted"}, `${includedDevices} devices · ${sizeKb} KB — when something breaks, email it to hello@traks.ca or attach it to a GitHub issue (issues are public: remove personal details first)`),
+          el("div",{class:"muted","data-diag-privacy":"",style:"margin-top:4px"},
+            "It names your rooms, floor plans and devices, with their Bluetooth addresses, so look it over before you send it. Phones' identity keys (IRKs) are left out."),
         ]),
         el("div",{style:"display:flex;gap:8px;align-items:center"},[ btnSelect, btnCopy, btnDownload ])
       ]),

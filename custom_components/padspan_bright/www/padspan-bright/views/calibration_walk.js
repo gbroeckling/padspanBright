@@ -75,9 +75,9 @@ export function renderWalk(ctx, el, cs, calData, h) {
     wrap.appendChild(el("div", { class: "card", style: "border-color:#f59e0b" }, [
       el("div", { style: "font-size:13px;color:#f59e0b;font-weight:700" }, "Setup required"),
       el("div", { class: "muted", style: "font-size:12px;margin-top:4px" },
-        "Pick the phone or tag you will carry, and the floor, in Setup first."),
+        "Pick the phone or tag you will carry, and the floor, in the Beacon and floor tab first."),
       el("button", { class: "btn", style: "margin-top:10px", onclick: () => { cs.tab = "setup"; ctx.actions.renderRooms(); } },
-        "Go to Setup"),
+        "Go to Beacon and floor"),
     ]));
     return wrap;
   }
@@ -87,7 +87,7 @@ export function renderWalk(ctx, el, cs, calData, h) {
   const walked = (room) => pts.filter(p => p.source === "room_walk" && p.room === room).length;
   const card = el("div", { class: "card" });
   wrap.appendChild(card);
-  card.appendChild(el("div", { class: "h2" }, "Walk a room"));
+  card.appendChild(el("div", { class: "h2" }, ["Walk a room ", ctx.helpers.helpBtn("calibration_walk")]));
 
   if (w.phase === "walking") {
     card.appendChild(el("div", { style: "font-size:13px;color:#e2e8f0;text-align:center;font-weight:600" }, `Walking ${w.room}`));

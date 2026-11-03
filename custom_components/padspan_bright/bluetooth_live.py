@@ -16,13 +16,15 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from homeassistant.core import HomeAssistant, callback
 
+from .device_detail import scrub_apple_block
 from .proxy_health import AdvertRateHealth
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,6 +37,12 @@ def _now() -> dt.datetime:
 def _bytes_to_hex_list(b: bytes) -> str:
     # Match HA UI-ish style: "0x4A 0x17 ..."
     return " ".join(f"0x{v:02X}" for v in b)
+
+
+def _manuf_hex(company: Any, payload: bytes) -> str:
+    """A manufacturer block as stored, the hashes of a person's identifiers in
+    Apple's taken out first (device_detail.scrub_apple_block)."""
+    return _bytes_to_hex_list(scrub_apple_block(payload) if company == 76 else payload)
 
 
 def _scanning_mode(obj: Any, attr: str) -> Optional[str]:
@@ -99,7 +107,59 @@ def _coerce_source(src: Any) -> str:
         return str(src)
 
 
-def _service_info_to_record(si: Any, seen: Optional[dt.datetime] = None) -> Dict[str, Any]:
+def address_type_of(device: Any, esphome_ok: Optional[Callable[[str], bool]] = None) -> Optional[str]:
+    """"public" or "random" when the radio says which, else None.
+
+    ESPHome proxies put it in BLEDevice.details["address_type"] (bleak-esphome
+    passes ESP-IDF's value on: 0 public, 1 random, 2 and 3 a resolvable private
+    address, random on the air), and BlueZ in the D-Bus props ("AddressType").
+    ESPHome's 0 is also protobuf's empty value: firmware before 2022.12 sends no
+    type, so every address it hears, random ones too, arrives as 0. A 0 counts
+    as public only when esphome_ok(details["source"]) says that proxy's firmware
+    sends the type (BluetoothLive._esphome_public_ok); otherwise it says nothing.
+    HA's mgmt channel and Shelly scanners don't report it.
+    """
+    details = getattr(device, "details", None)
+    if not isinstance(details, dict):
+        return None
+    at = details.get("address_type")
+    if at in (1, 2, 3) and not isinstance(at, bool):
+        return "random"
+    if at == 0 and not isinstance(at, bool):
+        try:
+            return "public" if esphome_ok is not None and esphome_ok(str(details.get("source") or "")) else None
+        except Exception:
+            return None
+    props = details.get("props")
+    if isinstance(props, dict):
+        t = props.get("AddressType")
+        if t in ("public", "random"):
+            return t
+    return None
+
+
+def _tx_power_value(value: Any) -> Optional[int]:
+    """A declared TX power in dBm, or None. habluetooth reports -127 for "none"."""
+    if value is None:
+        return None
+    power = int(value)
+    return None if power == -127 else power
+
+
+def receiver_type(scanner: Any) -> str:
+    """What kind of receiver a Home Assistant scanner is, by its class:
+    bleak_esphome's ESPHomeScanner, aioshelly's ShellyBLEScanner, habluetooth's
+    HaScanner and HaScannerMgmt (this machine's own adapter), HA's
+    RuuviGatewayScanner. Fixed words for the opt-in report."""
+    name = type(scanner).__name__.lower()
+    for word, kind in (("esphome", "esphome"), ("shelly", "shelly"), ("hascanner", "ha_adapter"), ("ruuvi", "ruuvi")):
+        if word in name:
+            return kind
+    return "other"
+
+
+def _service_info_to_record(si: Any, seen: Optional[dt.datetime] = None,
+                            esphome_ok: Optional[Callable[[str], bool]] = None) -> Dict[str, Any]:
     """Flatten a BluetoothServiceInfo(Bleak)-like object into a plain dict.
 
     Everything below is `getattr(..., None)` rather than direct attribute
@@ -145,7 +205,7 @@ def _service_info_to_record(si: Any, seen: Optional[dt.datetime] = None) -> Dict
     try:
         for k, v in dict(manuf).items():
             if isinstance(v, (bytes, bytearray)):
-                manuf_out[str(k)] = _bytes_to_hex_list(bytes(v))
+                manuf_out[str(k)] = _manuf_hex(k, bytes(v))
             else:
                 manuf_out[str(k)] = str(v)
     except Exception:
@@ -177,8 +237,9 @@ def _service_info_to_record(si: Any, seen: Optional[dt.datetime] = None) -> Dict
         "name": name or address,
         "source": source,
         "rssi": rssi,
-        "tx_power": int(tx_power) if tx_power is not None else None,
+        "tx_power": _tx_power_value(tx_power),
         "connectable": bool(connectable) if connectable is not None else None,
+        "address_type": address_type_of(getattr(si, "device", None), esphome_ok),
         "last_seen": seen_dt.isoformat(),
         # age_s is filled in get_snapshot so it's relative to snapshot time
         "manufacturer_data": manuf_out,
@@ -190,6 +251,7 @@ def _service_info_to_record(si: Any, seen: Optional[dt.datetime] = None) -> Dict
 def _service_info_to_record_from_adv(
     addr: str, source: str, rssi: Any,
     ble_device: Any, adv_data: Any, seen: dt.datetime,
+    esphome_ok: Optional[Callable[[str], bool]] = None,
 ) -> Dict[str, Any]:
     """Build a record dict from raw BLEDevice + AdvertisementData (per-scanner)."""
     name = getattr(ble_device, "name", None) or getattr(adv_data, "local_name", None) or ""
@@ -199,7 +261,7 @@ def _service_info_to_record_from_adv(
     try:
         for k, v in dict(manuf).items():
             if isinstance(v, (bytes, bytearray)):
-                manuf_out[str(k)] = _bytes_to_hex_list(bytes(v))
+                manuf_out[str(k)] = _manuf_hex(k, bytes(v))
             else:
                 manuf_out[str(k)] = str(v)
     except Exception:
@@ -224,8 +286,9 @@ def _service_info_to_record_from_adv(
         "name": str(name or addr),
         "source": _coerce_source(source),
         "rssi": int(rssi) if rssi is not None else None,
-        "tx_power": int(tx_power) if tx_power is not None else None,
+        "tx_power": _tx_power_value(tx_power),
         "connectable": None,
+        "address_type": address_type_of(ble_device, esphome_ok),
         "last_seen": seen.isoformat(),
         "manufacturer_data": manuf_out,
         "service_data": svc_out,
@@ -249,6 +312,24 @@ class BluetoothLive:
         # {addr: {source: deque[(seen_dt, rssi)]}} — recent raw samples from
         # REAL callbacks (never the reseed path) for median-of-N filtering.
         self._rssi_samples: Dict[str, Dict[str, Any]] = {}
+        # {addr: "random" | "public"}: what any radio reported for the address,
+        # kept per address while it is cached (the maker list reads it,
+        # known_type). Not per report: HA's own adapter reports no type
+        # on its live adverts (habluetooth's mgmt side channel) while the reseed
+        # reads BlueZ's for the same address, so in 0.38.207 each live advert
+        # wiped the reseed's "random" until the next reseed. A report with no
+        # type keeps the earlier one, "random" is never downgraded, and the entry
+        # goes only when the address leaves the cache.
+        self._address_types: Dict[str, str] = {}
+        # {addr: unix time}: addresses a radio confirmed as public (ESPHome
+        # address_type 0, BlueZ AddressType "public"), kept in .storage
+        # (PUBLIC_ADDRESSES_STORE_KEY) through prunes and restarts: a public
+        # address never changes type. The built-in maker list counts as fact for
+        # these only (known_type). A "random" report removes one.
+        self._public: Dict[str, int] = {}
+        self._public_store: Any = None
+        # {ESPHome scanner source: (its firmware sends the address type, until)}
+        self._esphome_ok_cache: Dict[str, Any] = {}
         # How long the cache keeps an address, and how many it keeps at most
         # (0: no cap). Set by snapshot_builder from Settings → Presence: the
         # BLE Advertisement Timeout, and the low-memory switch's cap. Until
@@ -340,6 +421,83 @@ class BluetoothLive:
         self._unsubs.clear()
         self._seen_by_source.clear()
         self._rssi_samples.clear()
+        self._address_types.clear()
+
+    def _note_address_type(self, addr: str, address_type: Optional[str]) -> None:
+        """Keep what a report says about the address's type (_address_types,
+        and _public for a confirmed public one)."""
+        if address_type == "random":
+            self._address_types[addr] = "random"
+            if self._public.pop(addr, None) is not None:
+                self._save_public(at_once=True)
+        elif address_type == "public":
+            self._address_types.setdefault(addr, "public")
+            if self._address_types[addr] == "public":
+                now = int(time.time())
+                prev = self._public.get(addr)
+                # Saved when new, and its time refreshed once a day: the oldest
+                # go first when there are more than PUBLIC_MAX.
+                if prev is None or now - prev > 86400:
+                    self._public[addr] = now
+                    self._save_public()
+
+    def _save_public(self, at_once: bool = False) -> None:
+        if len(self._public) > PUBLIC_MAX:
+            keep = sorted(self._public, key=self._public.__getitem__, reverse=True)[:int(PUBLIC_MAX * 0.9)]
+            self._public = {a: self._public[a] for a in keep}
+        if self._public_store is None:
+            return
+        def _data() -> Dict[str, Any]:
+            return {"rule": PUBLIC_STORE_RULE, "addresses": dict(self._public)}
+        try:
+            if at_once:
+                # A removal is written now, not up to 60 s later: a power cut
+                # must not bring back an address a radio has said is random.
+                self.hass.async_create_task(self._public_store.async_save(_data()))
+            else:
+                self._public_store.async_delay_save(_data, 60)
+        except Exception:
+            try:
+                self._public_store.async_delay_save(_data, 0 if at_once else 60)
+            except Exception as e:  # noqa: BLE001
+                _LOGGER.debug("public address save failed: %s", e)
+
+    def _esphome_public_ok(self, source: str) -> bool:
+        """Does this ESPHome proxy's firmware send the address type (2022.12 or
+        newer)? An unknown version counts as no. Asked again after 60 s (no)
+        or 10 min (yes), so a proxy that just connected, or was updated, is
+        read again soon."""
+        now = time.monotonic()
+        hit = self._esphome_ok_cache.get(source)
+        if hit is not None and now < hit[1]:
+            return hit[0]
+        ok = esphome_sends_address_type(esphome_version(self.hass, source))
+        self._esphome_ok_cache[source] = (ok, now + (600.0 if ok else 60.0))
+        return ok
+
+    def known_type(self, address: str) -> Optional[str]:
+        """"random" or "public" if a radio has said which (the second kept in
+        .storage, so it lasts), else None. Dict lookups only: read per object,
+        per build."""
+        return self._address_types.get(address) or ("public" if address in self._public else None)
+
+    async def async_load_public(self, store: Any) -> None:
+        """Read the confirmed public addresses kept from earlier runs."""
+        self._public_store = store
+        try:
+            data = await store.async_load()
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.debug("public address load failed: %s", e)
+            data = None
+        # Only a file written under this rule: 0.38.211 also kept ESPHome's 0
+        # from proxies too old to send a type.
+        ok_rule = isinstance(data, dict) and data.get("rule") == PUBLIC_STORE_RULE
+        addrs = data.get("addresses") if ok_rule else None
+        if isinstance(addrs, dict):
+            for a, t in addrs.items():
+                if (isinstance(a, str) and len(a) == 17 and isinstance(t, (int, float))
+                        and self._address_types.get(a.upper()) != "random"):
+                    self._public.setdefault(a.upper(), int(t))
 
     @callback
     def _on_adv(self, service_info: Any, change: Any = None) -> None:
@@ -370,11 +528,13 @@ class BluetoothLive:
                 _age = (time.time() if float(_t) > 1e9 else time.monotonic()) - float(_t)
                 if _age > 0:
                     seen = seen - dt.timedelta(seconds=_age)
-            rec = _service_info_to_record(service_info, seen=seen)
+            rec = _service_info_to_record(service_info, seen=seen, esphome_ok=self._esphome_public_ok)
             src = rec.get("source") or "_unknown"
             if addr not in self._seen_by_source:
                 self._seen_by_source[addr] = {}
                 self.new_addresses += 1
+            # Before the replay check: an old report's type is still true.
+            self._note_address_type(addr, rec.get("address_type"))
             # A REPLAYED (old) report never replaces a newer one. A live advert
             # (age ~0) always lands: comparing wall-clock stamps alone froze
             # live readings for as long as a backward clock step (round 12).
@@ -483,11 +643,13 @@ class BluetoothLive:
                                     _prev = self._seen_by_source.get(addr, {}).get(str(src))
                                     dev_seen = _prev.seen if _prev else seen
                             rec = _service_info_to_record_from_adv(
-                                addr, src, rssi, ble_device, adv_data, dev_seen
+                                addr, src, rssi, ble_device, adv_data, dev_seen,
+                                esphome_ok=self._esphome_public_ok,
                             )
                             if addr not in self._seen_by_source:
                                 self._seen_by_source[addr] = {}
                                 self.new_addresses += 1
+                            self._note_address_type(addr, rec.get("address_type"))
                             self._seen_by_source[addr][str(src)] = _Adv(record=rec, seen=dev_seen)
                             if str(src) != "_unknown":
                                 self._radio_last_heard[str(src)] = seen
@@ -546,6 +708,7 @@ class BluetoothLive:
                 cleared += 1
                 if not self._seen_by_source[addr]:
                     del self._seen_by_source[addr]
+                    self._address_types.pop(addr, None)
         return cleared
 
     def _cap_addresses(self, now: dt.datetime) -> None:
@@ -560,6 +723,7 @@ class BluetoothLive:
         for addr in sorted(self._seen_by_source, key=_last)[:len(self._seen_by_source) - keep]:
             del self._seen_by_source[addr]
             self._rssi_samples.pop(addr, None)
+            self._address_types.pop(addr, None)
 
     def get_snapshot(self, max_ads: int = 1000, max_age_s: int = 900) -> Dict[str, Any]:
         """Return a lightweight BLE snapshot for the UI.
@@ -627,6 +791,7 @@ class BluetoothLive:
                             "requested_scan_mode": req_mode,
                             "adapter": str(adapter or "") if adapter is not None else "",
                             "last_heard_s": _lh_s,
+                            "receiver_type": receiver_type(s),
                         })
                         # Only while this scanner's drop is on: a healthy
                         # house's radios are exactly as before.
@@ -704,6 +869,7 @@ class BluetoothLive:
             for addr in _prune_addrs:
                 del self._seen_by_source[addr]
                 self._rssi_samples.pop(addr, None)
+                self._address_types.pop(addr, None)
             self._cap_addresses(now)
 
             # Collect per-address records, keeping ALL per-source readings for
@@ -800,10 +966,75 @@ class BluetoothLive:
             return {"radios": [], "advertisements": [], "diag": {"ok": False, "errors": [str(e)]}}
 DATA_KEY = "bluetooth_live"
 
+# At most this many confirmed public addresses are kept (the oldest confirmed go first).
+PUBLIC_MAX = 2000
+# Written into the file; a file without it (0.38.211) is not read.
+PUBLIC_STORE_RULE = 2
+# ESPHome 2022.12.0 was the first to send the address type with its adverts
+# (esphome#4115); before it the field is missing, and reads 0, "public".
+ESPHOME_TYPE_SINCE = (2022, 12)
+
+
+def esphome_sends_address_type(version: Any) -> bool:
+    """True for an ESPHome firmware version that sends the address type."""
+    m = re.match(r"\s*(\d{4})\.(\d{1,2})\b(.*)", str(version or ""))
+    if not m:
+        return False
+    ym = (int(m.group(1)), int(m.group(2)))
+    if ym != ESPHOME_TYPE_SINCE:
+        return ym > ESPHOME_TYPE_SINCE
+    return "dev" not in m.group(3)  # 2022.12.0-dev builds came before the change too
+
+
+def esphome_version(hass: Any, source: str) -> Optional[str]:
+    """The firmware version of the ESPHome proxy whose scanner this is, or None.
+
+    bleak-esphome keeps the proxy's device info with its scanner's connector
+    (connect_scanner: client=partial(ESPHomeClient, client_data=...)), and HA's
+    ESPHome integration with its config entry (runtime_data.device_info); the
+    scanner's source is device_info.bluetooth_mac_address or mac_address.
+    """
+    src = str(source or "").upper()
+    if not src:
+        return None
+    try:
+        from habluetooth import get_manager as _get_bt_manager  # type: ignore
+        for sc in _get_bt_manager().async_current_scanners():
+            if str(getattr(sc, "source", "")).upper() != src:
+                continue
+            client = getattr(getattr(sc, "connector", None), "client", None)
+            cd = (getattr(client, "keywords", None) or {}).get("client_data")
+            v = getattr(getattr(cd, "device_info", None), "esphome_version", None)
+            if v:
+                return str(v)
+    except Exception:
+        pass
+    try:
+        for entry in hass.config_entries.async_entries("esphome"):
+            di = getattr(getattr(entry, "runtime_data", None), "device_info", None)
+            if di is None:
+                continue
+            macs = {str(getattr(di, "bluetooth_mac_address", "") or "").upper(),
+                    str(getattr(di, "mac_address", "") or "").upper()}
+            v = getattr(di, "esphome_version", None)
+            if src in macs and v:
+                return str(v)
+    except Exception:
+        pass
+    return None
+
 
 async def async_setup_bluetooth_live(hass: HomeAssistant) -> BluetoothLive:
     """Create + register BLE callbacks."""
     bl = BluetoothLive(hass)
+    try:
+        from homeassistant.helpers.storage import Store  # noqa: PLC0415
+        from .const import PUBLIC_ADDRESSES_STORE_KEY, VENDOR_CACHE_STORE_KEY  # noqa: PLC0415
+        await bl.async_load_public(Store(hass, 1, PUBLIC_ADDRESSES_STORE_KEY))
+        # The answers the online maker lookup kept. Nothing reads them any more.
+        await Store(hass, 1, VENDOR_CACHE_STORE_KEY).async_remove()
+    except Exception as e:  # noqa: BLE001
+        _LOGGER.debug("public address store unavailable: %s", e)
 
     try:
         from homeassistant.components import bluetooth  # type: ignore

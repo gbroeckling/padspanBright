@@ -26,7 +26,7 @@ export function render(ctx){
   root.appendChild(el("div",{class:"muted",style:"font-size:12px;margin-bottom:16px;line-height:1.5"},
     "Experimental data playground — explore live data, check experimental feature status, and poke around under the hood. Nothing here changes your config."));
 
-  const grid = el("div",{class:"grid"});
+  const grid = el("div",{class:"grid grid-wide"});
 
   // ── Experimental Features Hub ──────────────────────────────────────────────
   const expCard = el("div",{class:"card",style:"border-color:#f59e0b"});
@@ -41,14 +41,14 @@ export function render(ctx){
     {
       name: "Adaptive Learning",
       enabled: settings.adaptive_learning_enabled === true,
-      location: "Settings \u2192 Presence",
+      location: "Settings \u2192 Tracking",
       tab: "settings",
       desc: "Passively learns room RSSI fingerprints from high-confidence assignments",
     },
     {
       name: "Floor Detection",
       enabled: settings.adaptive_floor_detection === true,
-      location: "Settings \u2192 Presence",
+      location: "Settings \u2192 Tracking",
       tab: "settings",
       desc: "Learns cross-floor signal attenuation for multi-story accuracy",
       sub: true,
@@ -56,14 +56,14 @@ export function render(ctx){
     {
       name: "MQTT Publishing",
       enabled: settings.mqtt_publish_enabled === true,
-      location: "Manage \u2192 Data",
+      location: "Manage \u2192 HA Entities",
       tab: "manage",
       desc: "Publishes device presence to MQTT topics for external systems",
     },
     {
       name: "Ignore Bermuda",
       enabled: settings.bermuda_ignore === true,
-      location: "Settings \u2192 Presence",
+      location: "Settings \u2192 Tracking",
       tab: "settings",
       desc: "Completely ignore all data from the Bermuda integration",
     },
@@ -110,7 +110,7 @@ export function render(ctx){
   const inspectorCard = el("div",{class:"card"});
   inspectorCard.appendChild(el("div",{style:"font-weight:700;margin-bottom:8px"},"State Inspector"));
   inspectorCard.appendChild(el("div",{style:"display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:12px"},[
-    el("div",{}, [el("span",{class:"muted"},"Mode: "), el("span",{style:"font-weight:600"}, ctx.state.dataMode.toUpperCase())]),
+    el("div",{}, [el("span",{class:"muted"},"Mode: "), el("span",{style:"font-weight:600"}, ctx.state._dataModeKnown ? ctx.state.dataMode.toUpperCase() : "…")]),
     el("div",{}, [el("span",{class:"muted"},"Session: "), el("span",{style:"font-weight:600"}, `${uptimeMin}m`)]),
     el("div",{}, [el("span",{class:"muted"},"Objects: "), el("span",{style:"font-weight:600"}, String(objects.length))]),
     el("div",{}, [el("span",{class:"muted"},"Radios: "), el("span",{style:"font-weight:600"}, String(radios.length))]),
@@ -207,25 +207,18 @@ export function render(ctx){
       document.head.appendChild(st);
     }
 
-    // Tower layout: horizontal scroll, each floor is a fixed-width column
+    // Tower layout: the floors share the card's width; horizontal scroll past that
     const towerWrap = el("div",{style:"display:flex;gap:10px;align-items:flex-end;min-height:160px;padding-top:24px;overflow-x:auto;padding-bottom:4px"});
-
-    // Calculate column width: fill available space, but guarantee room for text.
-    // Budget is sized to the card's typical rendered width (.grid columns are
-    // minmax(220px,1fr), minus card padding) rather than the card's max width,
-    // so low floor-counts don't get an oversized column and overflow.
-    const floorCount = floorOrder.length || 1;
-    const colWidth = Math.max(120, Math.floor(200 / floorCount));
 
     for(const fo of floorOrder){
       const floorRooms = floorMap.get(fo.id) || [];
       // Sort: rooms with devices first (desc), then alphabetical
       floorRooms.sort((a,b) => (b.count - a.count) || a.room.localeCompare(b.room));
 
-      const col = el("div",{style:`width:${colWidth}px;min-width:${colWidth}px;display:flex;flex-direction:column;align-items:stretch`});
+      const col = el("div",{style:"flex:1 1 76px;min-width:76px;max-width:200px;display:flex;flex-direction:column;align-items:stretch"});
 
       // Floor label
-      col.appendChild(el("div",{style:`font-size:10px;font-weight:800;color:#e2e8f0;text-align:center;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:${colWidth}px`}, fo.label));
+      col.appendChild(el("div",{style:`font-size:10px;font-weight:800;color:#e2e8f0;text-align:center;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap`}, fo.label));
 
       // Tower body
       const tower = el("div",{style:"border-radius:6px;overflow:hidden;border:1px solid #1e3a2a;background:#0a1a0f"});
@@ -239,7 +232,7 @@ export function render(ctx){
           const glowAnim = hasDevices ? "animation:padspan-glow 3s ease-in-out infinite;" : "";
           const dimStyle = hasDevices ? "" : "opacity:0.5;";
 
-          const band = el("div",{style:`min-height:26px;padding:3px 6px;cursor:pointer;position:relative;background:linear-gradient(135deg, ${r.color}18 0%, ${r.color}35 100%);border-bottom:${i < floorRooms.length-1 ? `1px solid ${r.color}20` : "none"};display:flex;align-items:center;gap:4px;transition:all 0.2s ease;${glowAnim}${dimStyle}`.replace(/\s+/g," ")});
+          const band = el("div",{style:`min-height:26px;padding:3px 6px;cursor:pointer;position:relative;background:linear-gradient(135deg, ${ctx.helpers.roomColorAlpha(r.color, "18")} 0%, ${ctx.helpers.roomColorAlpha(r.color, "35")} 100%);border-bottom:${i < floorRooms.length-1 ? `1px solid ${ctx.helpers.roomColorAlpha(r.color, "20")}` : "none"};display:flex;align-items:center;gap:4px;transition:all 0.2s ease;${glowAnim}${dimStyle}`.replace(/\s+/g," ")});
 
           // Left color accent bar
           band.appendChild(el("div",{style:`width:3px;align-self:stretch;background:${r.color};border-radius:2px;flex-shrink:0;opacity:0.7`}));
@@ -260,12 +253,12 @@ export function render(ctx){
 
           // Hover glow effect
           band.addEventListener("mouseenter", ()=>{
-            band.style.background = `linear-gradient(135deg, ${r.color}30 0%, ${r.color}50 100%)`;
-            band.style.boxShadow = `inset 0 0 12px ${r.color}25, 0 0 8px ${r.color}15`;
+            band.style.background = `linear-gradient(135deg, ${ctx.helpers.roomColorAlpha(r.color, "30")} 0%, ${ctx.helpers.roomColorAlpha(r.color, "50")} 100%)`;
+            band.style.boxShadow = `inset 0 0 12px ${ctx.helpers.roomColorAlpha(r.color, "25")}, 0 0 8px ${ctx.helpers.roomColorAlpha(r.color, "15")}`;
             band.style.opacity = "1";
           });
           band.addEventListener("mouseleave", ()=>{
-            band.style.background = `linear-gradient(135deg, ${r.color}18 0%, ${r.color}35 100%)`;
+            band.style.background = `linear-gradient(135deg, ${ctx.helpers.roomColorAlpha(r.color, "18")} 0%, ${ctx.helpers.roomColorAlpha(r.color, "35")} 100%)`;
             band.style.boxShadow = "";
             band.style.opacity = hasDevices ? "1" : "0.5";
           });
@@ -295,7 +288,7 @@ export function render(ctx){
       const tower = el("div",{style:"border-radius:6px;overflow:hidden;border:1px solid #1e3a2a;background:#0a1a0f"});
       for(let i = 0; i < allRooms.length; i++){
         const r = allRooms[i];
-        const band = el("div",{style:`min-height:26px;padding:3px 6px;cursor:pointer;background:linear-gradient(135deg, ${r.color}18 0%, ${r.color}35 100%);border-bottom:${i < allRooms.length-1 ? `1px solid ${r.color}20` : "none"};display:flex;align-items:center;gap:4px`});
+        const band = el("div",{style:`min-height:26px;padding:3px 6px;cursor:pointer;background:linear-gradient(135deg, ${ctx.helpers.roomColorAlpha(r.color, "18")} 0%, ${ctx.helpers.roomColorAlpha(r.color, "35")} 100%);border-bottom:${i < allRooms.length-1 ? `1px solid ${ctx.helpers.roomColorAlpha(r.color, "20")}` : "none"};display:flex;align-items:center;gap:4px`});
         band.appendChild(el("div",{style:`width:3px;align-self:stretch;background:${r.color};border-radius:2px;flex-shrink:0;opacity:0.7`}));
         band.appendChild(el("div",{style:`flex:1;min-width:0;font-size:10px;font-weight:600;color:${r.color};word-break:break-word`}, r.room));
         if(r.count > 0) band.appendChild(el("div",{style:`font-size:10px;font-weight:800;color:${r.color};flex-shrink:0`}, String(r.count)));
@@ -384,7 +377,7 @@ export function render(ctx){
       const dot = el("div",{style:`
         display:flex;align-items:center;justify-content:center;flex-direction:column;
         width:${size}px;height:${size}px;border-radius:50%;
-        background:${rc}22;border:2px solid ${rc}66;
+        background:${ctx.helpers.roomColorAlpha(rc, "22")};border:2px solid ${ctx.helpers.roomColorAlpha(rc, "66")};
         cursor:pointer;position:relative;${pulseAnim}
       `.replace(/\s+/g," ")});
       if(rs.count > 0){

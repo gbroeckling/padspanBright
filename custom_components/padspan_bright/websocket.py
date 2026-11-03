@@ -60,7 +60,6 @@ from .const import (
     DATA_TRACEBACK,
 )
 from .build_info import BUILD_ID, BUILD_VERSION
-from .vendor_lookup import async_lookup_vendor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -161,7 +160,11 @@ from .ws_floorplan_import import (  # noqa: F401  (re-exported: registration, te
 )
 from .ws_vacuum import HANDLERS as _VACUUM_HANDLERS
 from .ws_objects import (  # noqa: F401  (re-exported: registration, tests, callers)
+    ws_device_how_known,
     ws_findmy_unlink,
+    ws_label_link_answer,
+    ws_label_link_undo,
+    ws_label_link_hint_off,
     ws_object_label_delete,
     ws_object_label_list,
     ws_object_label_set,
@@ -255,6 +258,8 @@ from .ws_fabric import (  # noqa: F401  (re-exported: registration, tests, calle
     ws_fabric_map_transform_set,
     ws_fabric_reset_spatial,
     ws_fabric_resync,
+    ws_fabric_open_edges_apply,
+    ws_fabric_rf_barrier_rails_stamp,
     ws_fabric_rf_barrier_remove,
     ws_fabric_rf_barrier_set,
     ws_fabric_room_add,
@@ -299,7 +304,6 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_settings_set)
     websocket_api.async_register_command(hass, ws_scanner_offset_set)
     websocket_api.async_register_command(hass, ws_live_snapshot)
-    websocket_api.async_register_command(hass, ws_vendor_lookup)
     websocket_api.async_register_command(hass, ws_maps_list)
     websocket_api.async_register_command(hass, ws_maps_image_urls)
     websocket_api.async_register_command(hass, ws_maps_upload)
@@ -351,6 +355,8 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_traceback_objects)
     websocket_api.async_register_command(hass, ws_insights_get)
     websocket_api.async_register_command(hass, ws_vacation_log_get)
+    websocket_api.async_register_command(hass, ws_vacation_preview)
+    websocket_api.async_register_command(hass, ws_vacation_lights)
     # The Atlas WLED card's Advanced tab — a safe proxy to the device (ws_wled.py).
     from .ws_wled import async_register as _wled_register
     _wled_register(hass)
@@ -386,6 +392,10 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     from .ws_house3d_stairs import WS_COMMANDS as _house3d_stairs_commands
     for _cmd in _house3d_stairs_commands:
         websocket_api.async_register_command(hass, _cmd)
+    # Add data via plans (ws_plan_ai.py, experimental, off by default): the plan AI's sessions and verdicts; never the house.
+    from .ws_plan_ai import WS_COMMANDS as _plan_ai_commands
+    for _cmd in _plan_ai_commands:
+        websocket_api.async_register_command(hass, _cmd)
     websocket_api.async_register_command(hass, ws_flood_reset)
     # The Overview's accuracy tips (setup_checks.py): the setup steps the report finds skipped most.
     from .setup_checks import WS_COMMANDS as _setup_tip_commands
@@ -418,7 +428,11 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_private_ble_add_irk)
     websocket_api.async_register_command(hass, ws_private_ble_delete_irk)
     websocket_api.async_register_command(hass, ws_objects_clear_history)
+    websocket_api.async_register_command(hass, ws_device_how_known)
     websocket_api.async_register_command(hass, ws_findmy_unlink)
+    websocket_api.async_register_command(hass, ws_label_link_answer)
+    websocket_api.async_register_command(hass, ws_label_link_undo)
+    websocket_api.async_register_command(hass, ws_label_link_hint_off)
     websocket_api.async_register_command(hass, ws_companion_discover)
     websocket_api.async_register_command(hass, ws_companion_follow)
     websocket_api.async_register_command(hass, ws_companion_unfollow)
@@ -457,6 +471,8 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_fabric_truth_candidates)
     websocket_api.async_register_command(hass, ws_fabric_rf_barrier_set)
     websocket_api.async_register_command(hass, ws_fabric_rf_barrier_remove)
+    websocket_api.async_register_command(hass, ws_fabric_rf_barrier_rails_stamp)
+    websocket_api.async_register_command(hass, ws_fabric_open_edges_apply)
     websocket_api.async_register_command(hass, ws_fabric_map_transform_set)
     websocket_api.async_register_command(hass, ws_fabric_map_reanchor)
     websocket_api.async_register_command(hass, ws_occupancy_estimate)
@@ -673,38 +689,6 @@ async def ws_room_height_set(hass: HomeAssistant, connection, msg) -> None:
 # Called every 5s by the panel's poll loop and on demand by other handlers.
 
 
-@websocket_api.websocket_command(
-    {
-        "type": "padspan_bright/vendor_lookup",
-        "mac": str,
-        vol.Optional("force_refresh"): bool,
-    }
-)
-@websocket_api.async_response
-async def ws_vendor_lookup(hass: HomeAssistant, connection, msg) -> None:
-    """Vendor lookup for a MAC address.
-
-    Used by the Overview → Objects/Unidentified modal.
-    """
-    st = hass.data.get(DOMAIN, {}).get(DATA_SETTINGS)
-    enabled = True
-    try:
-        if st:
-            enabled = bool(st.get("vendor_lookup_enabled", True))
-    except Exception:
-        enabled = True
-
-    if not enabled:
-        connection.send_result(msg["id"], {"enabled": False})
-        return
-
-    mac = msg.get("mac") or ""
-    force = bool(msg.get("force_refresh", False))
-    res = await async_lookup_vendor(hass, mac, force_refresh=force)
-    res["enabled"] = True
-    connection.send_result(msg["id"], res)
-
-
 # ── Maps CRUD ──────────────────────────────────────────────────────────────────
 
 
@@ -909,6 +893,34 @@ async def ws_vacation_log_get(hass: HomeAssistant, connection, msg) -> None:
     if data.get("vacation_mode_enabled") and data.get("vacation_mode_enabled_at"):
         periods.append([data["vacation_mode_enabled_at"], None])
     connection.send_result(msg["id"], {"actions": actions, "periods": periods})
+
+
+@websocket_api.websocket_command({
+    "type": "padspan_bright/vacation_preview",
+})
+@websocket_api.async_response
+async def ws_vacation_preview(hass: HomeAssistant, connection, msg) -> None:
+    """What Vacation Mode would switch over the next 24 hours — a read; it
+    switches nothing and stores nothing (vacation_mode.async_preview)."""
+    from .vacation_mode import async_preview
+    from .telemetry import bump
+    out = await async_preview(hass)
+    if out["lights"]:
+        bump(hass, "vacation_preview")
+    else:
+        bump(hass, "vacation_preview_empty")
+    connection.send_result(msg["id"], out)
+
+
+@websocket_api.websocket_command({
+    "type": "padspan_bright/vacation_lights",
+})
+@websocket_api.async_response
+async def ws_vacation_lights(hass: HomeAssistant, connection, msg) -> None:
+    """The lights an evening (anchor) light can be — the ones Vacation Mode
+    switches, by name (vacation_mode.eligible_lights)."""
+    from .vacation_mode import eligible_lights
+    connection.send_result(msg["id"], {"lights": eligible_lights(hass)})
 
 
 # Flood/water-leak alarm latching (flood_latch.py) — the Atlas Reset button.

@@ -1,0 +1,114 @@
+# PadSpan Bright — BLE Room-Presence Tracking for Home Assistant
+# Copyright (C) 2026 Garry Broeckling
+# Licensed under the GNU General Public License v3.0
+"""Beacon Tune's hard relocation deletes only that beacon's Beacon Tune points.
+
+It used to delete every calibration point whose device or label matched the
+beacon, so the points collected by carrying the same device (Pin & Listen,
+Roam, Walk a room) went with them. Beacon Tune now marks its points
+(source "beacon_tune", kept by the store) and the purge picks only those, plus
+the beacon's automatic "[auto]" points taken at its old pin.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from custom_components.padspan_bright.calibration_store import BEACON_TUNE_SOURCE, CalibrationStore
+
+_ROOT = Path(__file__).resolve().parents[1]
+_CAL = _ROOT / "custom_components" / "padspan_bright" / "www" / "padspan-bright" / "views" / "calibration.js"
+_NODE = shutil.which("node")
+
+
+def _purge_fn() -> str:
+    src = _CAL.read_text(encoding="utf-8")
+    start = src.index("function _beaconTunePurgeIds(")
+    return src[start:src.index("\n}\n", start) + 2]
+
+
+def _run(points: list[dict], ids: dict, protected: list[str]) -> list[str]:
+    if _NODE is None:
+        pytest.skip("node is not installed")
+    js = (_purge_fn() + f"\nconsole.log(JSON.stringify(_beaconTunePurgeIds({json.dumps(points)}, "
+          f"{json.dumps(ids)}, new Set({json.dumps(protected)}))));\n")
+    res = subprocess.run([_NODE, "-e", js], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout.strip().splitlines()[-1])
+
+
+def test_only_the_beacons_beacon_tune_points_go() -> None:
+    dev, key, label = "AA:BB:CC:DD:EE:01", "ble:aa:bb:cc:dd:ee:01", "Kitchen beacon"
+    pts = [
+        {"id": "bt_old", "device_id": dev, "label": label, "source": "beacon_tune"},
+        {"id": "bt_new", "device_id": dev, "label": label, "source": "beacon_tune"},
+        {"id": "auto", "device_id": key, "label": f"[auto] {label}"},
+        {"id": "pin_listen", "device_id": dev, "label": label},
+        {"id": "pin_listen_nolabel", "device_id": dev, "label": ""},
+        {"id": "walk", "device_id": dev, "label": "[walk] Kitchen", "source": "room_walk"},
+        {"id": "other_bt", "device_id": "11:22:33:44:55:66", "label": "Hall beacon", "source": "beacon_tune"},
+        {"id": "other_auto", "device_id": "ble:11:22", "label": "[auto] Hall beacon"},
+    ]
+    got = _run(pts, {"deviceId": dev, "key": key, "label": label}, ["bt_new"])
+    assert sorted(got) == ["auto", "bt_old"]
+
+
+def test_a_beacon_with_the_same_name_keeps_its_points() -> None:
+    """Two beacons can share a name (an advertised one, or the same label):
+    a name alone never takes the other one's points."""
+    dev, key, label = "AA:BB:CC:DD:EE:01", "ble:aa:bb:cc:dd:ee:01", "Tile"
+    twin_dev, twin_key = "AA:BB:CC:DD:EE:02", "ble:aa:bb:cc:dd:ee:02"
+    pts = [
+        {"id": "mine_old_addr", "device_id": "11:11:11:11:11:11", "label": label, "source": "beacon_tune"},
+        {"id": "mine_no_dev", "device_id": "", "label": label, "source": "beacon_tune"},
+        {"id": "twin_bt", "device_id": twin_dev, "label": label, "source": "beacon_tune"},
+        {"id": "twin_bt_by_key", "device_id": twin_key, "label": label, "source": "beacon_tune"},
+        {"id": "twin_auto", "device_id": twin_key, "label": f"[auto] {label}"},
+        {"id": "unplaced_auto", "device_id": "ble:99", "label": f"[auto] {label}"},
+    ]
+    got = _run(pts, {"deviceId": dev, "key": key, "label": label, "others": [twin_key, twin_dev]}, [])
+    assert sorted(got) == ["mine_no_dev", "mine_old_addr"]
+
+
+def test_the_purge_uses_it_and_both_saves_mark_their_points() -> None:
+    src = _CAL.read_text(encoding="utf-8")
+    purge = src[src.index("const _purgeOldPoints = async"):][:900]
+    assert "_beaconTunePurgeIds(" in purge and "calibrationDeletePoint(id)" in purge
+    # Beacon Tune's own save only: Calibration Guide points stay when a beacon moves.
+    assert len(re.findall(r'source: "beacon_tune",', src)) == 1
+    assert re.search(r"label: bkLabel,\s+scanner_readings: scannerReadings,", src)
+    assert "points you collected by carrying it" in src.lower()
+
+
+def test_the_dialog_and_the_help_say_what_happens_to_guide_points() -> None:
+    src = _CAL.read_text(encoding="utf-8")
+    dialog = src[src.index("const confirmPurge = confirm("):src.index("if (!confirmPurge)")]
+    for words in ("Calibration Guide points are kept", "0.38.209 to 0.38.217", "by hand on the Model tab"):
+        assert words in dialog, words
+    www = _CAL.parents[1]
+    help_src = (www / "help_content.js").read_text(encoding="utf-8")
+    line = next(x for x in help_src.splitlines() if "t(\"Moving a beacon:" in x)
+    key = line[line.index('t("') + 3:line.rindex('"),')].replace('\\"', '"')
+    assert "Calibration Guide points stay too" in key and "0.38.209 to 0.38.217" in key and "by hand on the Model tab" in key
+    for lang in ("de", "fr", "nl"):
+        value = json.loads((www / "i18n" / lang / "help.json").read_text(encoding="utf-8"))[key]
+        assert "Calibration Guide" in value and "0.38.209" in value and "0.38.217" in value and "Model" in value, lang
+
+
+def test_the_store_keeps_the_beacon_tune_mark_and_nothing_else() -> None:
+    store = CalibrationStore.__new__(CalibrationStore)
+    store.data = {"points": [], "excluded_sources": []}
+    store._model = None
+    reads = [{"source": "s1", "rssi_samples": [-60, -61, -62]}]
+    base = {"x_m": 1.0, "y_m": 2.0, "scanner_readings": reads, "floor_id": "f"}
+    tuned = store._clean_point({**base, "source": BEACON_TUNE_SOURCE})
+    other = store._clean_point({**base, "source": "room_walk"})
+    plain = store._clean_point(base)
+    assert tuned["source"] == "beacon_tune"
+    assert "source" not in other and "source" not in plain

@@ -13,8 +13,8 @@ Away timeout; default 5 minutes), the state is "not_home" explicitly.
 It must be named, not left as None: HA falls through None to latitude/longitude,
 which this tracker does not have, so the state came out "unknown" instead.
 
-Entity ID example:  device_tracker.padspan_car_keys
-Person link:        Settings → People → Alice → add device_tracker.padspan_alice_phone
+Entity ID example:  device_tracker.car_keys
+Person link:        Settings → People → Alice → add device_tracker.alice_phone
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN, DATA_SETTINGS, DATA_DEVICE_REGISTRY
 from .geo_bridge import accuracy_from_confidence, metres_to_latlon
 from .presence_coordinator import PresenceCoordinator
-from .entity_identity import alternates_of, pick_uid_key, registry_ready, uid_safe
+from .entity_identity import alternates_of, kept_device_info, pick_uid_key, registry_ready, uid_safe
 from .presence_rules import away_timeout_s, is_away
 
 # HA's own constant, with a literal fallback so an import change upstream
@@ -260,8 +260,9 @@ class PadSpanDeviceTracker(CoordinatorEntity["PresenceCoordinator"], TrackerEnti
     @property
     def device_info(self) -> dict[str, Any]:
         uid = _device_uid(self._obj) or self._init_uid
+        identifiers, _connections = kept_device_info(getattr(self, "hass", None), "device_tracker", self.unique_id, uid)
         return {
-            "identifiers": {(DOMAIN, uid)},
+            "identifiers": identifiers,
             "name": self._label(),
             "manufacturer": "PadSpan Bright",
             "model": "BLE Presence Tracker",

@@ -2,14 +2,43 @@
 // Copyright (C) 2026 Garry Broeckling
 // Licensed under the GNU General Public License v3.0
 // See LICENSE file or https://www.gnu.org/licenses/gpl-3.0.html
+const { deviceName, pickName } = await import(`./device_name.js${new URL(import.meta.url).search}`);
 import { estimateDistanceM, formatDistanceM } from "./path_loss.js";
 import { buildCalibrationMatrix, errorColor } from "./calibration_matrix.js";
 import { attachPanZoom } from "./pan_zoom.js";
+
+// A tall plan fits the window instead of filling the card. Only the box's size
+// changes: its shape stays the plan's, and a point is a fraction of the plan's
+// on-screen box, so where a point is, or lands, does not depend on this.
+// Never under 360 px wide (or the card's width), so a tap stays precise on a
+// short window, such as a phone on its side, or with a very long plan: the page
+// scrolls instead.
+// border: the box's own border in px (its content is what has the plan's shape).
+/** A receiver's one name, to show. Saved names (a reading's, a placed receiver's
+ *  label) stay as they were saved; they are read back and matched on. */
+function _rxShown(ctx, source, saved) {
+  const r = (ctx.state.live?.snapshot?.ble?.radios || []).find(x => x.source === source);
+  return (r && r.display_name) || saved || source || "";
+}
+/** The same with its room, as a live reading's name has it. */
+function _rxLine(ctx, source, saved) {
+  const r = (ctx.state.live?.snapshot?.ble?.radios || []).find(x => x.source === source);
+  if (!r || !r.display_name) return saved || source;
+  const area = r.area_name || r.area || "";
+  return area && area !== r.display_name ? `${r.display_name} \u00b7 ${area}` : r.display_name;
+}
+
+function _fitPlanToWindow(box, vbH, border) {
+  box.style.width = `min(100% - ${border * 2}px, max(max(100vh - 140px, 320px) * ${100 / vbH}, 360px))`;
+  box.style.marginInline = "auto";
+}
 
 // PadSpan Bright — BLE Fingerprint Calibration
 // Phone-based signal collection for precise indoor location modelling.
 //
 // Sub-tabs:
+//   Results     — accuracy now, room by room, the next best thing to do
+//                 (views/calibration_results.js); Calibration opens on it
 //   Tune        — position scanner/receiver markers on 3D iso map
 //   Beacon Tune — mark beacon positions, auto-collect 60s RSSI fingerprints
 //   Setup       — pick your beacon device, collection settings
@@ -57,6 +86,9 @@ const { tuneSavePlanInit, tuneDiffMapDraft, tuneMissingFabricPins, tuneConflicti
         tuneBeaconInBounds } =
   await import(`./tune_save_plan.js${new URL(import.meta.url).search}`);
 tuneSavePlanInit({ mapFracToMetres, metresToMapFrac });
+const { renderResults } = await import(`./calibration_results.js${new URL(import.meta.url).search}`);
+// Basic's links (views/focus.js): which lead out to an expert screen.
+const FOCUS = await import(`./focus.js${new URL(import.meta.url).search}`);
 
 // The line to show when the snapshot holds no radios or devices (#88).
 // "Switch to Live mode" only when the server really said Sample; Live (or a
@@ -86,8 +118,10 @@ export function render(ctx) {
   root.className = ctx.state.view === "calibration" ? "" : "hidden";
 
   // Per-session UI state
+  // Calibration opens on Results (interface review item 13); a tab picked
+  // in this session is kept, as before.
   if (!ctx.state._calib) ctx.state._calib = {
-    tab:        "tune",
+    tab:        "results",
     deviceId:   null,
     deviceLabel: null,
     mapId:      null,
@@ -125,13 +159,29 @@ export function render(ctx) {
     return root;
   }
 
-  // Header
+  // Tabs
+  const TABS = [["results","Results"],["tune","Tune"],["beacon","Beacon Tune"],["setup","Beacon and floor"],["pin","Pin & Listen"],["roam","Roam"],["model","Model"],["matrix","Accuracy by spot"]];
+  // Walk a room (calibration_room_walk, off by default): its tab exists only while on.
+  const _walkOn = ctx.state.settings?.calibration_room_walk === true;
+  if (_walkOn) TABS.push(["walk", "Walk a room"]);
+  else if (cs.tab === "walk") cs.tab = "tune";
+  // A tab asked for from elsewhere (?view=calibration&tab=…, the Overview's
+  // accuracy tip, Mapping's "Go to Calibration"), whether or not Calibration
+  // was opened before; an id that is no tab here is ignored.
+  const _req = ctx.state.view === "calibration" ? ctx.state._calibTabRequest : null;
+  if (_req) {
+    ctx.state._calibTabRequest = null;
+    if (TABS.some(([id]) => id === _req)) cs.tab = _req;
+  }
+
+  // Header. Results has Guided calibration as its main button, so the
+  // header's is left out there (one button, not two).
   root.appendChild(el("div", { style: "margin-bottom:10px" }, [
     el("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap" }, [
       el("div", { style: "font-weight:700;font-size:16px;color:#52b788" }, "BLE Location Calibration"),
       ctx.helpers.helpBtn("calibration_overview"),
-      (() => {
-        const b = el("button", { class: "btn inline", style: "font-size:11px;margin-left:auto" }, "🧭 Guided calibration");
+      cs.tab === "results" ? null : (() => {
+        const b = el("button", { class: "btn inline", style: "font-size:11px;margin-left:auto", "data-calib-guided": "header" }, "🧭 Guided calibration");
         b.addEventListener("click", () => { ctx.state._calibWizard = { step: 1 }; ctx.actions.renderRooms(); });
         return b;
       })(),
@@ -141,11 +191,6 @@ export function render(ctx) {
   ]));
 
   // Tab bar
-  const TABS = [["tune","Tune"],["beacon","Beacon Tune"],["setup","Setup"],["pin","Pin & Listen"],["roam","Roam"],["model","Model"],["matrix","Error Matrix"]];
-  // Walk a room (calibration_room_walk, off by default): its tab exists only while on.
-  const _walkOn = ctx.state.settings?.calibration_room_walk === true;
-  if (_walkOn) TABS.push(["walk", "Walk a room"]);
-  else if (cs.tab === "walk") cs.tab = "tune";
   const tabBar = el("div", { class: "tabs", style: "margin-bottom:14px;flex-wrap:wrap;gap:4px" });
   for (const [id, label] of TABS) {
     tabBar.appendChild(el("button", {
@@ -155,6 +200,20 @@ export function render(ctx) {
   }
   root.appendChild(tabBar);
 
+  // Opt-in report: each opening of Results (reset when another tab or
+  // view is shown), never a poll's redraw.
+  const _onResults = cs.tab === "results" && ctx.state.view === "calibration";
+  if (_onResults && !cs._resultsCounted && tuneLivePhase(ctx.state) !== "sample" && ctx.actions.telemetryEvent) ctx.actions.telemetryEvent("cal_results_opened");
+  cs._resultsCounted = _onResults;
+
+  if (cs.tab === "results") root.appendChild(renderResults(ctx, el, cs, calData, {
+    sample: tuneLivePhase(ctx.state) === "sample",
+    weakestRoom: _weakestRoom,
+    heldoutLine: _heldoutLine,
+    telemetry: (n) => { if (ctx.actions.telemetryEvent) ctx.actions.telemetryEvent(n); },
+    openWizard: () => { ctx.state._calibWizard = { step: 1, from: "results" }; ctx.actions.renderRooms(); },
+    goTab: (id) => { cs.tab = id; ctx.actions.renderRooms(); },
+  }));
   if (cs.tab === "setup") root.appendChild(_setup(ctx, el, cs, calData));
   if (cs.tab === "pin")   root.appendChild(_pinAndListen(ctx, el, cs, calData));
   if (cs.tab === "roam")  root.appendChild(_roam(ctx, el, cs, calData));
@@ -207,6 +266,10 @@ function _floorScaled(ctx, mapId) {
   return !!t[mapId];
 }
 
+// The button opens Mapping's set-up wizard at its scale step for this floor,
+// as the accuracy tip "Measure" does (panel.js _accuracyTipsCard): it works in
+// every mode, where Mapping's Edit tab is not in Basic (maps.js sends it back
+// to Library).
 function _noScaleCard(ctx, el, cs) {
   if (cs._noScaleSeen !== cs.mapId && ctx.actions.telemetryEvent) {
     cs._noScaleSeen = cs.mapId;
@@ -216,17 +279,15 @@ function _noScaleCard(ctx, el, cs) {
     el("div", { style: "font-weight:700;font-size:14px;color:#f59e0b;margin-bottom:6px" }, "This floor needs a measurement first"),
     el("div", { style: "font-size:13px;line-height:1.6;color:#b0c4b1" },
       "A calibration point is a spot on the floor in metres, and this floor plan has no metre scale yet, so a point placed on it can't be saved. " +
-      "Measure one distance you know on it (a wall, a doorway) in Mapping → Edit → Measure, then come back here."),
+      "Measure one distance you know on it (a wall, a doorway), then come back here."),
     el("button", {
       class: "btn", style: "margin-top:10px",
       onclick: () => {
         ctx.state.activeMapId = cs.mapId;
-        ctx.state.maps = ctx.state.maps || {};
-        ctx.state.maps._mode = "measure";
-        ctx.state.maps._openMode = "measure";   // kept when the plan loads into Edit (maps.js)
         ctx.state.view = "maps";
-        if (ctx.actions.setMapsTab) ctx.actions.setMapsTab("edit");
-        else { ctx.state.mapsTab = "edit"; ctx.actions.renderRooms(); }
+        ctx.state._mapsWizard = { step: 2, mapId: cs.mapId };
+        if (ctx.actions.renderNav) ctx.actions.renderNav();
+        ctx.actions.renderRooms();
       },
     }, "Measure this floor →"),
   ]);
@@ -331,18 +392,20 @@ function _calibWizardFinish(ctx, el, cs, calData) {
     ctx.state.view = "qa";
     ctx.actions.renderRooms();
   });
-  row.appendChild(qaBtn);
+  // QA is a More tools screen for installers: not a step out of Basic
+  // (views/focus.js expertLinks). The tabs here are the same in every mode.
+  if (FOCUS.expertLinks(ctx.state)) row.appendChild(qaBtn);
   const anotherBtn = el("button", { class: "btn inline" }, "+ Calibrate another floor");
   anotherBtn.addEventListener("click", () => {
     cs.mapId = null;
-    ctx.state._calibWizard = { step: 2 };
+    ctx.state._calibWizard = { step: 2, from: ctx.state._calibWizard && ctx.state._calibWizard.from };
     ctx.actions.renderRooms();
   });
   row.appendChild(anotherBtn);
   const doneBtn = el("button", { class: "btn inline" }, "Done");
   doneBtn.addEventListener("click", () => {
+    cs.tab = (ctx.state._calibWizard && ctx.state._calibWizard.from) || "model";
     ctx.state._calibWizard = null;
-    cs.tab = "model";
     ctx.actions.renderRooms();
   });
   row.appendChild(doneBtn);
@@ -384,7 +447,10 @@ function _calibWizard(ctx, el, cs, calData) {
 
   const head = el("div", { class: "card", style: "margin-bottom:12px" });
   const hrow = el("div", { style: "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px" });
-  hrow.appendChild(el("div", { style: "font-weight:700;font-size:16px" }, "Guided calibration"));
+  hrow.appendChild(el("div", { style: "display:flex;align-items:center;gap:8px" }, [
+    el("div", { style: "font-weight:700;font-size:16px" }, "Guided calibration"),
+    ctx.helpers.helpBtn("calibration_guided"),
+  ]));
   // Label/title spell out what this does, not just its name: the wizard
   // fully replaces the ordinary tab bar while open (see render() above), so
   // this is the ONLY way back to Pin & Listen or any other non-wizard tab —
@@ -396,6 +462,7 @@ function _calibWizard(ctx, el, cs, calData) {
   }, "✕ Exit guide → full tabs");
   closeBtn.addEventListener("click", () => {
     if (w.step < 5 && ctx.actions.telemetryEvent) ctx.actions.telemetryEvent("wizard_calib_exited_early");
+    if (w.from) cs.tab = w.from;   // opened from Results: back there
     ctx.state._calibWizard = null;
     ctx.actions.renderRooms();
   });
@@ -726,7 +793,7 @@ function _setup(ctx, el, cs, calData) {
   // How-it-works explainer
   wrap.appendChild(el("div", { class: "card", style: "border-color:#52b788" }, [
     el("div", { style: "font-weight:700;font-size:14px;margin-bottom:8px;color:#52b788" },
-      "Phone-Based Calibration (Setup)"),
+      "Phone-Based Calibration (Beacon and floor)"),
     el("div", { style: "font-size:13px;line-height:1.7;color:#b0c4b1" }, [
       el("div", {}, "This tab configures phone-based calibration (Pin & Listen / Roam)."),
       el("div", { style: "margin-top:4px" }, "1. Your phone broadcasts BLE. The house scanners hear it."),
@@ -750,7 +817,7 @@ function _setup(ctx, el, cs, calData) {
     // Tracked objects — use stable identifiers for rotating-MAC devices
     for (const o of bleObjs) {
       const stableId = _setupStableId(o);
-      const label = (o.user_label || o.name || stableId) + (o.rssi ? ` (${o.rssi} dBm)` : "") + (o.kind === "private_ble" ? " [Private BLE]" : o.kind === "ibeacon" ? " [iBeacon]" : "");
+      const label = pickName(o, stableId) + (o.rssi ? ` (${o.rssi} dBm)` : "") + (o.kind === "private_ble" ? " [Private BLE]" : o.kind === "ibeacon" ? " [iBeacon]" : "");
       deviceItems.push({ id: stableId, label, search: `${label} ${stableId}`.toLowerCase(), group: "tracked" });
     }
     // Raw advertisement devices not already in objects.list (hidden in quiet mode)
@@ -830,13 +897,13 @@ function _setup(ctx, el, cs, calData) {
     if (radioCount > 0) {
       const box = el("div", { style: "background:#0a150e;border:1px solid #1b3526;border-radius:8px;padding:10px;margin-top:6px" });
       box.appendChild(el("div", { style: "font-weight:600;font-size:13px;color:#52b788;margin-bottom:6px" },
-        `✓ ${obj?.user_label || obj?.name || cs.deviceId} — seen by ${radioCount} radio${radioCount > 1 ? "s" : ""}`));
+        `✓ ${obj ? pickName(obj, cs.deviceId) : cs.deviceId} — seen by ${radioCount} radio${radioCount > 1 ? "s" : ""}`));
       if (obj?.room) box.appendChild(el("div", { style: "font-size:12px;color:#94a3b8;margin-bottom:6px" }, `Room: ${obj.room}`));
       box.appendChild(el("div", { style: "font-size:11px;color:#78909c;margin-bottom:4px" }, "Per-radio RSSI:"));
       const sorted = Object.entries(perRadio).sort((a, b) => (b[1].rssi || -200) - (a[1].rssi || -200));
       const _setupTxPower = obj?.tx_power ?? null;
       for (const [src, info] of sorted) {
-        box.appendChild(_rssiRow(el, info.name || src, info.rssi, null, info.age_s, _setupTxPower, _plOpts(ctx, src)));
+        box.appendChild(_rssiRow(el, _rxLine(ctx, src, info.name), info.rssi, null, info.age_s, _setupTxPower, _plOpts(ctx, src)));
       }
       deviceCard.appendChild(box);
     } else {
@@ -847,7 +914,7 @@ function _setup(ctx, el, cs, calData) {
       if (entityRssi || entityScanner) {
         const box = el("div", { style: "background:#0a150e;border:1px solid #3d2d0a;border-radius:8px;padding:10px;margin-top:6px" });
         box.appendChild(el("div", { style: "font-weight:600;font-size:13px;color:#fbbf24;margin-bottom:6px" },
-          `⚠ ${obj?.user_label || obj?.name || cs.deviceId} — entity data only (no direct BLE advertisements)`));
+          `⚠ ${obj ? pickName(obj, cs.deviceId) : cs.deviceId} — entity data only (no direct BLE advertisements)`));
         if (obj?.room) box.appendChild(el("div", { style: "font-size:12px;color:#94a3b8;margin-bottom:6px" }, `Room: ${obj.room}`));
         if (entityRssi) box.appendChild(el("div", { style: "font-size:12px;color:#94a3b8" }, `RSSI: ${entityRssi} dBm (from entity attributes)`));
         if (entityScanner) box.appendChild(el("div", { style: "font-size:12px;color:#94a3b8" }, `Nearest scanner: ${entityScanner}`));
@@ -931,7 +998,7 @@ function _setup(ctx, el, cs, calData) {
     mapCard.appendChild(mapSel);
   } else {
     mapCard.appendChild(el("div", { style: "font-size:12px;color:#f59e0b" },
-      "No maps uploaded yet. Upload a floor plan in the Maps tab first."));
+      "No maps uploaded yet. Upload a floor plan in Mapping first."));
   }
   wrap.appendChild(mapCard);
   // Right under the floor it is about, not below the fold.
@@ -945,7 +1012,7 @@ function _setup(ctx, el, cs, calData) {
   const durRow = el("div", { style: "display:flex;gap:10px;flex-wrap:wrap" });
   for (const d of [15, 30, 60, 90]) {
     const btn = el("button", {
-      class: "btn" + (cs.duration === d ? "" : " inline"),
+      class: "btn inline" + (cs.duration === d ? " on" : ""),
       style: "min-width:60px",
       onclick: () => { cs.duration = d; ctx.actions.renderRooms(); },
     }, `${d}s`);
@@ -1045,11 +1112,11 @@ function _pinAndListen(ctx, el, cs, calData) {
     wrap.appendChild(el("div", { class: "card", style: "border-color:#f59e0b" }, [
       el("div", { style: "font-size:13px;color:#f59e0b;font-weight:700" }, "Setup required"),
       el("div", { class: "muted", style: "font-size:12px;margin-top:4px" },
-        "Return to Setup and select your beacon device and floor."),
+        "Go back to the Beacon and floor tab and pick your beacon device and floor."),
       el("button", {
         class: "btn", style: "margin-top:10px",
         onclick: () => { cs.tab = "setup"; ctx.actions.renderRooms(); },
-      }, "Go to Setup"),
+      }, "Go to Beacon and floor"),
     ]));
     return wrap;
   }
@@ -1063,7 +1130,7 @@ function _pinAndListen(ctx, el, cs, calData) {
   const mapData = maps.find(m => m.id === cs.mapId);
   if (!mapData?.image?.filename) {
     wrap.appendChild(el("div", { class: "card" }, [
-      el("div", { class: "muted" }, "Selected map has no image. Upload a floor plan in the Maps tab."),
+      el("div", { class: "muted" }, "Selected map has no image. Upload a floor plan in Mapping."),
     ]));
     return wrap;
   }
@@ -1097,6 +1164,7 @@ function _pinAndListen(ctx, el, cs, calData) {
   // overflow:hidden. Tying mapWrap's own box to the SAME aspect ratio the
   // SVG's own viewBox already uses gives it real height with no measurement.
   mapWrap.style.aspectRatio = `100 / ${vbH}`;
+  _fitPlanToWindow(mapWrap, vbH, 2);
 
   // Existing calibration points as dots
   let dotsSvg = mapPts.map(p => {
@@ -1199,7 +1267,7 @@ function _pinAndListen(ctx, el, cs, calData) {
           `✓ Beacon visible on ${pinRadioCount} radio${pinRadioCount > 1 ? "s" : ""}`));
         const sorted = Object.entries(pinPerRadio).sort((a, b) => (b[1].rssi || -200) - (a[1].rssi || -200));
         for (const [src, info] of sorted) {
-          signalBox.appendChild(_rssiRow(el, info.name || src, info.rssi, null, info.age_s, _pinTxPower, _plOpts(ctx, src)));
+          signalBox.appendChild(_rssiRow(el, _rxLine(ctx, src, info.name), info.rssi, null, info.age_s, _pinTxPower, _plOpts(ctx, src)));
         }
       } else {
         signalBox.appendChild(el("div", { style: "font-size:12px;color:#f59e0b;font-weight:600" },
@@ -1255,7 +1323,7 @@ function _buildCollectionUI(ctx, el, cs) {
   const { el: elHelper } = ctx.helpers;
   for (const [src, rd] of Object.entries(cs.readings || {})) {
     const mean = rd.samples.length ? rd.samples.reduce((a, b) => a + b, 0) / rd.samples.length : -100;
-    scanDiv.appendChild(_rssiRow(elHelper, rd.name || src, Math.round(mean), rd.samples.length, null, cs._txPower, _plOpts(ctx, src)));
+    scanDiv.appendChild(_rssiRow(elHelper, _rxLine(ctx, src, rd.name), Math.round(mean), rd.samples.length, null, cs._txPower, _plOpts(ctx, src)));
   }
   wrap.appendChild(scanDiv);
 
@@ -1299,14 +1367,20 @@ function _startCollection(ctx, cs, _snap, _mapData) {
   ctx.actions.renderRooms();
 
   const endTime = Date.now() + cs.duration * 1000;
+  // This run's token: Stop & Discard (or a new Start) during the slow
+  // snapshot fetch used to let this loop carry on into cleared readings
+  // (a TypeError in the field) or run alongside the next capture.
+  const run = cs._run = (cs._run || 0) + 1;
+  const readings = cs.readings;
+  const gone = () => cs.stopFlag || cs._run !== run || cs.readings !== readings;
 
   const loop = async () => {
-    if (cs.stopFlag) return;
+    if (gone()) return;
 
     // Poll snapshot
     try { await ctx.actions.refreshSnapshot(); } catch (_) { /**/ }
+    if (gone()) return;
     cs._pollCount = (cs._pollCount || 0) + 1;
-
     const snap = _recordableSnap(ctx);
 
     // ── Collect per-radio RSSI from BLE advertisements (primary source) ──────
@@ -1341,7 +1415,7 @@ function _startCollection(ctx, cs, _snap, _mapData) {
       if (sorted.length) {
         for (const [src, rd] of sorted) {
           const mean = rd.samples.reduce((a, b) => a + b, 0) / rd.samples.length;
-          cs._scanEl.appendChild(_rssiRow(el, rd.name || src, Math.round(mean), rd.samples.length, null, cs._txPower, _plOpts(ctx, src)));
+          cs._scanEl.appendChild(_rssiRow(el, _rxLine(ctx, src, rd.name), Math.round(mean), rd.samples.length, null, cs._txPower, _plOpts(ctx, src)));
         }
       } else {
         cs._scanEl.appendChild(el("div", { style: "font-size:12px;color:#f59e0b;text-align:center;padding:8px" },
@@ -1378,7 +1452,7 @@ function _buildSavePanel(ctx, el, cs, calData, mapData) {
   if (readingsEntries.length) {
     for (const [src, rd] of readingsEntries) {
       const mean = rd.samples.length ? rd.samples.reduce((a, b) => a + b, 0) / rd.samples.length : -100;
-      wrap.appendChild(_rssiRow(el, rd.name || src, Math.round(mean), rd.samples.length, null, cs._txPower, _plOpts(ctx, src)));
+      wrap.appendChild(_rssiRow(el, _rxLine(ctx, src, rd.name), Math.round(mean), rd.samples.length, null, cs._txPower, _plOpts(ctx, src)));
     }
   } else {
     wrap.appendChild(el("div", { style: "font-size:12px;color:#f59e0b;margin-bottom:8px" },
@@ -1458,7 +1532,7 @@ function _roam(ctx, el, cs, calData) {
       el("button", {
         class: "btn", style: "margin-top:10px",
         onclick: () => { cs.tab = "setup"; ctx.actions.renderRooms(); },
-      }, "Go to Setup"),
+      }, "Go to Beacon and floor"),
     ]));
     return wrap;
   }
@@ -1569,6 +1643,7 @@ function _roam(ctx, el, cs, calData) {
   // propagates up through position:absolute, so mapWrap needs its own
   // aspect-ratio tie or it collapses to ~0px under overflow:hidden.
   mapWrap.style.aspectRatio = `100 / ${vbH}`;
+  _fitPlanToWindow(mapWrap, vbH, 2);
   mapInner.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 ${vbH}"
       preserveAspectRatio="none" style="width:100%;display:block">
     <image href="${imgUrl}" x="0" y="0" width="100" height="${vbH}" preserveAspectRatio="none"/>
@@ -1923,6 +1998,7 @@ function _modelTab(ctx, el, cs, calData) {
         const confSvg = _confusionLinksSvg(mapLoo?.room_confusion, mapData, vbH);
 
         const miniDiv = el("div", { style: "border-radius:6px;overflow:hidden;border:1px solid #1b3526;margin-bottom:6px" });
+        _fitPlanToWindow(miniDiv, vbH, 1);
         miniDiv.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 ${vbH}" preserveAspectRatio="none" style="width:100%;display:block">
           <image href="${imgUrl}" x="0" y="0" width="100" height="${vbH}" preserveAspectRatio="none"/>
           ${gSvg}${confSvg}${dotsSvg}
@@ -1966,7 +2042,7 @@ function _modelTab(ctx, el, cs, calData) {
   // Per-scanner path-loss stats
   if (model.path_loss && Object.keys(model.path_loss).length) {
     const plCard = el("div", { class: "card" });
-    plCard.appendChild(el("div", { style: "font-weight:700;font-size:14px;margin-bottom:10px" }, "Path-Loss Fits"));
+    plCard.appendChild(el("div", { style: "font-weight:700;font-size:14px;margin-bottom:10px" }, "Signal vs distance"));
     plCard.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:10px" },
       "RSSI = RSSI_1m − 10 · n · log₁₀(d). n > 3 = heavy attenuation (walls/floors). R² > 0.7 = reliable fit."));
     const tbody = el("tbody");
@@ -1974,7 +2050,7 @@ function _modelTab(ctx, el, cs, calData) {
       const rSqColor = fit.r_squared >= 0.7 ? "#52b788" : fit.r_squared >= 0.4 ? "#f59e0b" : "#dc2626";
       tbody.appendChild(el("tr", {}, [
         el("td", { style: "font-size:11px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
-          fit.scanner_name || src),
+          _rxShown(ctx, src, fit.scanner_name)),
         el("td", { style: "font-family:monospace;font-size:11px" }, fit.n.toFixed(2)),
         el("td", { style: "font-family:monospace;font-size:11px" }, fit.rssi_1m + " dBm"),
         el("td", { style: `font-family:monospace;font-size:11px;color:${rSqColor}` }, fit.r_squared.toFixed(2)),
@@ -2159,9 +2235,9 @@ function _matrixTab(ctx, el, cs, calData) {
   }));
 
   const infoCard = el("div", { class: "card" });
-  infoCard.appendChild(el("div", { style: "font-weight:700;font-size:14px;margin-bottom:6px" }, "Calibration Error Matrix"));
+  infoCard.appendChild(el("div", { style: "font-weight:700;font-size:14px;margin-bottom:6px" }, ["Accuracy by spot ", ctx.helpers.helpBtn("calibration_matrix")]));
   infoCard.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:10px" },
-    "Each cell compares a point's known fabric distance to a scanner against the distance that scanner's path-loss fit derives from the point's own measured RSSI. Blue = the fit reports the point farther than it really is · green = accurate · red = closer than it really is. Grey = that scanner never heard this point. 📍 rows are anchored beacons — pinned to a known position, refreshed live every poll instead of a one-off walk."));
+    "Each cell compares a point's known distance to a scanner (from the room and receiver layout) against the distance that scanner's path-loss fit derives from the point's own measured RSSI. Blue = the fit reports the point farther than it really is · green = accurate · red = closer than it really is. Grey = that scanner never heard this point. 📍 rows are anchored beacons — pinned to a known position, refreshed live every poll instead of a one-off walk."));
 
   if (anchors.length) {
     const driftColor = { ok: "#52b788", warn: "#f59e0b", bad: "#f87171", unknown: "#4a6052" };
@@ -2171,7 +2247,7 @@ function _matrixTab(ctx, el, cs, calData) {
     for (const o of anchors) {
       const sev = o.anchor_drift_severity || "unknown";
       tbody.appendChild(el("tr", {}, [
-        el("td", { style: "font-size:11px" }, o.user_label || o.name || o.key),
+        el("td", { style: "font-size:11px" }, deviceName(o, o.key)),
         el("td", { class: "muted", style: "font-size:11px" }, o.room || "—"),
         el("td", { style: "font-family:monospace;font-size:11px" }, o.anchor_drift_m != null ? `${o.anchor_drift_m}m` : "—"),
         el("td", { style: `font-size:11px;font-weight:700;color:${driftColor[sev]}` }, sev.toUpperCase()),
@@ -2236,7 +2312,7 @@ function _matrixTab(ctx, el, cs, calData) {
     el("th", {}, "Point"),
     ...matrix.scanners.map(src => el("th",
       { style: "font-size:10px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
-      pathLoss[src].scanner_name || src)),
+      _rxShown(ctx, src, pathLoss[src].scanner_name))),
   ]));
   const tbody = el("tbody");
   for (const row of matrix.rows) {
@@ -2526,7 +2602,7 @@ function _tuneTab(ctx, el, cs, calData) {
     wrap.appendChild(el("div", { class: "card" }, [
       el("div", { style: "font-weight:700;font-size:14px;margin-bottom:6px;color:#52b788" }, "No Maps Uploaded"),
       el("div", { style: "font-size:12px;color:#94a3b8" },
-        "Upload floor plan images in the Maps tab first, then return here to fine-tune receiver positions."),
+        "Upload floor plan images in Mapping first, then return here to fine-tune receiver positions."),
     ]));
     return wrap;
   }
@@ -2535,7 +2611,7 @@ function _tuneTab(ctx, el, cs, calData) {
   wrap.appendChild(el("div", { class: "card", style: "border-color:#52b788" }, [
     el("div", { style: "font-weight:700;font-size:14px;margin-bottom:6px;color:#52b788" }, "Receiver Position Tuning"),
     el("div", { style: "font-size:12px;color:#94a3b8;line-height:1.5" },
-      "Drag BLE scanner markers to match their real-world positions. The 3D view matches the Overview map. Saves go to the fabric."),
+      "Drag BLE scanner markers to match their real-world positions. The 3D view matches the Overview map. Saves go to the room and receiver layout."),
   ]));
 
   // ── Constants & state ─────────────────────────────────────────────────────
@@ -2742,9 +2818,9 @@ function _tuneTab(ctx, el, cs, calData) {
           const [px, py] = iso(wx, wy, z);
           const isSel = ts.selectedRx && ts.selectedRx.mapId === m.id && ts.selectedRx.rxId === r.id;
           const rx = Math.round(px), ry = Math.round(py);
-          const _full = r.label || r.id || "R";
+          const _full = _rxShown(ctx, r.source, r.label || r.id) || "R";
           const lbl = _full.length > 20 ? _full.substring(0, 19) + "…" : _full;
-          const tip = `${r.label || r.id || "Receiver"}${r.room ? " | Room: " + r.room : ""} | x: ${(r.x * 100).toFixed(1)}% y: ${(r.y * 100).toFixed(1)}%`;
+          const tip = `${_rxShown(ctx, r.source, r.label || r.id) || "Receiver"}${r.room ? " | Room: " + r.room : ""} | x: ${(r.x * 100).toFixed(1)}% y: ${(r.y * 100).toFixed(1)}%`;
 
           s += `<g data-rx-id="${_esc(r.id)}" data-map-id="${_esc(m.id)}" data-z="${z}" data-tip="${_esc(tip)}" style="cursor:grab">`;
           // Transparent hit area for easier clicking/dragging
@@ -3400,7 +3476,7 @@ function _tuneTab(ctx, el, cs, calData) {
     const _fabPos = (ctx.state.model?.scanner_positions_m || {})[rx.source];
     const _posStr = _fabPos ? `${_fabPos.x_m?.toFixed(1)}m, ${_fabPos.y_m?.toFixed(1)}m` : `${(rx.x * 100).toFixed(1)}%, ${(rx.y * 100).toFixed(1)}%`;
     const lines = [
-      `<b style="color:#52b788">${_esc(rx.label || rx.id)}</b>`,
+      `<b style="color:#52b788">${_esc(_rxShown(ctx, rx.source, rx.label || rx.id))}</b>`,
       `Floor: ${_esc(_floorName)}`,
       `Room: ${_esc(rx.room || "\u2014")}`,
       `Position: ${_posStr}`,
@@ -3422,7 +3498,7 @@ function _tuneTab(ctx, el, cs, calData) {
       const zBtn = document.createElement("button");
       zBtn.className = "btn inline";
       zBtn.style.cssText = "font-size:10px;padding:2px 10px";
-      zBtn.textContent = "Save Z";
+      zBtn.textContent = "Save height";
       zBtn.title = "Mounting height above this scanner's own floor. Used for 3D distance; survives map syncs.";
       zBtn.addEventListener("click", async () => {
         const v = parseFloat(zInp.value);
@@ -3460,7 +3536,7 @@ function _tuneTab(ctx, el, cs, calData) {
               z_m: Math.round(Math.max(0, Math.min(100, v)) * 100) / 100,
             };
           } catch (_e) { /* publication is best-effort */ }
-          ctx.toast(`${rx.label || rx.source}: height set to ${v} m`);
+          ctx.toast(`${((ctx.state.live?.snapshot?.ble?.radios || []).find(x => x.source === rx.source)?.display_name) || rx.label || rx.source}: height set to ${v} m`);
           ts._tuneRev = (ts._tuneRev || 0) + 1;
           if (ctx.actions.modelRefresh) await ctx.actions.modelRefresh();
         } catch (e) {
@@ -3549,7 +3625,7 @@ function _tuneTab(ctx, el, cs, calData) {
   placeBanner.style.cssText = "display:none;background:#1a2e0e;border:2px solid #52b788;border-radius:8px;padding:8px 14px;font-size:12px;color:#a7f3d0;text-align:center";
   function _refreshPlaceBanner() {
     if (ts.pendingPlace) {
-      const nm = ts.pendingPlace.name || ts.pendingPlace.source || "radio";
+      const nm = ts.pendingPlace.shown || ts.pendingPlace.name || ts.pendingPlace.source || "radio";
       placeBanner.innerHTML = `<b style="color:#52b788">Double-click</b> on the 3D map to place <b style="color:#fbbf24">${_esc(nm)}</b> &nbsp; <span style="color:#94a3b8;cursor:pointer;text-decoration:underline" id="_cancelPlace">Cancel</span>`;
       placeBanner.style.display = "block";
       const cancelEl = placeBanner.querySelector("#_cancelPlace");
@@ -3635,7 +3711,7 @@ function _tuneTab(ctx, el, cs, calData) {
       const lbl = document.createElement("span");
       lbl.style.cssText = `flex:1;font-size:12px;color:${isPlaced ? "#d1d5db" : "#e2e8f0;font-weight:600"}`;
       const area = rd.area_name ? ` (${rd.area_name})` : "";
-      lbl.textContent = `${nm || src || "Unknown"}${area}`;
+      lbl.textContent = `${rd.display_name || nm || src || "Unknown"}${area}`;
       row.appendChild(lbl);
 
       if (isPlaced) {
@@ -3669,7 +3745,7 @@ function _tuneTab(ctx, el, cs, calData) {
           // A demo radio can be looked at, never placed (#88).
           const _blocked = tuneWriteBlock(ctx.state);
           if (_blocked) { ctx.toast(_blocked, true); return; }
-          ts.pendingPlace = { source: src, name: nm, area_name: rd.area_name || "" };
+          ts.pendingPlace = { source: src, name: nm, shown: rd.display_name || "", area_name: rd.area_name || "" };
           _refreshRadiosList();
           _refreshPlaceBanner();
         });
@@ -3805,7 +3881,7 @@ function _showPosHelp(ctx) {
       <li><b>Calibration reference</b> &mdash; PadSpan records which Bluetooth scanners can see this
         beacon at this position, and how strong the signal is. Over time, this builds a
         <em>radio fingerprint database</em> that maps signal strengths to physical locations.</li>
-      <li><b>k-NN positioning</b> &mdash; When PadSpan sees a device with similar signal readings
+      <li><b>Matching to calibration points</b> &mdash; When PadSpan sees a device with similar signal readings
         to a known calibration point, it estimates the device's position using k-Nearest Neighbors
         (k-NN). More pinned beacons at accurate positions = better positioning accuracy.</li>
       <li><b>Sub-room tracking</b> &mdash; Unlike room-level presence which only knows "Kitchen" or
@@ -3893,6 +3969,32 @@ function _resolveBeaconAddr(bkKey, snap) {
   return bkKey.replace(/^(ble:|entity:|ibeacon:)/, "");
 }
 
+// Ids a Beacon Tune hard relocation deletes: this beacon's own earlier
+// Beacon Tune points (source "beacon_tune") and its automatic "[auto]"
+// points, both taken where the beacon sat. Points collected by carrying the
+// same device (Pin & Listen, Roam, Walk a room) are never touched. Points
+// saved before Beacon Tune marked its points carry no source and are kept.
+// Two beacons can share a name, so a name alone never takes an [auto] point
+// (those always carry their beacon's key) or a point whose device is another
+// placed beacon (ids.others: their keys and addresses).
+function _beaconTunePurgeIds(points, ids, protectedIds) {
+  const want = new Set([ids.deviceId, ids.key].filter(Boolean).map(v => String(v).toUpperCase()));
+  const lbls = new Set([ids.label, ids.key].filter(Boolean).map(v => String(v).toUpperCase()));
+  const others = new Set((ids.others || []).filter(Boolean).map(v => String(v).toUpperCase()));
+  const out = [];
+  for (const pt of points || []) {
+    if (!pt || !pt.id || (protectedIds && protectedIds.has(pt.id))) continue;
+    const lbl = String(pt.label || "");
+    const auto = lbl.startsWith("[auto]");
+    if (pt.source !== "beacon_tune" && !auto) continue;
+    const dev = String(pt.device_id || "").toUpperCase();
+    if (dev && want.has(dev)) { out.push(pt.id); continue; }
+    if (auto || (dev && others.has(dev))) continue;
+    if (lbls.has(lbl.toUpperCase())) out.push(pt.id);
+  }
+  return out;
+}
+
 // ── Beacon Tune tab — 3D iso map with draggable beacon markers ───────────────
 function _beaconTuneTab(ctx, el, cs, calData) {
   const wrap = el("div", { style: "display:flex;flex-direction:column;gap:10px" });
@@ -3904,7 +4006,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     wrap.appendChild(el("div", { class: "card" }, [
       el("div", { style: "font-weight:700;font-size:14px;margin-bottom:6px;color:#52b788" }, "No Maps Uploaded"),
       el("div", { style: "font-size:12px;color:#94a3b8" },
-        "Upload floor plan images in the Maps tab first, then return here to mark beacon reference positions."),
+        "Upload floor plan images in Mapping first, then return here to mark beacon reference positions."),
     ]));
     return wrap;
   }
@@ -3914,6 +4016,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" }, [
       el("span", { style: "background:#f59e0b;color:#000;font-weight:700;font-size:11px;padding:2px 8px;border-radius:4px" }, "EXPERIMENTAL"),
       el("span", { style: "font-weight:700;font-size:14px;color:#f59e0b" }, "Beacon Tune"),
+      ctx.helpers.helpBtn("calibration_beacon"),
     ]),
     el("div", { style: "font-size:12px;color:#94a3b8;line-height:1.5" },
       "Mark where beacons (AirTags, Tiles, key fobs) are right now on the 3D floor stack. Drag a beacon to reposition it — a 60-second radio capture starts automatically. After the timer finishes, calibration data is saved. A beacon you place from the list is pinned there as a fixed beacon, unless PadSpan knows it moves (a phone with its IRK, a Find My tag it has followed across an address change, anything you follow): that one goes back to live tracking after the capture, as does a labelled device shown at its room's centre. Moving a beacon that is already pinned moves its pin. Follow a tag that moves before placing it. Green circles show scanner positions for reference."),
@@ -4256,9 +4359,9 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           const [wx, wy] = xf.mapPt(r.x || 0, r.y || 0);
           const [px, py] = iso(wx, wy, z);
           const rx = Math.round(px), ry = Math.round(py);
-          const _full = r.label || r.id || "R";
+          const _full = _rxShown(ctx, r.source, r.label || r.id) || "R";
           const lbl = _full.length > 20 ? _full.substring(0, 19) + "…" : _full;
-          const tip = `Scanner: ${r.label || r.id || "Receiver"}${r.room ? " | Room: " + r.room : ""}${!_isLive ? " (offline)" : ""}`;
+          const tip = `Scanner: ${_rxShown(ctx, r.source, r.label || r.id) || "Receiver"}${r.room ? " | Room: " + r.room : ""}${!_isLive ? " (offline)" : ""}`;
           const _rxCol = _isLive ? "#52b788" : "#4a6052";
           s += `<g data-tip="${_esc(tip)}" style="cursor:default;opacity:${_isLive ? 0.6 : 0.3}">`;
           s += `<circle cx="${rx}" cy="${ry}" r="10" fill="none" stroke="${_rxCol}" stroke-width="1.2" opacity="0.5"/>`;
@@ -4289,11 +4392,11 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           const [px, py] = iso(wx, wy, z);
           const isSel = bs.selectedBk && bs.selectedBk.mapId === m.id && bs.selectedBk.bkId === bk.id;
           const bx = Math.round(px), by = Math.round(py);
-          const lbl = (liveObj?.user_label || liveObj?.name || bk.label || bk.key || "B").substring(0, 8);
+          const lbl = (liveObj ? deviceName(liveObj, "B") : (bk.label || bk.key || "B")).substring(0, 8);
           const detectedRoom = isLive && liveObj?.room ? liveObj.room : _detectRoom(useX, useY, m);
           const fillColor = isLive && !isTimerActive ? "#52b788" : "#5eead4";
           const confidence = liveObj?.knn_confidence;
-          const tipParts = [liveObj?.user_label || liveObj?.name || bk.label || bk.key || "Beacon"];
+          const tipParts = [liveObj ? deviceName(liveObj, "Beacon") : (bk.label || bk.key || "Beacon")];
           if (detectedRoom) tipParts.push("Room: " + detectedRoom);
           tipParts.push(`Pinned: x ${(useX * 100).toFixed(1)}% y ${(useY * 100).toFixed(1)}%`);
           // Show server estimate in tooltip if available
@@ -4434,7 +4537,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     const opt = document.createElement("option");
     opt.value = o.key;
     const kindBadge = o.kind === "ibeacon" ? " [iBeacon]" : o.kind === "private_ble" ? " [Private BLE]" : " [BLE]";
-    opt.textContent = (o.user_label || o.name || o.key) + (o.rssi ? ` (${o.rssi} dBm)` : "") + kindBadge;
+    opt.textContent = pickName(o, o.key) + (o.rssi ? ` (${o.rssi} dBm)` : "") + kindBadge;
     bkSel.appendChild(opt);
   }
 
@@ -5306,7 +5409,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
             if (rd.samples.length < 5) continue;
             const mean = rd.samples.reduce((a, b) => a + b, 0) / rd.samples.length;
             const variance = rd.samples.reduce((a, v) => a + (v - mean) ** 2, 0) / rd.samples.length;
-            if (Math.sqrt(variance) > 15) { highVar = rd.name || src; break; }
+            if (Math.sqrt(variance) > 15) { highVar = _rxLine(ctx, src, rd.name); break; }
           }
           entry.warning = highVar ? `\u26a0 High variance on ${highVar}` : "";
         }
@@ -5377,9 +5480,12 @@ function _beaconTuneTab(ctx, el, cs, calData) {
         if (doRelocation) {
           const confirmPurge = confirm(
             `This is the 3rd consecutive calibration for "${entry.bk.label || bkKey}" within a few minutes.\n\n` +
-            `This will REPLACE all previous calibration data for this beacon with the new readings.\n\n` +
-            `Choose OK to replace old data (hard relocation).\n` +
-            `Choose Cancel to keep old data and just add this as another data point.`
+            `OK deletes this beacon's earlier Beacon Tune points (and its automatic [auto] points) and keeps the new readings. ` +
+            `Points you collected by carrying it (Pin & Listen, Roam, Walk a room) and Calibration Guide points are kept, ` +
+            `except Guide points saved by 0.38.209 to 0.38.217, which count as Beacon Tune points. ` +
+            `If it keeps showing at the old spot, delete the kept points by hand on the Model tab.\n\n` +
+            `Choose OK to replace them (hard relocation).\n` +
+            `Choose Cancel to keep them and just add this as another data point.`
           );
           if (!confirmPurge) doRelocation = false;
         }
@@ -5389,23 +5495,18 @@ function _beaconTuneTab(ctx, el, cs, calData) {
         const _purgeOldPoints = async (protectedIds) => {
           try {
             const calData = await ctx.actions.calibrationGet();
-            const allPts = calData?.points || [];
-            const myDev = (deviceId || "").toUpperCase();
-            const myLbl = (entry.bk.label || "").toUpperCase();
-            const myKey = bkKey.toUpperCase();
+            const others = [];
+            for (const bks of Object.values(bs.draftBeacons || {})) {
+              for (const b of bks || []) {
+                if (b && b.key && b.key !== bkKey) others.push(b.key, _resolveBeaconAddr(b.key, snap3));
+              }
+            }
+            const ids = _beaconTunePurgeIds(calData?.points || [],
+              { deviceId, label: entry.bk.label, key: bkKey, others }, protectedIds);
             let purged = 0;
-            for (const pt of allPts) {
-              if (protectedIds.has(pt.id)) continue;
-              const ptDev = (pt.device_id || "").toUpperCase();
-              const ptLbl = (pt.label || "").toUpperCase();
-              const isMatch =
-                (ptDev && myDev && ptDev === myDev) ||
-                (ptDev && myKey && ptDev === myKey) ||
-                (ptLbl && myLbl && ptLbl === myLbl) ||
-                (ptLbl && myKey && ptLbl === myKey);
-              if (!isMatch) continue;
+            for (const id of ids) {
               try {
-                await ctx.actions.calibrationDeletePoint(pt.id);
+                await ctx.actions.calibrationDeletePoint(id);
                 purged++;
               } catch (_) { /**/ }
             }
@@ -5430,6 +5531,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           room: room,
           device_id: deviceId,
           label: entry.bk.label || entry.bk.key || "",
+          source: "beacon_tune",
           scanner_readings: scannerReadings,
           weight: doRelocation ? 5.0 : weight,
         };
@@ -5452,7 +5554,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
           if (!room) _warns.push("no room detected");
           const _warnStr = _warns.length ? " | " + _warns.join(", ") : "";
           if (doRelocation) {
-            ctx.toast(`HARD RELOCATION: ${_bkName} — old data replaced. ${_scanInfo}${_roomInfo}${_warnStr}`);
+            ctx.toast(`HARD RELOCATION: ${_bkName} — earlier Beacon Tune points replaced. ${_scanInfo}${_roomInfo}${_warnStr}`);
           } else {
             const weightLabel = round > 1 ? ` (round ${round}, ${weight.toFixed(1)}x)` : "";
             ctx.toast(`Saved: ${_bkName}${weightLabel} — ${_scanInfo}${_roomInfo}${_warnStr}`);
@@ -5648,7 +5750,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
         const relocBanner = document.createElement("div");
         relocBanner.style.cssText = "margin-top:8px;background:#3b1219;border:2px solid #f87171;border-radius:8px;padding:8px 12px;font-size:12px;color:#fecaca";
         const ago = elapsed < 60000 ? "just now" : `${Math.floor(elapsed / 60000)}m ago`;
-        relocBanner.innerHTML = `<b style="color:#f87171">HARD RELOCATION</b> &mdash; All previous calibration data for <b style="color:#5eead4">${_esc(bs._lastRelocation.label)}</b> was purged (${ago}). The new position is locked at 5.0\u00d7 weight. If the beacon still appears in the wrong location, wait 10\u201315 seconds for the server to recalculate.`;
+        relocBanner.innerHTML = `<b style="color:#f87171">HARD RELOCATION</b> &mdash; The earlier Beacon Tune points for <b style="color:#5eead4">${_esc(bs._lastRelocation.label)}</b> were deleted (${ago}); points collected by carrying it were kept. The new position is locked at 5.0\u00d7 weight. If the beacon still appears in the wrong location, wait 10\u201315 seconds for the server to recalculate.`;
         infoCard.appendChild(relocBanner);
       }
     }
@@ -5789,7 +5891,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
     if (!visibleObjs.length) {
       const msg = document.createElement("div");
       msg.style.cssText = "font-size:12px;color:#94a3b8";
-      msg.textContent = "No BLE objects available. Label objects in the Objects tab or follow them in the Follow tab.";
+      msg.textContent = "No BLE objects available. Name them in Devices → By Room or follow them on Follow.";
       availCard.appendChild(msg);
       return;
     }
@@ -5827,7 +5929,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
       nameCol.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:1px";
       const nameEl = document.createElement("span");
       nameEl.style.cssText = `font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${isPinned ? "#d1d5db" : "#e2e8f0"};${isPinned ? "" : "font-weight:600"}`;
-      nameEl.textContent = obj.user_label || obj.name || obj.key;
+      nameEl.textContent = pickName(obj, obj.key);
       nameCol.appendChild(nameEl);
       // Detail line: kind + RSSI + room
       const detailParts = [];
@@ -5981,8 +6083,8 @@ function _beaconTuneTab(ctx, el, cs, calData) {
       nameRow.appendChild(icon);
       const nameEl = document.createElement("span");
       nameEl.style.cssText = "font-size:12px;font-weight:600;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
-      nameEl.textContent = obj?.user_label || obj?.name || bk.label || bk.key;
-      nameEl.title = obj?.user_label || obj?.name || bk.label || bk.key;
+      nameEl.textContent = obj ? pickName(obj, bk.key) : (bk.label || bk.key);
+      nameEl.title = obj ? pickName(obj, bk.key) : (bk.label || bk.key);
       nameRow.appendChild(nameEl);
       leftCol.appendChild(nameRow);
 
@@ -6112,7 +6214,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
       if (roomName) {
         const roomBadge = document.createElement("span");
         const rc = roomColorFn(roomName);
-        roomBadge.style.cssText = `font-size:10px;padding:1px 6px;border-radius:3px;background:${rc}18;color:${rc};border:1px solid ${rc}40`;
+        roomBadge.style.cssText = `font-size:10px;padding:1px 6px;border-radius:3px;background:${ctx.helpers.roomColorAlpha(rc, "18")};color:${rc};border:1px solid ${ctx.helpers.roomColorAlpha(rc, "40")}`;
         roomBadge.textContent = roomName;
         badgeRow.appendChild(roomBadge);
       }
@@ -6171,7 +6273,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
         for (const [src, info] of radioEntries.slice(0, 6)) {
           const chip = document.createElement("span");
           const rssiColor = (info.rssi || -200) > -70 ? "#52b788" : (info.rssi || -200) > -85 ? "#f59e0b" : "#f87171";
-          const shortName = (info.name || src || "?").substring(0, 10);
+          const shortName = (_rxShown(ctx, src, info.name) || "?").substring(0, 10);
           chip.style.cssText = `padding:1px 6px;border-radius:3px;background:#0a1a12;border:1px solid #1b3526;color:#d1d5db;white-space:nowrap`;
           chip.innerHTML = `${_esc(shortName)} <span style="color:${rssiColor};font-weight:600">${_esc(String(info.rssi ?? "?"))}</span>`;
           if (info.age_s != null) chip.innerHTML += ` <span style="color:#64748b">${Math.round(info.age_s)}s</span>`;
@@ -6676,7 +6778,7 @@ function _beaconTuneTab(ctx, el, cs, calData) {
       const src = r.source || "";
       if (!src || seen.has(src)) continue;
       seen.add(src);
-      out.push({ source: src, name: (radios.find(x => x.source === src)?.name) || r.label || src });
+      out.push({ source: src, name: _rxShown(ctx, src, (radios.find(x => x.source === src)?.name) || r.label) });
     }
     return out;
   }

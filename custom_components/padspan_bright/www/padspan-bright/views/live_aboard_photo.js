@@ -35,12 +35,16 @@ const CMD = "padspan_bright/house3d_from_photo";
 const GROUPS = ["furniture", "device"];
 const BOX = "other";
 export const DIMS = [["width_m", "Width"], ["depth_m", "Depth"], ["height_m", "Height"]];
-export const PHOTO_MAX_PX = 1280;
-const SETTINGS_WHERE = "Settings → UI Structure → Atlas → Live Aboard";
+// 1024 px (was 1280, 2026-10-31): the AI reads it in ~8 s instead of ~10.6 s, and nothing it is
+// asked needs finer detail (kind, colours, rough sizes, a figure; no text is read off a tag or receiver).
+export const PHOTO_MAX_PX = 1024;
+const SETTINGS_WHERE = "Settings → AI";
 const NEEDS = "Reading photos needs Home Assistant 2025.8 or newer, with an AI Task that can read pictures "
   + `(one with a vision model), chosen in ${SETTINGS_WHERE}.`;
 
 export const errText = (e) => String((e && (e.message || e.code)) || e || "Something went wrong.");
+// The answer came from the backup AI Task (Settings → AI): the main one was away.
+export const BACKUP_NOTE = "Read by the backup AI task.";
 const m2 = (v) => `${Number(v).toFixed(2)} m`;
 
 /** The kinds a photo can be read as, in the Build menu's order: [{kind, name}]. */
@@ -51,14 +55,22 @@ export function photoKinds(F, groups = GROUPS){
     .map(k => ({ kind: k, name: F.FURNITURE[k].name || k }));
 }
 
-/** Which AI Task reads the photo, and whether the photo leaves the house. */
+/** Which AI Task reads the photo, and whether the photo leaves the house;
+ *  with a backup AI Task set (info.backup), the backup's too: it reads
+ *  whenever the main one is away (ws_house3d_photo.ask_ai). */
 export function aiNote(info){
   const name = (info && info.name) || "The AI Task";
-  const where = info && info.local === true ? "It runs in your home, so the photo stays in the house."
-    : info && info.local === false ? "It runs in the cloud: the photo leaves the house for that service."
-    : "If it runs in the cloud, the photo leaves the house for that service.";
-  return `${name} will read the photo. ${where} PadSpan never keeps the photo.`;
+  const whereOf = (local, it = "it") => (local === true ? `${it[0].toUpperCase()}${it.slice(1)} runs in your home, so the photo stays in the house.`
+    : local === false ? `${it[0].toUpperCase()}${it.slice(1)} runs in the cloud: the photo leaves the house for that service.`
+    : `If ${it} runs in the cloud, the photo leaves the house for that service.`);
+  const bk = info && info.backup ? (info.backup_name || info.backup) : null;
+  if (bk && info.main_away) return `The main AI Task is away, so the backup, ${bk}, will read the photo. ${whereOf(info.backup_local)} PadSpan never keeps the photo.`;
+  const also = bk ? ` If it's away, the backup, ${bk}, reads it instead. ${whereOf(info.backup_local, "that one")}` : "";
+  return `${name} will read the photo. ${whereOf(info && info.local)}${also} PadSpan never keeps the photo.`;
 }
+
+/** Whether a photo could leave the house: the main AI Task, or a backup that could read it, not local. */
+export const mayLeave = (info) => !!info && (info.local !== true || (!!info.backup && info.backup_local !== true));
 
 /** The AI's own size is taken only when it was sure and gave all three. */
 export function sizeTrusted(size){
@@ -346,6 +358,7 @@ export async function photoFlow(ctx){
         el("div", { class: "row" }, (r.colors || []).map(c => el("span", { class: "swatch", title: c, style: `background:${c}` })),
           a.details && a.details.title ? el("span", { class: "muted" }, a.details.title) : null),
         el("p", {}, read),
+        a.by_backup ? el("p", { class: "muted" }, BACKUP_NOTE) : null,
         trusted ? el("p", { class: "note" }, "It was measured against something of known size in the shot.") : null,
         trusted ? el("div", { class: "row" }, el("button", { class: "go", onclick: () => finish(m.accept()) }, "Use these sizes")) : null,
         el("p", {}, trusted ? "Or type one real size:" : "Type one real size (usually the width). The other two follow the photo."),

@@ -918,6 +918,9 @@ export function wireHoverHud(isoDiv, opts){
 
   // A zero-height sticky anchor rides the stage's own scroll (both axes)
   // without pushing the drawing down; the box hangs off it.
+  // A stage wired before (a kept card: the poll wires it again each tick)
+  // loses the last box and its listeners first, so it holds one of each.
+  if (isoDiv._psHudOff) isoDiv._psHudOff();
   const anchor = mk("div", "lv-hoverhud-anchor");
   const hud = mk("div", "lv-hoverhud");
   hud.hidden = true;
@@ -995,15 +998,23 @@ export function wireHoverHud(isoDiv, opts){
       hud.appendChild(mk("div", "lv-hoverhud-hit", [mk("span", "lv-hoverhud-k", "Click"), line]));
     }
   };
-  isoDiv.addEventListener("pointermove", (ev) => {
+  const onMove = (ev) => {
     if (ev.pointerType === "touch") return;
     if (hud.contains(ev.target)) { cancelHide(); return; }   // reading the HUD must not clear it
     if (opts.isDragging && opts.isDragging()) return;
     show(stackAt(ev.clientX, ev.clientY), roomAt(ev.clientX, ev.clientY));
-  });
+  };
+  isoDiv.addEventListener("pointermove", onMove);
   // Genuinely leaving the stage IS an unambiguous "done" — no grace needed,
   // unlike the mid-transit case show() itself now debounces.
   isoDiv.addEventListener("pointerleave", hideNow);
+  isoDiv._psHudOff = () => {
+    isoDiv.removeEventListener("pointermove", onMove);
+    isoDiv.removeEventListener("pointerleave", hideNow);
+    cancelHide();
+    if (anchor.parentNode) anchor.parentNode.removeChild(anchor);
+    isoDiv._psHudOff = null;
+  };
   return stackAt;
 }
 
@@ -1098,6 +1109,14 @@ export function screenHeight(slot, model, eid, l){
 export function wireUseSurface(isoDiv, api){
   const q = (sel) => isoDiv.querySelectorAll(sel);
   const svg = isoDiv.querySelector("svg");
+  // A drawing the poll patched keeps its parts (drawStageSvg): the last
+  // wiring comes off them first, so each is wired once, to this api: its
+  // listeners, a press under way (its timers, ring and readout) and the
+  // hover dimming (a touch screen never sends the mouseout).
+  if (svg && svg._psUnwire) svg._psUnwire();
+  const offs = [];
+  const on = (n, type, fn) => { n.addEventListener(type, fn); offs.push(() => n.removeEventListener(type, fn)); };
+  if (svg) svg._psUnwire = () => { for (const off of offs.splice(0)) off(); };
   const ringAt = (cx, cy, r) => pressRing(svg, cx, cy, r);
   const wirePress = (g, eid, cx, cy, ringR = 12) => {
     const l0 = api.lightsByEid[eid];
@@ -1112,7 +1131,8 @@ export function wireUseSurface(isoDiv, api){
       if (ring) { try { ring.remove(); } catch (_) {} ring = null; }
       if (readout) { try { readout.remove(); } catch (_) {} readout = null; }
     };
-    g.addEventListener("pointerdown", (e) => {
+    offs.push(clearAll);
+    on(g, "pointerdown", (e) => {
       if (e.button !== undefined && e.button !== 0 && e.pointerType === "mouse") return;
       e.stopPropagation();
       try { g.setPointerCapture(e.pointerId); } catch (_) {}
@@ -1124,7 +1144,7 @@ export function wireUseSurface(isoDiv, api){
         }, HOLD_MS);
       }
     });
-    g.addEventListener("pointermove", (e) => {
+    on(g, "pointermove", (e) => {
       if (!tracker.active) return;
       const r = tracker.move(e.clientX, e.clientY);
       if (r === "cancel") { clearAll(); return; }
@@ -1175,16 +1195,17 @@ export function wireUseSurface(isoDiv, api){
         setTimeout(() => api.rerender(), 500);
       }
     };
-    g.addEventListener("pointerup", finish);
-    g.addEventListener("pointercancel", finish);
-    g.addEventListener("contextmenu", e => e.preventDefault());
+    on(g, "pointerup", finish);
+    on(g, "pointercancel", finish);
+    on(g, "contextmenu", e => e.preventDefault());
     // Click is swallowed: the tracker already decided what the release meant.
-    g.addEventListener("click", e => { e.stopPropagation(); e.preventDefault(); });
+    on(g, "click", e => { e.stopPropagation(); e.preventDefault(); });
   };
   q(".lhex").forEach(g => {
     wirePress(g, g.dataset.eid, Number(g.dataset.cx), Number(g.dataset.cy));
-    g.addEventListener("mouseover", () => { g.style.opacity = String(Math.max(0.2, (parseFloat(g.getAttribute("opacity")) || 1) * 0.75)); });
-    g.addEventListener("mouseout", () => { g.style.opacity = ""; });
+    on(g, "mouseover", () => { g.style.opacity = String(Math.max(0.2, (parseFloat(g.getAttribute("opacity")) || 1) * 0.75)); });
+    on(g, "mouseout", () => { g.style.opacity = ""; });
+    offs.push(() => { g.style.opacity = ""; });
   });
   q(".lhalo").forEach(c => wirePress(c, c.dataset.eid, Number(c.getAttribute("cx")), Number(c.getAttribute("cy")), Number(c.getAttribute("r")) + 2));
   // The code chip is drawn INSIDE the marker's own group (see codeChipSvg in
@@ -1193,9 +1214,9 @@ export function wireUseSurface(isoDiv, api){
   // marker, so it is identical to tapping the glyph: quick switches, a
   // genuine 500ms hold opens the controls. It used to be its own always-open
   // target; Garry never asked for that split and it is gone.
-  q(".lroom").forEach(r => r.addEventListener("click", (e) => { e.stopPropagation(); api.openRoom(r.dataset.room); }));
-  q(".lstack").forEach(st => st.addEventListener("click", (e) => { e.stopPropagation(); api.openRoom(st.dataset.room, String(st.dataset.eids || "").split(",").filter(Boolean)); }));
-  q(".lfloor").forEach(f => f.addEventListener("click", (e) => { e.stopPropagation(); api.openFloor(f.dataset.z); }));
+  q(".lroom").forEach(r => on(r, "click", (e) => { e.stopPropagation(); api.openRoom(r.dataset.room); }));
+  q(".lstack").forEach(st => on(st, "click", (e) => { e.stopPropagation(); api.openRoom(st.dataset.room, String(st.dataset.eids || "").split(",").filter(Boolean)); }));
+  q(".lfloor").forEach(f => on(f, "click", (e) => { e.stopPropagation(); api.openFloor(f.dataset.z); }));
   // Door/window/lock barrier line (Garry, 2026-09-22: "the ability to click
   // on the line... bring up a card that clearly says this door/window is
   // open, and the ability to open/close it"). Only present at all when the
@@ -1204,7 +1225,7 @@ export function wireUseSurface(isoDiv, api){
   // there is nothing here for free to wire up either. A plain click is
   // safe (it only shows a card, never itself toggles anything), unlike the
   // builder's own hold-to-select gesture on the same element.
-  q(".lbarhit").forEach(hb => hb.addEventListener("click", (e) => {
+  q(".lbarhit").forEach(hb => on(hb, "click", (e) => {
     e.stopPropagation();
     const eid = hb.dataset.eid;
     if (!eid || !api.hass) return;
@@ -1647,7 +1668,12 @@ export function vacationOptionsOf(s) {
   s = s || {};
   return { dark_only: !!s.vacation_mode_dark_only, dark_offset_min: s.vacation_mode_dark_offset_min || 0,
            end_at: s.vacation_mode_end_at || 0, pause_home: !!s.vacation_mode_pause_home,
-           bedtime: s.vacation_mode_bedtime || "", max_on_min: s.vacation_mode_max_on_min || 0 };
+           bedtime: s.vacation_mode_bedtime || "", max_on_min: s.vacation_mode_max_on_min || 0,
+           max_lights: s.vacation_mode_max_lights || 0,
+           anchors: Array.isArray(s.vacation_mode_anchors) ? s.vacation_mode_anchors.slice() : [],
+           source: s.vacation_mode_source === "month" ? "month" : "last_week",
+           running: !!s.vacation_mode_enabled,
+           trip_source: s.vacation_mode_trip_source === "last_week" ? "last_week" : "month" };
 }
 export function vacationEndsText(s) {
   const ts = s && s.vacation_mode_end_at;
@@ -1685,6 +1711,28 @@ function _vacOptionsBox(host) {
     sel.addEventListener("change", () => save({ [key]: parseInt(sel.value, 10) }));
     return sel;
   };
+  // Where each weekday's routine comes from (Garry, 2026-10-31): last week
+  // or the monthly average. Fixed for a trip when it is turned on.
+  const SRC = { last_week: "Last week", month: "Monthly average" };
+  const srcNote = el("div", { class: "muted lv-vac-opt-note" }, "");
+  const paintSrcNote = () => {
+    srcNote.textContent = "Last week: each day plays like the same day last week. "
+      + "Monthly average: each weekday from the last month's average."
+      + (o.running ? ` This trip plays from ${o.trip_source === "last_week" ? "last week" : "the monthly average"}; `
+        + "a change applies the next time Vacation Mode is turned on." : "");
+  };
+  const srcBtns = Object.entries(SRC).map(([v, t]) => {
+    const b = el("button", { type: "button", "aria-pressed": String((o.source || "last_week") === v) }, t);
+    b.addEventListener("click", async () => {
+      const was = o.source || "last_week";
+      const paint = (cur) => srcBtns.forEach((x, i) => x.setAttribute("aria-pressed", String(Object.keys(SRC)[i] === cur)));
+      paint(v);
+      if (await save({ vacation_mode_source: v })) o.source = v; else paint(was);
+    });
+    return b;
+  });
+  const srcSeg = el("span", { class: "lv-vac-seg", role: "group", "aria-label": "Routine from" }, srcBtns);
+  paintSrcNote();
   // After dark, with how long after sunset.
   const dark = el("span", { class: "lv-vac-inline" }, [
     check("vacation_mode_dark_only", o.dark_only),
@@ -1712,11 +1760,71 @@ function _vacOptionsBox(host) {
   bed.value = o.bedtime || "";
   bed.addEventListener("change", async () => { if (!await save({ vacation_mode_bedtime: bed.value })) bed.value = o.bedtime || ""; else o.bedtime = bed.value; });
   const bedClear = el("button", { class: "btn inline", onclick: async () => { bed.value = ""; if (await save({ vacation_mode_bedtime: "" })) o.bedtime = ""; } }, "None");
+  // Evening lights (anchors): a tick per light Vacation Mode switches (the
+  // server's list: no group helpers, no team followers), up to 10. A saved
+  // one that is gone is listed too, so it can be unticked.
+  const anchors = new Set(o.anchors || []);
+  const anchorList = el("div", { class: "lv-vac-anchors", role: "group", "aria-label": "Evening lights" }, "Loading…");
+  const anchorTick = ([eid, name]) => {
+    const c = document.createElement("input");
+    c.type = "checkbox"; c.checked = anchors.has(eid);
+    c.addEventListener("change", async () => {
+      if (c.checked && anchors.size >= 10) { c.checked = false; status.textContent = "Up to 10 evening lights"; return; }
+      c.checked ? anchors.add(eid) : anchors.delete(eid);
+      if (!await save({ vacation_mode_anchors: [...anchors] })) { c.checked ? anchors.delete(eid) : anchors.add(eid); c.checked = !c.checked; }
+      else o.anchors = [...anchors];
+    });
+    return el("label", { class: "lv-vac-inline" }, [c, name]);
+  };
+  if (host.onVacationLights) {
+    Promise.resolve().then(() => host.onVacationLights()).catch(() => null).then((lights) => {
+      anchorList.textContent = "";
+      const known = new Set((lights || []).map((l) => l[0]));
+      const gone = [...anchors].filter((eid) => !known.has(eid)).map((eid) => [eid, eid + " (not found)"]);
+      const all = [...(lights || []), ...gone];
+      if (!all.length) anchorList.textContent = lights ? "No lights to choose from." : "Could not load the lights.";
+      for (const l of all) anchorList.appendChild(anchorTick(l));
+    });
+  }
+  // Preview: what the next 24 hours would look like.
+  const previewOut = el("div", { class: "lv-vac-preview", "aria-live": "polite" }, "");
+  const hm = (ts) => new Date(ts * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const showPreview = (r) => {
+    previewOut.textContent = "";
+    const lights = (r && r.lights) || [];
+    if (r && r.source) previewOut.appendChild(el("div", { class: "lv-vac-opt-lbl" },
+      r.source === "month" ? "From the monthly average" : "From last week"));
+    if (!lights.length) {
+      previewOut.appendChild(el("div", { class: "muted" },
+        r && r.routine === "none" ? "Nothing yet: there is no light history to learn a routine from." : "Nothing would be switched in the next 24 hours."));
+      return;
+    }
+    for (const l of lights) {
+      previewOut.appendChild(el("div", { class: "lv-vac-preview-row" }, [
+        el("span", { class: "lv-vac-opt-lbl" }, l.name + (l.anchor ? " (evening light)" : "")),
+        el("span", { class: "muted" }, l.on.map(([a, b]) => `${hm(a)}–${hm(b)}`).join(", ")),
+      ]));
+    }
+  };
+  const previewBtn = el("button", { class: "btn inline", onclick: async () => {
+    if (previewBtn.disabled) return;
+    previewBtn.disabled = true;
+    previewOut.textContent = "Working it out…";
+    let r = null;
+    try { r = host.onVacationPreview ? await host.onVacationPreview() : null; } catch (e) { r = null; }
+    finally { previewBtn.disabled = false; }
+    if (r) showPreview(r); else previewOut.textContent = "Could not make the preview.";
+  } }, "Show the next 24 hours");
   _vacOptsNode = el("div", { class: "lv-vacation lv-vacation-opts", role: "dialog", "aria-label": "Vacation Mode options" }, [
     el("div", { class: "lv-vac-opt-head" }, [
       el("span", { class: "lv-vacation-label" }, "🌴 Vacation Mode options"),
+      host.helpBtn ? host.helpBtn("vacation_mode") : null,
       status,
       el("button", { class: "btn inline", style: "margin-left:auto", onclick: () => _vacOptsToggle(host, false) }, "Close"),
+    ]),
+    el("div", { class: "lv-vac-opt" }, [
+      el("div", { class: "lv-vac-opt-main" }, [el("span", { class: "lv-vac-opt-lbl" }, "Routine from"), srcSeg]),
+      srcNote,
     ]),
     row("Only after dark", dark, "Lights it would turn on during the day stay off."),
     row("Ends", el("span", { class: "lv-vac-inline" }, [end, endClear]),
@@ -1728,6 +1836,15 @@ function _vacOptionsBox(host) {
     row("Longest on", select("vacation_mode_max_on_min", o.max_on_min || 0, [
       [0, "no limit"], [60, "1 hour"], [120, "2 hours"], [180, "3 hours"], [240, "4 hours"], [360, "6 hours"]]),
       "A light it turned on goes off after this, and stays off as long."),
+    row("Most lights on at once", select("vacation_mode_max_lights", o.max_lights || 0, [
+      [0, "no limit"], [1, "1"], [2, "2"], [3, "3"], [4, "4"], [6, "6"], [8, "8"], [12, "12"]]),
+      "Lights it already has on keep their place; the rest wait. Evening lights and lights turned on by hand don't count."),
+    host.onVacationLights ? row("Evening lights", anchorList,
+      "On when they were on in the evening last week (or on average), like a porch or hall light, and off at bedtime; "
+      + "turned off in the evening, one comes back on within 5 minutes. Up to 10.") : null,
+    host.onVacationPreview ? row("Preview", previewBtn,
+      "What it would switch over the next 24 hours, with these options. Nothing is switched.") : null,
+    previewOut,
     el("div", { class: "muted lv-vac-opt-note" },
       "binary_sensor.padspan_vacation_mode shows it in Home Assistant, and the padspan_bright_vacation_mode event fires on every change, for your own automations."),
   ]);
@@ -2983,6 +3100,8 @@ function _laStored(){
   return null;
 }
 const _laCannotHere = () => _laStored() || (_laNoGl ? "no_webgl" : null);
+/** Why this device shows no 3D view (no WebGL, too slow), or null: the Furnish tab's way to the Plans list. */
+export const la3dCannotHere = () => _laCannotHere();
 function _laRemember(why){
   if (!_LA_KEEP.includes(why) || _laStored() === why) return;
   try { _laKeptIn(why).setItem(_LA_FAILED, JSON.stringify({ build: _LA_BUILD, why })); } catch (_) {}
@@ -3037,6 +3156,133 @@ const _LA_WHY = {
 // A hold then a drag in 3D dims exactly as wirePress does, with its two helpers.
 export { _exactBrightness, _tellProblems };
 
+// ── The poll's redraw, patched (host.patchSvg: the sidebar's 5 s tick) ───────
+// The sidebar builds a fresh card every poll, and the map's SVG with it. The
+// drawing is one flat run of small parts under <svg> (floor plates, rooms,
+// walls, each marker, the legend), and from one tick to the next almost all
+// of them come out byte for byte the same. So the drawing is still made as one
+// string, as ever; the last tick's <svg> moves into the new stage and only the
+// parts whose markup changed are replaced. What is left is what a full rebuild
+// would have made: the same markup, part for part. A different <svg> tag
+// (size, viewBox), another key (floor, gaps, zoom, settings, map), a stage
+// that already holds something, or anything that does not split cleanly:
+// the full rebuild, as before.
+
+/** An <svg>…</svg> string as {open, kids, close}: its tag, each top-level
+ *  part's markup (a text run is a part too), and "</svg>". null when it does
+ *  not split cleanly (the caller rebuilds in full). */
+export function svgParts(str){
+  const s = String(str || "");
+  if (!s.startsWith("<svg") || !s.endsWith("</svg>")) return null;
+  const end = s.length - 6;
+  // The end of the tag starting at i (its ">"), quotes respected; -1 if none.
+  const tagEnd = (i) => {
+    let q = "";
+    for (let j = i + 1; j < s.length; j++) {
+      const c = s[j];
+      if (q) { if (c === q) q = ""; }
+      else if (c === '"' || c === "'") q = c;
+      else if (c === ">") return j;
+    }
+    return -1;
+  };
+  const o = tagEnd(0);
+  if (o < 0 || o >= end || s[o - 1] === "/") return null;
+  const kids = [];
+  let i = o + 1, depth = 0, start = i;
+  while (i < end) {
+    if (s[i] !== "<") {
+      const n = s.indexOf("<", i);
+      const j = n < 0 || n > end ? end : n;
+      if (depth === 0) kids.push(s.slice(i, j));
+      i = j;
+      continue;
+    }
+    if (s.startsWith("<!--", i) || s.startsWith("<![CDATA[", i)) {
+      const close = s.startsWith("<!--", i) ? "-->" : "]]>";
+      const j = s.indexOf(close, i);
+      if (j < 0 || j + close.length > end) return null;
+      if (depth === 0) kids.push(s.slice(i, j + close.length));
+      i = j + close.length;
+      continue;
+    }
+    const j = tagEnd(i);
+    if (j < 0 || j >= end) return null;
+    if (depth === 0) start = i;
+    if (s[i + 1] === "/") depth--;
+    else if (s[j - 1] !== "/") depth++;
+    if (depth < 0) return null;
+    if (depth === 0) kids.push(s.slice(start, j + 1));
+    i = j + 1;
+  }
+  return depth === 0 ? { open: s.slice(0, o + 1), kids, close: "</svg>" } : null;
+}
+
+const _svgKept = new WeakMap();       // view -> the last drawing: {svg, open, kids, nodes, key}
+/** Draws svgStr into stage, patching the last drawing for this view when it
+ *  can (see above), else stage.innerHTML = svgStr. key = {text, model, floors}:
+ *  a full rebuild whenever any of them is not what the last drawing had.
+ *  Returns {full: true} or {full: false, replaced, kept} (the tests). */
+export function drawStageSvg(stage, svgStr, view, key){
+  const next = svgParts(svgStr);
+  const prev = view ? _svgKept.get(view) : null;
+  const same = prev && next && key && prev.key && prev.key.text === key.text && prev.key.model === key.model
+    && prev.key.floors === key.floors && prev.open === next.open;
+  // Only into a new, empty stage (the poll's new card), and never out of a
+  // card still on screen; or where it is, in the stage it is in (a kept
+  // card, host.keepCard: the rain, the hover box and the rest stay there).
+  const inPlace = !!(same && prev.svg.parentNode === stage);
+  if (same && (inPlace || (!stage.firstChild && !prev.svg.isConnected)) && prev.nodes.every(n => n.parentNode === prev.svg)) {
+    const svg = prev.svg, old = prev.kids, kids = next.kids;
+    // Each new part takes the first unused old node with the same markup,
+    // in order; the rest are made, all in one parse.
+    const pool = new Map();
+    old.forEach((k, i) => { const a = pool.get(k); if (a) a.push(i); else pool.set(k, [i]); });
+    const plan = [], made = [];
+    let at = 0;
+    for (const k of kids) {
+      const a = pool.get(k);
+      while (a && a.length && a[0] < at) a.shift();
+      if (a && a.length) { at = a.shift() + 1; plan.push(at - 1); }
+      else { plan.push(-1); made.push(k); }
+    }
+    let parsed = [];
+    if (made.length) {
+      const tmp = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      tmp.innerHTML = made.join("");
+      parsed = [...tmp.childNodes];
+    }
+    if (parsed.length === made.length) {
+      const used = new Set(plan.filter(i => i >= 0));
+      const tail = prev.nodes.length ? prev.nodes[prev.nodes.length - 1].nextSibling : svg.firstChild;
+      prev.nodes.forEach((n, i) => { if (!used.has(i)) svg.removeChild(n); });
+      const nodes = new Array(kids.length);
+      let ref = tail, m = parsed.length;
+      for (let j = kids.length - 1; j >= 0; j--) {
+        if (plan[j] >= 0) nodes[j] = prev.nodes[plan[j]];
+        else { nodes[j] = parsed[--m]; svg.insertBefore(nodes[j], ref); }
+        ref = nodes[j];
+      }
+      // Nothing else stays in the drawing but the people layer
+      // (atlas_aboard.js, [data-live]): a press ring left by a hold the
+      // poll cut short goes, as a full rebuild would take it.
+      const mine = new Set(nodes);
+      for (const n of [...svg.childNodes]) {
+        if (!mine.has(n) && !(n.getAttribute && n.getAttribute("data-live") !== null)) svg.removeChild(n);
+      }
+      if (!inPlace) stage.appendChild(svg);
+      _svgKept.set(view, { svg, open: next.open, kids, nodes, key });
+      return { full: false, replaced: made.length, kept: used.size };
+    }
+  }
+  stage.innerHTML = svgStr;
+  const svg = stage.firstChild;
+  if (view && key && next && svg && stage.childNodes.length === 1 && svg.childNodes.length === next.kids.length) {
+    _svgKept.set(view, { svg, open: next.open, kids: next.kids, nodes: [...svg.childNodes], key });
+  } else if (view) _svgKept.delete(view);
+  return { full: true };
+}
+
 // ── The map card: control row + iso map ──────────────────────────────────────
 // host = {
 //   el(tag,attrs,children)            DOM builder
@@ -3060,10 +3306,81 @@ function _abLoad(){
     .catch((err) => { console.warn("PadSpan: atlas_aboard failed to load", err); _abFailed = true; });
 }
 
+// Showcase's West Coast Forest: the trees behind the flat map (atlas_forest.js),
+// fetched the first time that theme is on and the Atlas draws it; any other
+// theme never fetches it. A failure leaves the map without trees.
+const FOREST_THEME = "west_coast_forest";
+let _FOREST = null, _forestLoading = null, _forestFailed = false;
+const _forestRedraw = new Map();          // slot -> the newest card's redraw
+function _forestLoad(){
+  if (_FOREST || _forestFailed || _forestLoading) return;
+  _forestLoading = import(`./atlas_forest.js${new URL(import.meta.url).search}`)
+    .then((m) => { _FOREST = m; for (const f of [..._forestRedraw.values()]) { try { f(); } catch (_) { /* the next card draws */ } } })
+    .catch((err) => { console.warn("PadSpan: atlas_forest failed to load", err); _forestFailed = true; });
+}
+
+// How long Whole house's "Yes, change the whole house" stays armed untouched.
+export const WH_ARM_MS = 10000;
+
+// ── The poll's map card, kept (host.keepCard: the sidebar's 5 s tick) ───────
+// The sidebar builds its page afresh every poll; the map card under it (its
+// toolbar, rail, drawers, chips, legend and the stage) came out and went in
+// again whole, and laying a new card out on a 4K wall was most of an update.
+// So the sidebar hands in one object it keeps (host.keepCard), and a card
+// still on screen and built from the same stays: the newest host goes into
+// the card's own closures (every control reads it when used), the layer bar
+// is built again only when what it shows changed (its counts, its dots), and
+// the drawing is patched in place (drawStageSvg) with everything on the stage
+// (the rain, the people, Live Aboard, the double-tap and the touch wiring)
+// kept as it is. Anything else the card is built from (_cardSig: a setting,
+// the tier, the layout, the floor, the spacing, an alert, the legend, another
+// map) builds a new card, as before. The Mapping tab hands no keepCard.
+const _CARD_DATA = new Set(["lightsByEid", "byRoom", "hiddenEids", "hiddenEidsMap", "ambient", "states", "entities", "config",
+  "regIds", "emergency", "floodLatches", "model", "floors", "view", "lightsLoading", "shownAt", "keepTable", "keepFocused", "keepCard"]);
+function _cardSig(host, extra){
+  return JSON.stringify([host, extra], (k, v) => (_CARD_DATA.has(k) ? undefined
+    : typeof v === "function" ? "fn" : v instanceof Set ? [...v].sort() : v));
+}
+// Alert pulse's alerts (host.alertPulse; null while off) and the openings they flag.
+function _cardAlerts(host){
+  if (!host.alertPulse) return { alerts: null, openings: null };
+  let wet = null;
+  try {
+    const w = host.weather;
+    const d = WX && w && w.settings ? WX.decideAtlasWeather(WX.weatherSettingsFrom(w.settings), w.states, w.entities, Date.now()) : null;
+    wet = d && (d.kind === "rain" || d.kind === "snow") ? d.kind : null;
+  } catch (_) { wet = null; }
+  const alerts = safetyAlerts(Object.values(host.lightsByEid || {}),
+    { wet, floodLatches: host.floodLatches || {}, doorInvert: doorInvertOf(host.model), nowMs: Date.now() });
+  const openings = {};
+  for (const a of alerts) if (a.kind === "rain_open" || a.kind === "left_open") openings[a.eid] = a.kind;
+  return { alerts, openings };
+}
+// The 3D house's part of the host while it is on (see h3 below), else null.
+const _cardH3 = (host) => (host.house3d && host.house3d.settings && host.house3d.settings.atlas_3d_enabled === true
+  && tierAtLeast(host.tier, "pro") ? host.house3d : null);
+// An el() that also notes what it made (tag, attributes, text): what a part
+// shows, as a key to compare from one tick to the next.
+const _noting = (el, notes) => (tag, attrs, kids) => {
+  notes.push([tag, Object.entries(attrs || {}).filter(([, v]) => typeof v !== "function"),
+    (Array.isArray(kids) ? kids : [kids]).filter(c => typeof c === "string" || typeof c === "number")]);
+  return el(tag, attrs, kids);
+};
+
+/** The Plans list there, from the 3D module (no GL asked of it): only ever on a press in that tab. */
+export const la3dPlansList = async (box, host) => (await import(`./live_aboard.js${new URL(import.meta.url).search}`)).openPlansList(box, host);
 export function buildLightsMapCard(hostIn){
+  const keep = hostIn.keepCard || null;
+  if (keep && keep.refresh && keep.card && keep.card.isConnected && keep.refresh(hostIn)) return keep.card;
+  // A new card: the last one leaves the page first, so its drawing can move
+  // into this one (drawStageSvg patches only a drawing no longer on screen).
+  if (keep) {
+    if (keep.card && keep.card.parentNode) keep.card.parentNode.removeChild(keep.card);
+    keep.card = null; keep.refresh = null;
+  }
   // The tier decides what is drawn, whatever the host asked for. One place,
   // for both hosts — see lightsHostForTier.
-  const host = lightsHostForTier(hostIn);
+  let host = lightsHostForTier(hostIn);
   const { el, view } = host;
   const floors = host.floors || [];
   // lv-atlascard: this card (the map and its bars) keeps its night colours in
@@ -3086,23 +3403,13 @@ export function buildLightsMapCard(hostIn){
   // flagged opening's room rings amber (rebuildISO's alertOpenings) and a
   // wall screen names the worst alert across its top until it clears. Rain
   // is the Atlas's own weather decision, as the rain over the map has it.
-  let alerts = null, alertOpenings = null;
-  if (host.alertPulse) {
-    let wet = null;
-    try {
-      const w = host.weather;
-      const d = WX && w && w.settings ? WX.decideAtlasWeather(WX.weatherSettingsFrom(w.settings), w.states, w.entities) : null;
-      wet = d && (d.kind === "rain" || d.kind === "snow") ? d.kind : null;
-    } catch (_) { wet = null; }
-    alerts = safetyAlerts(Object.values(host.lightsByEid || {}),
-      { wet, floodLatches: host.floodLatches || {}, doorInvert: doorInvertOf(host.model), nowMs: Date.now() });
-    alertOpenings = {};
-    for (const a of alerts) if (a.kind === "rain_open" || a.kind === "left_open") alertOpenings[a.eid] = a.kind;
-    if (WALL && alerts.length) {
-      const top = alerts[0].kind;
-      mapCard.appendChild(el("div", { class: "lv-alertbar" + (top === "rain_open" || top === "left_open" ? " lv-alertbar-open" : ""),
-        role: "alert", "data-alert": top }, alertBannerText(alerts)));
-    }
+  let { alerts, openings: alertOpenings } = _cardAlerts(host);
+  // What the wall's alert bar says (a kept card is one that says the same).
+  const alertKeyOf = (a) => (WALL && a && a.length ? [a[0].kind, alertBannerText(a)] : null);
+  if (alerts && WALL && alerts.length) {
+    const top = alerts[0].kind;
+    mapCard.appendChild(el("div", { class: "lv-alertbar" + (top === "rain_open" || top === "left_open" ? " lv-alertbar-open" : ""),
+      role: "alert", "data-alert": top }, alertBannerText(alerts)));
   }
 
   // Vacation Mode banner — pinned dead-center of the screen, on both Atlas
@@ -3160,7 +3467,15 @@ export function buildLightsMapCard(hostIn){
     // (live check 2026-09-24).
     return zArr.map(z => floorNameAtLevel(_frame, host.model, floors, z) || `L${z}`).join(" + ");
   };
-  view.focusIdx = Math.max(0, Math.min(view.focusIdx, isoPos.length - 1));
+  // No floors yet (the first card is drawn before the model is read): nothing to
+  // check a saved floor against, and it has to last until there is. A floor no
+  // longer there (past the end of the list) means All.
+  if (sortedLevels.length && isoPos[view.focusIdx] === undefined) view.focusIdx = 0;
+  // Mapping → Atlas asked for on one floor (the Plans tool's fixture symbol with no placed light), once.
+  if (sortedLevels.length && typeof host.takeAtlasFloor === "function") {
+    const askedFloor = host.takeAtlasFloor(), i = askedFloor ? isoPos.findIndex(p => p === _frame.levelOf(String(askedFloor))) : -1;
+    if (i >= 0) view.focusIdx = i;
+  }
   // A wall that cycles through its floors (lights_panel.js _wallCycle):
   // All and each floor on its own, not the pairs between them.
   if (host.wall) view.wallStops = isoPos.map((p, i) => (Array.isArray(p) ? -1 : i)).filter(i => i >= 0);
@@ -3203,6 +3518,29 @@ export function buildLightsMapCard(hostIn){
   if (wxSlot) {
     try { wxOutdoorZ = WX.outdoorPlateLevels(_frame, isOutdoorFloorId); } catch (_) { wxOutdoorZ = null; }
   }
+  // Showcase's West Coast Forest (see _forestLoad): its trees go first in the
+  // stage, behind the drawing, which leaves out its ground for them. Any other
+  // theme, or a tier without Showcase: none of this runs, and a forest shown
+  // before lets go of its picture. The rain is laid over both, as ever.
+  const forestKey = (host.weather && host.weather.slot) || (host.screen && host.screen.slot) || "atlas";
+  const forestOn = () => !!host.showcase && host.showcaseTheme === FOREST_THEME;
+  const forestSlot = () => (_FOREST && forestOn() ? _FOREST.atlasForestSlot(forestKey) : null);
+  let forestGapKey = null, forestGeo = null;
+  const mountForest = (svgStr) => {
+    if (!forestOn()) { _forestRedraw.delete(forestKey); if (_FOREST) _FOREST.atlasForestSlot(forestKey).release(); return; }
+    _forestRedraw.set(forestKey, () => rebuildISO());
+    _forestLoad();
+    const slot = forestSlot();
+    if (!slot) return;
+    // The same plates and stacks the rain's mask is made from.
+    const gapKey = `${view.floorGap}|${view.horizGap}`;
+    if (gapKey !== forestGapKey) {
+      forestGapKey = gapKey;
+      try { forestGeo = WX ? { outdoorZ: WX.outdoorPlateLevels(_frame, isOutdoorFloorId), offsets: WX.plateOffsets(fabricFrame(host.model, floors, view.floorGap, view.horizGap)) } : null; }
+      catch (_) { forestGeo = null; }
+    }
+    slot.attach(isoDiv, { svg: svgStr, model: host.model, outdoorZ: forestGeo && forestGeo.outdoorZ, plateOffsets: forestGeo && forestGeo.offsets });
+  };
   const mountWeather = (svgStr) => {
     if (!wxSlot) return;
     // The plates move with the Spacing and L/R sliders (and Reset view),
@@ -3228,8 +3566,7 @@ export function buildLightsMapCard(hostIn){
   // the tier is Pro (PadSpan Pro or Bright Pro — Garry, 2026-09-30). Below Pro
   // it is exactly off; the stored setting is left alone, so a renewed key
   // brings it back as it was.
-  const h3 = host.house3d && host.house3d.settings && host.house3d.settings.atlas_3d_enabled === true
-    && tierAtLeast(host.tier, "pro") ? host.house3d : null;
+  let h3 = _cardH3(host);
   // Switched off since it was on (this page load): its GL context goes back,
   // and a 3D view still loading never mounts on a card from before.
   if (!h3 && host.house3d && host.house3d.slot) {
@@ -3284,6 +3621,9 @@ export function buildLightsMapCard(hostIn){
           // Save, house3d_edit) only where the host lets lights be placed.
           load: typeof h3.load === "function" ? h3.load : null,
           edit: typeof h3.edit === "function" ? h3.edit : null,
+          // Open edges from before get the railing they showed as their own
+          // word, after a Save (live_aboard.js stampEdgeRails).
+          barrierRail: typeof h3.barrierRail === "function" ? h3.barrierRail : null,
           // The setup wizard's way in (aboard_wizard.js): a tool to open Edit at, taken once.
           openTool: h3.openTool && typeof h3.openTool.take === "function" ? h3.openTool : null,
           // Its heights go on the placement records (fabric_light_height_set),
@@ -3308,6 +3648,17 @@ export function buildLightsMapCard(hostIn){
           // moved up or down a floor takes along.
           furnish: h3.furnish === true ? { callWS: typeof h3.callWS === "function" ? h3.callWS : null,
             toast: typeof h3.toast === "function" ? h3.toast : null, settings: h3.settings, entities: h3.entities || null } : null,
+          // Add data via plans (experimental, 2026-11): the Plans tool in Edit, only with Settings → AI's
+          // master switch on, an AI Task chosen, where Edit itself is offered, never on Sample mode's house, and
+          // only for an administrator (every plan_ai_ command is one's).
+          plans: h3.settings.ai_plans_enabled === true && h3.sample !== true && h3.admin !== false && String(h3.settings.atlas_3d_ai_task_entity || "").startsWith("ai_task.")
+            && typeof h3.callWS === "function" && typeof h3.edit === "function" ? { callWS: h3.callWS, settings: h3.settings, telemetry: h3.telemetry || null,
+              // The flat Atlas is where a pin is dropped: leave Edit (asking first if something is unsaved), then Map on that room.
+              openAtlasRoom: typeof h3.openAtlasRoom !== "function" ? null : (fid, room) => {
+                const go = () => { _la3dPick(h3.slot, false); h3.openAtlasRoom(fid, room); };
+                const s = la3dSlot();
+                if (!(s && s.holdLeave && s.holdLeave(go))) go();
+              } } : null,
           setTopFloor: (fid) => la3dTopFloor(fid),
           // The view's floor stepper (▲ Main ▼ · All): the floor chips'
           // choice, a floor at a time, lowest first; and, on the sidebar,
@@ -3444,7 +3795,7 @@ export function buildLightsMapCard(hostIn){
   // where, through the very reader Live Aboard reads (one read serves both);
   // with Live Aboard on, the light kinds set there and, with Show furniture,
   // its furniture, doors and windows. None of it on: nothing is fetched.
-  const abSet = host.house3d && host.house3d.settings ? host.house3d.settings : {};
+  let abSet = host.house3d && host.house3d.settings ? host.house3d.settings : {};
   const abSlot = scr ? host.screen.slot : null;
   const abLive = !!(scr && tierAtLeast(host.tier, "pro") && host.house3d && host.house3d.people
     && (abSet.atlas_3d_people === true || abSet.atlas_3d_tags === true));
@@ -3523,6 +3874,7 @@ export function buildLightsMapCard(hostIn){
     }
     // The weather overlay takes the same width and centring as the SVG.
     if (wxSlot) wxSlot.fit(view.zoom, V2, wallW);
+    if (forestSlot()) forestSlot().fit(view.zoom, V2, wallW);
     if (host.codeChip && codesShown !== null && codesShown !== codesVisibleAtZoom(view.zoom)) rebuildISO();
   };
   // Zoom about a point (pinch midpoint / wheel): keep what is under the
@@ -3536,6 +3888,7 @@ export function buildLightsMapCard(hostIn){
     isoDiv.scrollTop = by * next - cy;
   };
 
+  let drawnWhole = false;   // the last rebuildISO drew a new <svg> (not patched)
   const rebuildISO = () => {
     // The map may hide MORE than the index does — "Hide untouched" is a view
     // filter on the drawing, not the persisted hidden set, so the table still
@@ -3544,9 +3897,9 @@ export function buildLightsMapCard(hostIn){
     // Live Aboard's light kinds and furniture (atlas_aboard.js; none: as ever).
     abData = _AB && abFile ? _AB.fileOf(abSlot, h3.load, host.screen.shownAt, () => { const f = _abRedraw.get(abSlot); if (f) f(); }) : null;
     const abDrawn = abData ? _AB.drawnWith(host.lightsByEid, host.byRoom, _AB.kindShapes(abData, host.lightsByEid, h3.settings.light_shapes)) : null;
-    const svgStr = buildIsoSVG(host.model, abDrawn ? abDrawn.byRoom : host.byRoom, host.hiddenEidsMap || host.hiddenEids, getFocusZ(view.focusIdx),
-      view.floorGap, view.horizGap, abDrawn ? abDrawn.lightsByEid : host.lightsByEid, host.lightsLoading, floors,
+    const isoOpts =
       { showcase: !!host.showcase, showcaseTheme: host.showcaseTheme || "classic",
+        ...(forestOn() ? { outsideBehind: true } : {}),
         liveColours: !!host.liveColours,
         fitRooms: !!host.showcase && !!host.fitRooms,
         ambient: host.ambient, isolux: !!host.showcase && !!host.isolux,
@@ -3591,8 +3944,20 @@ export function buildLightsMapCard(hostIn){
         automorphSubtlety: view.automorphLiveSubtlety !== undefined ? view.automorphLiveSubtlety : (host.automorphSubtlety || 0),
         underlay: abData && abFurn() ? _AB.underlayOf(abData) : null,
         // Live Aboard's own hinge, swing, type and Shown for a door, when it is on.
-        doorOpenings: abData && abData.openings && typeof abData.openings === "object" ? abData.openings : null });
-    isoDiv.innerHTML = svgStr;
+        doorOpenings: abData && abData.openings && typeof abData.openings === "object" ? abData.openings : null };
+    const svgStr = buildIsoSVG(host.model, abDrawn ? abDrawn.byRoom : host.byRoom, host.hiddenEidsMap || host.hiddenEids, getFocusZ(view.focusIdx),
+      view.floorGap, view.horizGap, abDrawn ? abDrawn.lightsByEid : host.lightsByEid, host.lightsLoading, floors, isoOpts);
+    // The sidebar's poll patches the last drawing (drawStageSvg above); the
+    // key is what makes it a different drawing: the floor shown, the gaps,
+    // zoom, the wall, the settings that shape it, and the map itself.
+    if (host.patchSvg) {
+      const o = isoOpts;
+      drawnWhole = drawStageSvg(isoDiv, svgStr, view, { model: hostIn.model, floors: hostIn.floors, text: JSON.stringify([
+        getFocusZ(view.focusIdx), view.floorGap, view.horizGap, view.zoom, V2, WALL, o.showcase, o.showcaseTheme, o.liveColours,
+        o.fitRooms, o.isolux, o.sceneField, o.codeChip, o.hideCodes, o.classFilter, o.hitHalo, o.collapseUnplaced, o.dropMarker,
+        o.labelScale, o.heatmap, o.barrierHit, o.automorph, o.automorphRoomPct, o.automorphHardness, o.automorphStyle,
+        o.automorphSubtlety, !!o.underlay]) }).full;
+    } else { isoDiv.innerHTML = svgStr; drawnWhole = true; }
     // People, tags and scanners over it, then the newest positions (while
     // the flat map shows and the page is in sight).
     if (abLive && _AB) {
@@ -3602,6 +3967,7 @@ export function buildLightsMapCard(hostIn){
         Promise.resolve().then(() => live.read()).then((snap) => abDraw(snap && typeof snap === "object" ? snap : null), () => {});
       }
     }
+    mountForest(svgStr);
     mountWeather(svgStr);
     applyZoom();
     host.onHexesBuilt(isoDiv, rebuildISO);
@@ -3707,10 +4073,10 @@ export function buildLightsMapCard(hostIn){
     if (host.showcase && host.onIsolux) {
       presTarget.appendChild(el("button", {
         class: "lv-tgl tone-green" + (host.isolux ? " on" : ""),
-        title: "Relative illuminance contours on a real-metre grid — three bands "
+        title: "Relative illuminance (isolux) contours on a real-metre grid — three bands "
           + "at fractions of this floor's own peak.",
         onclick: () => host.onIsolux(!host.isolux),
-      }, host.isolux ? "☼ Isolux ✓" : "☼ Isolux"));
+      }, host.isolux ? "☼ Light spread ✓" : "☼ Light spread"));
     }
 
     // Spatial scene — a colour field across the floor; each fixture PREVIEWS
@@ -4076,6 +4442,8 @@ export function buildLightsMapCard(hostIn){
     const mapB = el("button", { onclick: () => pick3d(false) }, "Map");
     const d3B = el("button", { onclick: () => { if (!la3dWhyNot()) pick3d(true); else la3dRetry(); } }, "Live Aboard");
     ctrlRow.appendChild(el("span", { class: "lv-zoomseg", "data-la3d-switch": "" }, [mapB, d3B, whyEl]));
+    // Its own help (Mapping only: the sidebar never sets host.helpBtn).
+    if (host.helpBtn) ctrlRow.appendChild(host.helpBtn("aboard_3d", "Help: Live Aboard"));
     la3dPaints.push(() => {
       const on = la3dOn(), why = la3dWhyNot(), lit = "background:rgba(82,183,136,.24);color:#e2e8f0";
       mapB.setAttribute("aria-pressed", String(!on)); mapB.style.cssText = h3.furnish === true ? "display:none" : on ? "" : lit;
@@ -4104,7 +4472,7 @@ export function buildLightsMapCard(hostIn){
   // (Overview's matching row does, via overview_3d_controls). Builder
   // only: the sidebar never sets host.helpBtn, since it never sets the
   // Automorph/Gap/Floor/L-R controls this card explains either.
-  if (host.helpBtn) ctrlRow.appendChild(host.helpBtn("lights_build_controls"));
+  if (host.helpBtn) ctrlRow.appendChild(host.helpBtn("lights_build_controls", "Help: build controls"));
   // Layout v2 is a trial (Garry: "let's try it, make it reversable") — one
   // click back to the classic layout, and one click forward again.
   if (host.onLayoutV2) {
@@ -4227,11 +4595,19 @@ export function buildLightsMapCard(hostIn){
     const whFlash = (msg, ms = 2600) => { whStatus.textContent = msg; setTimeout(() => { whStatus.textContent = ""; }, ms); };
 
     const whApply = el("button", { class: "lv-act primary", title: "Put every light and fan back the way this preset remembers it — including turning OFF what was off" }, "Apply");
-    let whArmed = null;
-    const whDisarm = () => { whArmed = null; whApply.textContent = "Apply"; };
+    // The "Yes, …" goes back to Apply after WH_ARM_MS untouched: the sidebar
+    // keeps this card between polls (host.keepCard), and a confirm left armed
+    // on a wall screen must not wait hours for one stray tap.
+    let whArmed = null, whArmT = null;
+    const whDisarm = () => { whArmed = null; whApply.textContent = "Apply"; if (whArmT) { clearTimeout(whArmT); whArmT = null; } };
+    const whArm = (what, text) => {
+      whArmed = what; whApply.textContent = text;
+      if (whArmT) clearTimeout(whArmT);
+      whArmT = setTimeout(whDisarm, WH_ARM_MS);
+    };
     whApply.addEventListener("click", async () => {
       if (whSel.value === VACATION_VALUE) {
-        if (whArmed !== VACATION_VALUE) { whArmed = VACATION_VALUE; whApply.textContent = "Yes, turn on Vacation Mode"; return; }
+        if (whArmed !== VACATION_VALUE) { whArm(VACATION_VALUE, "Yes, turn on Vacation Mode"); return; }
         whDisarm();
         const ok = await host.onVacationModeEnable();
         if (ok) whFlash("Vacation Mode on ✓", 4000);
@@ -4239,7 +4615,7 @@ export function buildLightsMapCard(hostIn){
       }
       const p = whp.find((x) => x.name === whSel.value);
       if (!p) { whFlash("Pick a preset first"); return; }
-      if (whArmed !== p.name) { whArmed = p.name; whApply.textContent = "Yes, change the whole house"; return; }
+      if (whArmed !== p.name) { whArm(p.name, "Yes, change the whole house"); return; }
       whDisarm();
       const r = await host.onWholeHouseApply(p);
       if (r) whFlash(wholeHouseText(r), (r.problems || []).length ? 8000 : 4000);
@@ -4247,7 +4623,7 @@ export function buildLightsMapCard(hostIn){
     whSel.addEventListener("change", whDisarm);
     whBar.appendChild(whApply);
     if (host.onVacationOptions) {
-      const whVacOpts = el("button", { class: "lv-act", title: "Vacation Mode's options: after dark, end date, pause while someone is home, bedtime, longest on" }, "Options");
+      const whVacOpts = el("button", { class: "lv-act", title: "Vacation Mode's options: after dark, end date, pause while someone is home, bedtime, longest on, most at once, evening lights, preview" }, "Options");
       const showOpts = () => { whVacOpts.style.display = whSel.value === VACATION_VALUE ? "" : "none"; };
       whVacOpts.addEventListener("click", () => _vacOptsToggle(host, true, mapCard));
       whSel.addEventListener("change", showOpts);
@@ -4306,15 +4682,20 @@ export function buildLightsMapCard(hostIn){
   // are the thumb-reach floor switcher — each carries an activity dot (how
   // many devices are on / sensors tripped up there) — and each floor keeps
   // its own camera (zoom + scroll), restored when you come back to it.
-  const allLights = Object.values(host.lightsByEid || {});
+  let allLights = Object.values(host.lightsByEid || {});
   // The heatmap chip: offered for the kinds this house has a sensor of,
   // cycling Off → Temperature → Humidity → CO₂ → Off.
-  const heatKinds = host.onHeatmap ? [
-    allLights.some(l => l.isTemp) && "temp",
-    allLights.some(l => l.isHumidity) && "humidity",
-    allLights.some(l => l.isAir && l.device_class === "carbon_dioxide") && "co2",
-  ].filter(Boolean) : [];
-  if (host.onClassFilter || sortedLevels.length > 1 || heatKinds.length) {
+  const heatKindsOf = (h, all) => (h.onHeatmap ? [
+    all.some(l => l.isTemp) && "temp",
+    all.some(l => l.isHumidity) && "humidity",
+    all.some(l => l.isAir && l.device_class === "carbon_dioxide") && "co2",
+  ].filter(Boolean) : []);
+  const heatKinds = heatKindsOf(host, allLights);
+  // Built as one part (a kept card builds it again when what it shows
+  // changed: the key is everything its el() calls made).
+  const layerBar = () => {
+    const notes = [], el = _noting(host.el, notes);
+    const SEP = () => el("span", { class: "lv-sep" }, "");
     const bar = el("div", { class: "lv-layerbar" });
     if (heatKinds.length) {
       const cur = heatKinds.includes(host.heatmap) ? host.heatmap : null;
@@ -4393,7 +4774,12 @@ export function buildLightsMapCard(hostIn){
           isoDiv.scrollTop += (gr.top + gr.height / 2) - (sr.top + sr.height / 2);
         } }, "◎ Find active"));
     }
-    mount(bar, "layers");
+    return { node: bar, key: JSON.stringify(notes) };
+  };
+  let layer = null;
+  if (host.onClassFilter || sortedLevels.length > 1 || heatKinds.length) {
+    layer = layerBar();
+    mount(layer.node, "layers");
   }
 
   // 2026-09-16 live finding: the sticky toolbar (host.stickyToolbar, above)
@@ -4472,23 +4858,80 @@ export function buildLightsMapCard(hostIn){
       });
       la3dCloseDrawer = () => { if (view.drawer) setDrawer(view.drawer); };
     }
-    rail.appendChild(railBtn(view.railHidden ? "›" : "‹", view.railHidden ? "Show the controls" : "Hide the controls", () => {
+    const railToggle = railBtn(view.railHidden ? "›" : "‹", view.railHidden ? "Show the controls" : "Hide the controls", () => {
       view.railHidden = !view.railHidden;
       if (view.railHidden && view.drawer) setDrawer(view.drawer);
       rail.classList.toggle("hidden", !!view.railHidden);
-    }));
+      railToggle.textContent = view.railHidden ? "›" : "‹";
+      railToggle.title = view.railHidden ? "Show the controls" : "Hide the controls";
+    });
+    rail.appendChild(railToggle);
     mapCard.appendChild(rail);
     isoDiv.addEventListener("pointerdown", () => { if (view.drawer) setDrawer(view.drawer); });
   }
   mapCard.appendChild(isoDiv);
   if (scr) mapCard.appendChild(scr.anchor);
   // The shapes as drawn: with Live Aboard's kinds once its file has been read.
-  const abLegend = _AB && abFile ? _AB.fileData(abSlot) : null;
-  const legend = buildShapeLegend(el, Object.values(abLegend
-    ? _AB.drawnWith(host.lightsByEid, host.byRoom, _AB.kindShapes(abLegend, host.lightsByEid, h3.settings.light_shapes)).lightsByEid
-    : host.lightsByEid));
-  if (legend) { legend.classList.add("lv-shapes"); mapCard.appendChild(legend); }   // a wall leaves it out (styles.css)
+  const legendOf = (h, h3x) => {
+    const abLegend = _AB && abFile && h3x ? _AB.fileData(abSlot) : null;
+    const notes = [];
+    const node = buildShapeLegend(_noting(el, notes), Object.values(abLegend
+      ? _AB.drawnWith(h.lightsByEid, h.byRoom, _AB.kindShapes(abLegend, h.lightsByEid, h3x.settings.light_shapes)).lightsByEid
+      : h.lightsByEid));
+    return { node, key: JSON.stringify(notes) };
+  };
+  const legend = legendOf(host, h3);
+  if (legend.node) { legend.node.classList.add("lv-shapes"); mapCard.appendChild(legend.node); }   // a wall leaves it out (styles.css)
+  // The page just opened on a saved floor whose plate is off screen: with the
+  // others faded, only backdrop would show. Once (lights_panel.js _loadSettings),
+  // the sidebar only: Mapping's map sits under its tools, a wall screen fits the
+  // house and is looked at from across a room. Choosing a floor never scrolls. A
+  // saved view can be a pair of floors (the slider): one on screen is enough.
+  function chosenIntoView(idx) {
+    if (!scr || !idx || host.wall) return;
+    const plates = [].concat(isoPos[idx])
+      .map(z => isoDiv.querySelector(`g[data-role="floorslab"][data-z="${z}"] [data-role="slabtop"]`)).filter(Boolean);
+    const box = isoDiv.getBoundingClientRect();
+    const top = Math.max(0, box.top), bottom = box.height ? Math.min(window.innerHeight, box.bottom) : window.innerHeight;
+    const off = (p) => { const r = p.getBoundingClientRect(), mid = r.top + r.height / 2; return mid < top || mid > bottom; };
+    if (plates.length && plates.every(off)) plates[0].scrollIntoView({ block: "center", inline: "nearest" });
+  }
   rebuildISO();
+  // Kept (host.keepCard, see _cardSig): what this card is built from, besides
+  // the devices, and the next tick's way in. A card built from the same takes
+  // the newest host into its closures, builds its layer bar again only when
+  // what it shows changed (a bar holding the focused control stays on the
+  // poll's update), and redraws the drawing in place; false: a new card.
+  if (keep) {
+    const sigOf = (h, a, lg) => _cardSig(h, [view.floorGap, view.horizGap, view.focusIdx, view.drawer || null, !!view.railHidden,
+      !!_AB, _vacOptsOpen, Date.now() < _vacAskUntil, alertKeyOf(a), lg, heatKindsOf(h, Object.values(h.lightsByEid || {}))]);
+    const refresh = (next) => {
+      if (next.model !== hostIn.model || next.floors !== hostIn.floors || next.view !== view) return false;
+      const h = lightsHostForTier(next), a = _cardAlerts(h), h3n = _cardH3(h), lg = legendOf(h, h3n);
+      if (sigOf(h, a.alerts, lg.key) !== keep.sig) return false;
+      hostIn = next; host = h; h3 = h3n;
+      alerts = a.alerts; alertOpenings = a.openings;
+      abSet = host.house3d && host.house3d.settings ? host.house3d.settings : {};
+      allLights = Object.values(host.lightsByEid || {});
+      if (layer && layer.node.parentNode) {
+        const nb = layerBar();
+        const act = next.keepFocused && layer.node.getRootNode ? layer.node.getRootNode().activeElement : null;
+        if (nb.key !== layer.key && !(act && layer.node.contains(act))) { layer.node.parentNode.replaceChild(nb.node, layer.node); layer = nb; }
+      }
+      if (scr) scr.paint();
+      // A new drawing (the zoom or the codes changed it whole) empties the
+      // stage for a moment, and the browser takes the pan back to 0,0: put
+      // it back where it was, as a new card does (view.scrollLeft below).
+      const sl = view.scrollLeft, stp = view.scrollTop;
+      rebuildISO();
+      if (drawnWhole) {
+        if (sl !== undefined) isoDiv.scrollLeft = sl;
+        if (stp !== undefined) isoDiv.scrollTop = stp;
+      }
+      return true;
+    };
+    Object.assign(keep, { card: mapCard, refresh, sig: sigOf(host, alerts, legend.key) });
+  }
   // Restore the pan position a previous rebuild of this same card saved
   // (see the scroll listener above) — skipped on the very first-ever
   // mount, where there is nothing to restore yet and 0,0 is already
@@ -4521,6 +4964,12 @@ export function buildLightsMapCard(hostIn){
       if (view.scrollTop !== undefined) isoDiv.scrollTop = view.scrollTop;
     });
   }
+  // On the first card that has floors to draw; every later one leaves the page
+  // where it is. A microtask, as above: the card has to be on screen to be measured.
+  if (view.scrollToChosen && sortedLevels.length) {
+    view.scrollToChosen = false;
+    queueMicrotask(() => chosenIntoView(view.focusIdx));
+  }
   return mapCard;
 }
 
@@ -4535,18 +4984,68 @@ export function buildLightsMapCard(hostIn){
 //   onRowLongPress(l)                 optional; sidebar: effects popup (500ms hold)
 //   onToggleHidden(eid)               persist + re-render
 //   afterAssign()                     invalidate registry cache + re-render
-export function buildLightsTable(host, lights){
+// ── The poll's table, kept (host.keepTable: the sidebar's 5 s tick) ─────────
+// The sidebar builds its page afresh every poll, and the index under the map
+// is most of it: a row per device, and laying a new table out again is most
+// of an update's time. So the sidebar hands in one object it keeps
+// (host.keepTable) and the table card stays on screen: a row is built again
+// only when what it is built from changed (its device, its state word), the
+// header line only when its counts did, and anything else the table reads
+// from the host (TABLE_HOST_KEYS: a filter, the sort, hidden lights, a
+// setting, another map) builds the whole card again, as before. A kept row's
+// handlers reach the newest host through keep.proxy, and the device it holds
+// is the same as the newest one, field for field. host.keepFocused (the poll):
+// a row or header holding the focused control is not replaced. The Mapping
+// tab hands no keepTable: a new card every time, as ever.
+export const TABLE_HOST_KEYS = ["afterAssign", "callWS", "classFilter", "doorCircleArmedEid", "doorCircleM",
+  "doorInvertByEid", "doorLinkedIds", "doorLockByEid", "doorMaterialByEid", "doorOpenerByEid", "doorOpenerCandidates",
+  "floodLatches", "focusRowEid", "hiddenEids", "keepFocused", "keepTable", "lightsLoading", "lockCandidates", "model",
+  "onBuildFromRelays", "onConfigureDoor", "onFloodReset", "onLinkDoorLock", "onLinkDoorOpener", "onPlaceRow",
+  "onRevertUntouched", "onRowClick", "onRowLongPress", "onRowMore", "onSelectForPlacement", "onTableClassFilter",
+  "onTableHealthFilter", "onTableSort", "onToggleDoorInvert", "onToggleDoorSteel", "onToggleHidden", "onTypeOverride",
+  "onUnlinkDoor", "placeQueue", "selectedEids", "tableClassFilter", "tableHealthFilter", "tableSort", "toast", "typeOverrides"];
+const _TABLE_SIG_SKIP = new Set(["keepFocused", "keepTable", "model"]);
+// What the card is built from, besides the devices: a function as "fn" (only
+// whether it is there shows), a Set as its sorted members; the map by identity.
+function _tableSig(host){
+  return JSON.stringify(TABLE_HOST_KEYS.filter(k => !_TABLE_SIG_SKIP.has(k)).map(k => {
+    const v = host[k];
+    return typeof v === "function" ? "fn" : v instanceof Set ? [...v].sort() : v === undefined ? null : v;
+  }));
+}
+// Lays want as parent's children: the ones not wanted come out first, then
+// each is put where it belongs. A kept node already in its place is never
+// moved (a node taken out and put back is styled and laid out again).
+export function layChildren(parent, want){
+  const wanted = new Set(want);
+  for (const n of [...parent.childNodes]) if (!wanted.has(n)) parent.removeChild(n);
+  want.forEach((n, i) => { if (parent.childNodes[i] !== n) parent.insertBefore(n, parent.childNodes[i] || null); });
+}
+
+export function buildLightsTable(hostIn, lights){
+  const keep = hostIn.keepTable || null;
+  let host = hostIn;
+  if (keep) {
+    keep.host = hostIn;
+    host = keep.proxy || (keep.proxy = new Proxy({}, { get: (_, k) => keep.host[k], has: (_, k) => k in keep.host }));
+  }
   const { el } = host;
   const hidden = host.hiddenEids;
+  // The last tick's card, when it is still on screen and built from the same.
+  const sig = keep ? _tableSig(hostIn) : null;
+  const reuse = !!(keep && keep.root && keep.root.isConnected && keep.sig === sig && keep.model === hostIn.model && !hostIn.focusRowEid);
+  const active = reuse && hostIn.keepFocused ? ((keep.root.getRootNode && keep.root.getRootNode().activeElement) || null) : null;
+  const holds = (n) => !!(active && n && (n === active || n.contains(active)));
   // The card wrapper lives HERE, not in the hosts — same objects AND same
   // layout in both views.
-  const root = el("div", { class: "card lv-tablecard lv-index" });
+  const root = reuse ? keep.root : el("div", { class: "card lv-tablecard lv-index" });
+  const top = [];   // the note and the header line, before the table
 
   const unassigned = lights.filter(l => !l.area_name && !hidden.has(l.entity_id));
   if (host.lightsLoading) {
-    root.appendChild(el("div", { class: "lv-note" }, "Loading room assignments…"));
+    top.push(el("div", { class: "lv-note" }, "Loading room assignments…"));
   } else if (unassigned.length) {
-    root.appendChild(el("div", { class: "lv-note" },
+    top.push(el("div", { class: "lv-note" },
       `${unassigned.length} light(s) not assigned to a room — shown in index only.`));
   }
 
@@ -4568,7 +5067,7 @@ export function buildLightsTable(host, lights){
   const byClass = tableFilter === "all" ? lights : lights.filter(l => lightClassOf(l) === tableFilter);
   const filtered = healthFilter ? byClass.filter(l => !l.healthy) : byClass;
   const unhealthyCount = lights.filter(l => !l.healthy).length;
-  root.appendChild(el("div", { class: "lv-tbl-head" }, [
+  top.push(el("div", { class: "lv-tbl-head" }, [
     el("span", { class: "lv-tbl-title" }, "Light Index"),
     el("span", { class: "lv-count" }, (tableFilter === "all" && !healthFilter) ? String(lights.length) : `${filtered.length} / ${lights.length}`),
     hiddenCount ? el("span", { class: "lv-hint" }, `${hiddenCount} hidden from map`) : null,
@@ -4601,6 +5100,16 @@ export function buildLightsTable(host, lights){
       return sel;
     })()] : []),
   ]));
+  // The note and the header line come again when what they say does.
+  const headSig = keep ? JSON.stringify([unassigned.length, hiddenCount, filtered.length, lights.length, unhealthyCount,
+    [...new Set(lights.map(l => lightClassOf(l)))].sort()]) : null;
+  if (!reuse) for (const n of top) root.appendChild(n);
+  else if (keep.headSig !== headSig && !keep.top.some(holds)) {
+    const anchor = keep.top.length ? keep.top[keep.top.length - 1].nextSibling : root.firstChild;
+    for (const n of keep.top) root.removeChild(n);
+    for (const n of top) root.insertBefore(n, anchor);
+    keep.top = top; keep.headSig = headSig;
+  }
 
   // Garry, 2026-09-22: "add this to the mapping atlas section under the
   // devices filter pull down. That's where I wanted it, leave it where it
@@ -4612,7 +5121,7 @@ export function buildLightsTable(host, lights){
   // circle tool already uses. host-gated (builder only, paid, not
   // preview) so it's absent from the sidebar Atlas panel, which has no
   // Devices section of its own to land in.
-  if (host.onBuildFromRelays) {
+  if (host.onBuildFromRelays && !reuse) {
     root.appendChild(el("div", { style: "padding:0 12px 10px;border-bottom:1px solid #1b3526" },
       el("button", { class: "lv-act", onclick: host.onBuildFromRelays },
         "+ Build an opener, lock, or light from relays")));
@@ -4661,8 +5170,8 @@ export function buildLightsTable(host, lights){
   // Health and Brand; the Pro pulldown only on a phone, so it stays in the
   // desktop builder's 440px column.
   const typeNarrow = host.onTypeOverride ? "lv-phone" : "lv-narrow";
-  const tbl = el("table", { class: "table lv-table", style: "width:100%" });
-  tbl.appendChild(el("thead", {}, el("tr", {}, [
+  const tbl = reuse ? null : el("table", { class: "table lv-table", style: "width:100%" });
+  if (tbl) tbl.appendChild(el("thead", {}, el("tr", {}, [
     th("code", "Code"),
     th("name", "Light"),
     th("room", "Room"),
@@ -4672,7 +5181,7 @@ export function buildLightsTable(host, lights){
     th(null, "Type", "text-align:center", typeNarrow),
     th(null, "Map", "width:60px;text-align:center"),
   ])));
-  const tbody = el("tbody");
+  const tbody = reuse ? keep.tbody : el("tbody");
   const placements = (host.model && host.model.light_positions_m) || {};
   if (sortState) {
     const key = COLUMNS.find(([k]) => k === sortState.column)[2];
@@ -4686,7 +5195,16 @@ export function buildLightsTable(host, lights){
   }
   const selected = host.selectedEids || null;
   const queued = host.placeQueue || null;
+  // Kept: each row with what it was built from (its device, field for field,
+  // and its state word, which reads the clock).
+  const rowsNow = keep ? new Map() : null, rowsOut = [];
   for (const l of lights) {
+    let rowSig = null;
+    if (keep) {
+      rowSig = JSON.stringify([l, stateWordOf(l, host.floodLatches, host.doorInvertByEid) || null]);
+      const old = reuse && !rowsNow.has(l.entity_id) ? keep.rows.get(l.entity_id) : null;
+      if (old && (old.sig === rowSig || holds(old.row))) { rowsNow.set(l.entity_id, old); rowsOut.push(old.row); continue; }
+    }
     const on = l.isLock ? l.state === "locked" : l.state === "on";
     const isHidden = hidden.has(l.entity_id);
     // A row filtered out by the layer chips dims like its marker does; a
@@ -5014,7 +5532,6 @@ export function buildLightsTable(host, lights){
         }, "Revert")] : []),
         el("button", {
           class: "lv-act",
-          style: isHidden ? "opacity:0.5" : "",
           onclick: (e) => {
             e.stopPropagation();
             host.onToggleHidden(l.entity_id);
@@ -5041,6 +5558,9 @@ export function buildLightsTable(host, lights){
       let lpTimer = null, ringT = null, ring = null, capturedId = null;
       row.addEventListener("pointerdown", (ev) => {
         row._lpFired = false;
+        // The row's own controls keep their clicks: with the pointer captured,
+        // a mouse click lands on the row, which switches the light.
+        if (ev.target?.closest?.("button,select,input,a,label")) return;
         try { row.setPointerCapture(ev.pointerId); capturedId = ev.pointerId; } catch (_) {}
         if (codeSwatchSvg) ringT = setTimeout(() => { ring = pressRing(codeSwatchSvg, 7.5, 7.5, 5.6); }, PRESS_RING_MS);
         lpTimer = setTimeout(() => {
@@ -5060,12 +5580,20 @@ export function buildLightsTable(host, lights){
       row.addEventListener("pointercancel", lpCancel);
       row.addEventListener("contextmenu", (e) => e.preventDefault());
     }
-    tbody.appendChild(row);
+    if (keep && !rowsNow.has(l.entity_id)) rowsNow.set(l.entity_id, { sig: rowSig, row });
+    if (reuse) rowsOut.push(row); else tbody.appendChild(row);
   }
-  tbl.appendChild(tbody);
-  // A row still too wide for a narrow card (the builder's buttons) scrolls
-  // here, inside the card, never the page (styles.css .lv-index).
-  root.appendChild(el("div", { class: "lv-tblwrap" }, tbl));
+  if (reuse) layChildren(tbody, rowsOut);
+  else {
+    tbl.appendChild(tbody);
+    // A row still too wide for a narrow card (the builder's buttons) scrolls
+    // here, inside the card, never the page (styles.css .lv-index).
+    root.appendChild(el("div", { class: "lv-tblwrap" }, tbl));
+  }
+  if (keep) {
+    Object.assign(keep, { root, sig, model: hostIn.model, tbody, rows: rowsNow });
+    if (!reuse) Object.assign(keep, { top, headSig });
+  }
   // Map → index: selecting a marker brings its row into view (the builder
   // sets focusRowEid for the render right after a map selection, only).
   if (host.focusRowEid) {
