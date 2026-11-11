@@ -161,9 +161,9 @@ EVENTS: frozenset[str] = frozenset({
     # vacuum's map imported / a walker point accepted into calibration.
     "room_hold_used", "vacuum_imported", "vacuum_point_accepted",
     "light_placed", "light_removed", "wall_placed", "wall_removed",
-    "room_committed", "irk_added", "irk_add_refused", "irk_validate",
+    "room_committed", "room_merged", "irk_added", "irk_add_refused", "irk_validate",
     "calibration_point_added", "capture_started", "forensics_query",
-    "showcase_on", "backup_created", "backup_restored", "factory_reset",
+    "showcase_on", "showcase_forest_default", "backup_created", "backup_restored", "factory_reset",
     "bright_import",
     # A floor-plan image asked for with a link that no longer works (expired,
     # or signed before a restart): the panel renews its links every 10
@@ -495,6 +495,8 @@ UI_ERROR_HELPERS: frozenset[str] = frozenset({
     "live_aboard_marks",                            # Live Aboard: the Atlas's leak sensors, locks, codes and class chips
     "live_aboard_motion",                           # Live Aboard: motion (the ring, the room's glow, markers, coverage, the chip)
     "live_aboard_raised",                           # Live Aboard: what stands on a line, clear of the words
+    "live_aboard_show",                             # Live Aboard's ⋯ list: what this screen shows
+    "scene_row",                                    # the scene row under the Atlas and in Live Aboard
     "live_aboard_panel",                            # Live Aboard on the wall panel: its home view, Follow, the People chip
     "live_aboard_director",                         # Live Aboard on the wall panel: flies to a doorbell, door or alarm that went off
     "live_aboard_storey",                           # Live Aboard: the house itself (each storey's floor, the roof, stair openings)
@@ -628,12 +630,35 @@ STAIR_USE_EVENTS: frozenset[str] = frozenset(
     | {f"stairs_outcome:{k}" for k in ("all_ok", "some_landing", "some_nofloor")}
     | {f"stairs_shape:{k}" for k in STAIR_SHAPES} | {f"stairs_style:{k}" for k in STAIR_STYLES}
 )
+# Live Aboard's ⋯ list, "Show on this screen" (2026-11-07, views/live_aboard_show.js
+# SHOW_EVENTS, held equal by tests/test_live_aboard_show.py), counted each time:
+# the list opened; each line hidden or shown again (by its key); Back to house
+# defaults; a "not set up" line seen (once per page load) and followed; someone
+# sent to where people or tags are switched on for the house. Counts only.
+# And the scene row's (2026-11-07, views/scene_row.js SCENE_EVENTS): the row
+# shown on the flat Atlas or in Live Aboard (once per page load), a scene run
+# or turned off (a Home Assistant scene or a Whole house preset), a new scene
+# opened in Home Assistant (from the row, the ⋯ list or Settings) and an edit
+# opened (a scene, one not made in the editor, a preset). Never a name.
+HOUSE3D_SHOW_ITEMS: tuple[str, ...] = (
+    "lights", "glow", "strips", "fans", "scenes", "motion_sensors", "motion_rooms", "motion_reach", "readouts",
+    "doors", "windows", "covers", "locks", "railings", "radios", "tags", "people", "trails", "codes",
+    "furniture", "devices", "stairs", "room_names", "room_outlines", "floor_outlines", "other_floors", "roof",
+    "rain", "theme", "forest",
+)
+HOUSE3D_SHOW_EVENTS: frozenset[str] = frozenset(
+    {"house3d_show:opened", "house3d_show:reset", "house3d_show:permission:people", "house3d_show:permission:tags"}
+    | {f"house3d_show:{a}:{k}" for a in ("hide", "show", "setup_seen", "setup_go") for k in HOUSE3D_SHOW_ITEMS}
+    | {f"house3d_show:scene_{w}" for w in ("row:atlas", "row:aboard", "run:scene", "run:preset", "off:scene", "off:preset",
+                                           "new:row", "new:show", "new:settings", "edit:scene", "edit:yaml", "edit:preset")}
+)
 HOUSE3D_EVENTS: frozenset[str] = frozenset(
     {"house3d_opened", "house3d_wet_window", "house3d_loft_rail", "house3d_mezzanine", "house3d_wall_capped"}
     | {f"house3d_fallback:{k}" for k in HOUSE3D_FALLBACK_KINDS}
     | {f"house3d_wall_draw:{k}" for k in ("high", "high_still", "high_capped", "low")}
     | {f"house3d_fallback_size:{b}" for b in HOUSE_SIZE_BANDS}
     | STAIR_USE_EVENTS
+    | HOUSE3D_SHOW_EVENTS
 )
 # Its photo step (ws_house3d_photo.py), counted by the server once per photo
 # sent: photo_read:ok, :no_ai_task (none chosen, gone, can't read pictures, or
@@ -735,6 +760,98 @@ PLAN_AI_EVENTS: frozenset[str] = frozenset(
        "plan_ai_rail_side:ai", "plan_ai_rail_side:own", "plan_ai_light_unmatched", "plan_ai_tiles_slow"}
     | {f"plan_ai_fixtures:{k}" for k in PLAN_AI_FIXTURES} | {f"plan_ai_tiles:{k}" for k in PLAN_AI_TILE_BANDS}
     | {f"plan_ai_missing_added:{k}" for k in PLAN_AI_KINDS})
+# The AI credit tracker (ai_usage.py, experimental, 2026-11; every feature's
+# AI reads): each read by what it was for and who makes the AI; each read that
+# failed or was refused, by its one reason (ai_usage.STOP_REASONS, the stall
+# watch); once, when a month has ended, its reads and its estimated Claude
+# dollars in coarse bands (none: no priced model read); the warning's share
+# chosen (or off) and each notice it gave. Never an AI Task, a model, an
+# amount typed in, a price or an exact figure.
+from .ai_usage import (CREDIT_MONTH_BANDS as _AI_CREDIT_BANDS, KINDS as _AI_KINDS,  # noqa: E402
+                       MAKERS as _AI_MAKERS, READS_MONTH_BANDS as _AI_READS_BANDS,
+                       STOP_REASONS as _AI_STOPS, WARN_EVENTS as _AI_WARN)
+AI_USAGE_EVENTS: frozenset[str] = frozenset(
+    {f"ai_reads_kind:{k}" for k in _AI_KINDS} | {f"ai_reads_maker:{k}" for k in _AI_MAKERS}
+    | {f"ai_reads_fail:{k}" for k in _AI_STOPS} | {f"ai_reads_month:{k}" for k in _AI_READS_BANDS}
+    | {f"ai_credit_month:{k}" for k in _AI_CREDIT_BANDS} | {f"ai_credit_warn:{k}" for k in _AI_WARN})
+# Build from plans: advanced plan alignment (plan_ai.py's line-up; Claude,
+# experimental, 2026-11; design PadspanResearch plan-build-design-2026-11.md
+# section 10, Stage 1 here). Counts and closed words only: never a plan, a
+# title, a room, a floor, an AI Task, a map id, a coordinate, a size, a credit
+# amount or a price. The stall watch (section 14): every stop by its one named
+# reason (plan_ai.STOPS), the stress signals and how long a person waited.
+PLAN_BUILD_STAGE: tuple[str, ...] = ("s1", "s2")
+PLAN_BUILD_SETTING: tuple[str, ...] = ("shown", "on", "off")
+PLAN_BUILD_UNLOCK: tuple[str, ...] = ("opus", "fable", "other", "not_anthropic", "below_opus_5_5", "unknown_model", "sources_disagree", "no_ai_task")
+PLAN_BUILD_RUN: tuple[str, ...] = ("started", "finished", "needs_help", "resumed", "cancelled", "failed", "out_of_time", "no_credit", "abandoned",
+                                   "read_again")
+PLAN_BUILD_RUN_SECS: tuple[str, ...] = ("lt1m", "1_3m", "3_10m", "gt10m")
+PLAN_BUILD_PLAN_BANDS: tuple[str, ...] = ("1", "2_3", "4_6", "gt6")
+PLAN_BUILD_CREDIT: tuple[str, ...] = ("lt0_10", "0_10_0_50", "0_50_2", "gt2")
+PLAN_BUILD_READ: tuple[str, ...] = ("plan", "dimension", "retry", "reused")
+PLAN_BUILD_READ_S2: tuple[str, ...] = ("plan", "retry")          # Stage 2 reads each plan whole, twice: no dimension crops, nothing reused
+PLAN_BUILD_READ_FAIL: tuple[str, ...] = ("timeout", "refusal", "bad_answer", "unreachable", "no_credit", "no_media", "suspect_frame", "backup_used")
+PLAN_BUILD_ANCHOR: tuple[str, ...] = ("gauge", "evidence", "none")
+PLAN_BUILD_DIMS: tuple[str, ...] = ("agree", "disagree", "single", "none", "parse_mismatch")
+PLAN_BUILD_FIT: tuple[str, ...] = ("lt70", "70_85", "85_95", "ge95", "ratio_disagree")
+PLAN_BUILD_SEED: tuple[str, ...] = ("stairs", "search", "taps")
+PLAN_BUILD_FIT_SECS: tuple[str, ...] = ("lt5", "5_20", "20_60", "capped")
+PLAN_BUILD_PCT: tuple[str, ...] = ("lt1", "1_3", "3_10", "gt10")
+# Stage 1a counts what it shows and the verdicts it takes; Stage 1b what is
+# accepted (one by one or as a group), refiled by hand, undone, and how a save
+# went (its checks, the calibration preflight, a save healed after a restart).
+PLAN_BUILD_REFILE: tuple[str, ...] = ("suggested", "by_hand", "refused_drawn", "accepted", "wrong", "undone")
+PLAN_BUILD_HELP: tuple[str, ...] = ("dimension_shown", "dimension_yes", "dimension_typed", "dimension_skipped", "taps_shown", "taps_done",
+                                    "taps_skipped", "gave_up")
+PLAN_BUILD_ITEM_KINDS: tuple[str, ...] = ("place", "refile", "anchor_scale", "room", "space", "door", "window", "stairs")
+PLAN_BUILD_ITEM: tuple[str, ...] = ("shown", "accepted", "accepted_group", "not_now", "wrong", "undone", "stale", "maybe")
+PLAN_BUILD_WRONG: tuple[str, ...] = ("wrong_match", "wrong_scale", "wrong_floor", "cant_tell")
+PLAN_BUILD_M: tuple[str, ...] = ("lt0_3", "0_3_1", "1_3", "gt3")
+PLAN_BUILD_FLAGS: tuple[str, ...] = ("calibration", "device", "room_trace")
+PLAN_BUILD_STOPS: tuple[str, ...] = ("locked", "unreachable", "no_credit", "out_of_time", "no_media", "help_unanswered", "help_limit",
+                                     "refile_refused", "measured_plan_protected", "anchor_error", "no_anchor", "no_metre_scale", "not_placed",
+                                     "fit_rejected", "cancelled", "abandoned", "group_refused", "preflight_blocked", "backup_failed", "undo_failed",
+                                     "changed_while_saving", "floor_gone", "plan_changed", "ai_changed", "restart", "bad_answer", "refusal", "error", "anchor_after_fit", "save_stands", "undo_stands", "room_gate",
+                                     "rooms_changed", "name_taken")
+PLAN_BUILD_SHOWN_ACCEPTED: tuple[str, ...] = ("shown", "accepted")
+PLAN_BUILD_COMMIT: tuple[str, ...] = ("done", "changed_since", "points_out_of_range", "measured_plan_protected", "refile_refused", "group_refused",
+                                      "backup_failed", "save_failed", "rolled_back", "anchor_after_fit")
+PLAN_BUILD_PREFLIGHT: tuple[str, ...] = ("checked", "blocked")
+PLAN_BUILD_UNDO: tuple[str, ...] = ("session", "item_skipped", "failed")
+PLAN_BUILD_SETTLED: tuple[str, ...] = ("finished", "put_back", "stood")
+PLAN_BUILD_STRESS: tuple[str, ...] = ("repeat", "help_over", "resumes", "quick_abandon")
+PLAN_BUILD_WAIT: tuple[str, ...] = ("lt1m", "1_10m", "10_60m", "gt1h")
+# Stage 2 (rooms, doors, windows and stairs read together; design section 5):
+# the rooms gate on the calibration spots, whether a room's two reads agreed
+# (or its parts didn't join), and
+# what the person merged. Its items use plan_build_item's kinds above.
+PLAN_BUILD_HELDOUT: tuple[str, ...] = ("up", "same", "down", "unscored")
+PLAN_BUILD_AGREE: tuple[str, ...] = ("ready", "differ", "apart", "spots_out", "two_of_three", "three_differ")
+PLAN_BUILD_MERGE: tuple[str, ...] = ("into_room", "together", "new_room", "separated")
+PLAN_BUILD_EVENTS: frozenset[str] = frozenset(
+    {f"plan_build_setting:{k}" for k in PLAN_BUILD_SETTING} | {f"plan_build_unlock:{k}" for k in PLAN_BUILD_UNLOCK}
+    | {f"plan_build_run:{s}_{k}" for s in PLAN_BUILD_STAGE for k in PLAN_BUILD_RUN}
+    | {f"plan_build_run_secs:{s}_{k}" for s in PLAN_BUILD_STAGE for k in PLAN_BUILD_RUN_SECS}
+    | {f"plan_build_plans:{k}" for k in PLAN_BUILD_PLAN_BANDS}
+    | {f"plan_build_credit_run:{s}_{k}" for s in PLAN_BUILD_STAGE for k in PLAN_BUILD_CREDIT}
+    | {f"plan_build_read:s1_{k}" for k in PLAN_BUILD_READ} | {f"plan_build_read:s2_{k}" for k in PLAN_BUILD_READ_S2}
+    | {f"plan_build_read_fail:{s}_{k}" for s in PLAN_BUILD_STAGE for k in PLAN_BUILD_READ_FAIL}
+    | {f"plan_build_read_secs:{k}" for k in PHOTO_SECS}
+    | {f"plan_build_anchor:{k}" for k in PLAN_BUILD_ANCHOR} | {f"plan_build_dims:{k}" for k in PLAN_BUILD_DIMS}
+    | {f"plan_build_fit:{k}" for k in PLAN_BUILD_FIT} | {f"plan_build_seed:{k}" for k in PLAN_BUILD_SEED}
+    | {f"plan_build_fit_secs:{k}" for k in PLAN_BUILD_FIT_SECS} | {f"plan_build_shape_err:{k}" for k in PLAN_BUILD_PCT}
+    | {f"plan_build_refile:{k}" for k in PLAN_BUILD_REFILE} | {f"plan_build_help:{k}" for k in PLAN_BUILD_HELP}
+    | {f"plan_build_item:{i}_{k}" for i in PLAN_BUILD_ITEM_KINDS for k in PLAN_BUILD_ITEM}
+    | {f"plan_build_wrong_why:{k}" for k in PLAN_BUILD_WRONG}
+    | {f"plan_build_move:{s}_{k}" for s in PLAN_BUILD_SHOWN_ACCEPTED for k in PLAN_BUILD_M}
+    | {f"plan_build_scale_change:{s}_{k}" for s in PLAN_BUILD_SHOWN_ACCEPTED for k in PLAN_BUILD_PCT}
+    | {f"plan_build_commit:{k}" for k in PLAN_BUILD_COMMIT} | {f"plan_build_preflight:{k}" for k in PLAN_BUILD_PREFLIGHT}
+    | {f"plan_build_undo:{k}" for k in PLAN_BUILD_UNDO} | {f"plan_build_settled:{k}" for k in PLAN_BUILD_SETTLED}
+    | {f"plan_build_flags:{k}" for k in PLAN_BUILD_FLAGS} | {f"plan_build_flag_move:{k}" for k in PLAN_BUILD_M}
+    | {f"plan_build_stop:{k}" for k in PLAN_BUILD_STOPS} | {f"plan_build_stress:{k}" for k in PLAN_BUILD_STRESS}
+    | {f"plan_build_wait:{k}" for k in PLAN_BUILD_WAIT}
+    | {f"plan_build_heldout:{k}" for k in PLAN_BUILD_HELDOUT} | {f"plan_build_agree:{k}" for k in PLAN_BUILD_AGREE}
+    | {f"plan_build_merge:{k}" for k in PLAN_BUILD_MERGE})
 # The Overview's accuracy tips (setup_checks.py, 0.38.193): each one shown,
 # opened (gone to its fix) or hidden, and the whole card hidden. Whether the
 # nudges move the three setup steps most homes skip.
@@ -899,6 +1016,8 @@ _FEATURE_ON_ONLY: dict[str, str] = {
     "atlas_3d_ai_task_backup_entity": "ai_backup",
     # AI map-building research (experimental, 2026-11): on only; an untouched house sends what it always did.
     "ai_plans_enabled": "ai_plans",
+    # Build from plans: advanced plan alignment (Claude, experimental, 2026-11): on only.
+    "ai_plan_build_enabled": "ai_plan_build",
     # 0.38.178: several wall screens (Settings → Optimize for scale).
     "optimize_for_scale": "scale",
     "guest_tags_enabled": "guest_tags",
@@ -1207,7 +1326,7 @@ def enabled(hass: HomeAssistant) -> bool:
 def event_allowed(name: str) -> bool:
     return (name in EVENTS or name in TAB_EVENTS or name in UI_ERRORS or ui_error_at_allowed(name) or name in OFFER_EVENTS
             or name in WEATHER_EVENTS or name in HOUSE3D_EVENTS or name in PHOTO_EVENTS or name in STAIR_EVENTS
-            or name in PLAN_AI_EVENTS
+            or name in PLAN_AI_EVENTS or name in AI_USAGE_EVENTS or name in PLAN_BUILD_EVENTS
             or name in CLIENT_EVENTS or name in SCREEN_EVENTS or name in OVERVIEW_EVENTS or name in TIP_EVENTS
             or name in CAL_RESULTS_EVENTS or name in SETUP_EVENTS or name in OPEN_EDGE_EVENTS)
 

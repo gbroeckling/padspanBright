@@ -24,6 +24,11 @@ agree, and a suggestion's piece id, minted once and stored with the ledger, stay
 the same however often a commit is retried.
 
 Design: PadspanResearch/plan-ai-design-2026-11.md (4.1, 4.2, 4.3, 4.5).
+
+Build from plans: line up (Stage 1b, experimental): the same one writer,
+extended for the line-up's two writes and nothing else (plan-build design 3.8,
+15). They and their checks are in their own section at the end of this file,
+which says what they write and what they never touch.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from homeassistant.core import HomeAssistant
 
 from . import house3d_store as H
 from . import plan_ai as A
+from . import plan_geom as G
 from . import ws_house3d_photo as P
 from .const import DATA_MODEL, DOMAIN, HOUSE3D_STORE_KEY
 from .house3d_library import without_tokens
@@ -571,3 +577,1253 @@ async def undo(hass: HomeAssistant, store: A.PlanAiStore, house: H.House3dStore,
     return {"ok": True, "undone": A.items_in(undone), "of": A.items_in(b.get("items")), "skipped": skipped, "batch": uid,
             "rev": sess.get("rev") if sess else None, "undo": A.last_batch(store), "suggestions": {i: sugs[i] for i in was},
             "data": without_tokens(house.data), "counts": house.counts()}
+
+
+# ══ Build from plans: line up (Stage 1b; experimental) ═══════════════════════
+# Plan-build design 3.8 and 15. The two writes are _write_place (the six numbers
+# of a placement, through async_reanchor_map) and _write_refile (a floor). Both
+# run only from lineup_commit, lineup_undo and settle_lineups, each with the
+# plan store's lock held by its caller (ws_plan_ai.py). A ledger entry holds,
+# per plan, `before` and `after` (the placement's numbers as stored, or the
+# floor), and the plan's scanner and beacon pins as they were, so an undo puts
+# the very pins back when nothing moved them since; calibration pins are
+# re-derived from their unchanged metres, never copied (design 3.8).
+#
+# What it writes: a plan's placement through ModelStore.async_reanchor_map, the
+# Align editor's own commit (its calibration preflight; the picture positions of
+# the plan's calibration points, scanners and beacons re-derived from their
+# unchanged metres, never Save Scale); a refile of a plan with nothing drawn on
+# it, its floor in the maps store and in its placement record
+# (ModelStore.async_set_map_floor, origin_anchored kept). What it never writes:
+# calibration metres, room outlines, device metres, the measured plan, the
+# house's metre scale (test_plan_build_write.py scans for it). A backup before
+# each save and each undo in the line-up's own slot (the last six kept); the
+# ledger in the plan store's "lineup_batches", pending until the writes land;
+# settle_lineups finishes a save cut short or puts it back.
+
+from .const import CALIBRATION_STORE_KEY, DATA_CALIBRATION, DATA_MAPS, MAPS_STORE_KEY, MODEL_STORE_KEY  # noqa: E402
+
+LINEUP_ACCEPT: tuple[str, ...] = ("open", "not_now", "undone")   # not_now: the anchor's own scale waits there; undone: applied again
+LINEUP_SLOT = "plan_build"                                        # the backups' own slot (ws_backup._auto_backup, the last A.S1_BACKUPS_KEPT)
+LP = "Line up plans (experimental): "
+_PIN_LISTS = ("receivers", "beacons")                             # what async_rederive_map_fracs re-derives on a map record
+
+
+def _house_stores(hass: HomeAssistant) -> tuple[Any, Any, Any]:
+    dom = hass.data.get(DOMAIN, {})
+    return dom.get(DATA_MODEL), dom.get(DATA_MAPS), dom.get(DATA_CALIBRATION)
+
+
+def _pins(m: dict | None) -> dict[str, Any]:
+    return {k: copy.deepcopy((m or {}).get(k) or []) for k in _PIN_LISTS}
+
+
+def _live(hass: HomeAssistant, map_id: str) -> dict[str, Any] | None:
+    """A plan as it is: its placement's numbers, its floor and its pins.
+    None: gone or not placed."""
+    mdl, ms, _cal = _house_stores(hass)
+    m = ms.get_map(map_id) if ms is not None else None
+    t = mdl.map_transform(map_id) if mdl is not None else None
+    if not isinstance(m, dict) or not isinstance(t, dict):
+        return None
+    return {"t": A.placement_of(t), "floor_id": str(m.get("floor_id") or ""), "pins": _pins(m)}
+
+
+def _at(live: dict | None, side: Any, kind: str) -> bool:
+    """Is the plan at this side of a ledger entry (its before or its after)?"""
+    if live is None or not isinstance(side, dict):
+        return False
+    if kind == "refile":
+        return live["floor_id"] == side.get("floor_id")
+    return live["t"] is not None and live["t"] == A.placement_of(side.get("t"))
+
+
+async def _write_place(hass: HomeAssistant, map_id: str, to_t: dict[str, Any], pins: dict[str, Any] | None = None) -> str | None:
+    """THE placement write: the six numbers through ModelStore.async_reanchor_map,
+    exactly as the Align editor's Save sends them (ws_fabric_map_reanchor): its
+    calibration preflight refuses, writing nothing, when most of the plan's
+    calibration pins would fall off the picture; the pins' picture positions
+    re-derive from their stored metres, and the map record is saved when they
+    did. A lean is stated when the target has one or the plan has one now (an
+    absent lean is 0.0). `pins`: the scanner and beacon pins put back exactly
+    (an undo of a save nothing has moved since). None, or why it failed."""
+    mdl, ms, cal = _house_stores(hass)
+    m = ms.get_map(map_id) if ms is not None else None
+    if mdl is None or m is None:
+        return "gone"
+    live = mdl.map_transform(map_id) or {}
+    kw = {k: float(to_t[k]) for k in ("origin_x_m", "origin_y_m", "rotation_rad", "scale_x_m", "scale_y_m")}
+    if "shear_rad" in to_t or abs(float(live.get("shear_rad") or 0.0)) > 0:
+        kw["shear_rad"] = float(to_t.get("shear_rad") or 0.0)
+    res = await mdl.async_reanchor_map(map_id, m, cal, **kw)
+    if not res.get("ok"):
+        return str(res.get("error") or "reanchor_failed")
+    if pins is not None:
+        for k, v in pins.items():
+            m[k] = copy.deepcopy(v)
+    if res.get("map_items_rederived") or pins is not None:
+        await ms.store.async_save(ms.data)
+    return None
+
+
+def _storey(hass: HomeAssistant, floor_id: str, map_id: str) -> tuple[int | None, float | None]:
+    """The stack level and storey height a map filed on this floor should
+    carry, as Mapping → 3D Stack's floor select gives them: the level the
+    floor's other maps share, else Home Assistant's level for the floor; the
+    height the other maps share. The readers take a floor's storey from its
+    maps' stack (traceback.js, radio_map.js, calibration.js, the 3D Stack
+    slabs). None: nothing to go on, the map's own is kept."""
+    mdl, ms, _cal = _house_stores(hass)
+    others = [m.get("stack") or {} for m in (ms.list_maps() if ms is not None else [])
+              if str(m.get("floor_id") or "") == floor_id and m.get("id") != map_id]
+    levels = {s["z_level"] for s in others if isinstance(s.get("z_level"), int)}
+    heights = {s["ceiling_height_m"] for s in others if isinstance(s.get("ceiling_height_m"), (int, float))}
+    ha = next((f.get("level") for f in (mdl.floors() if mdl is not None else []) if f.get("id") == floor_id), None)
+    level = next(iter(levels)) if len(levels) == 1 else ha if isinstance(ha, int) else None
+    return (None if level is None else max(0, min(20, int(level)))), (next(iter(heights)) if len(heights) == 1 else None)
+
+
+async def _write_refile(hass: HomeAssistant, map_id: str, side: dict[str, Any]) -> str | None:
+    """THE refile write: the map's floor and its storey in the stack (level
+    and height), in one maps_store.async_update_map (with the legacy stack
+    copy of the floor when the map has one, which radio_map.js still reads
+    first), and the placement record's floor (ModelStore.async_set_map_floor,
+    the whole record kept). The placement stays: floors share one footprint."""
+    mdl, ms, _cal = _house_stores(hass)
+    if mdl is None or ms is None or ms.get_map(map_id) is None:
+        return "gone"
+    stack = {k: side[s] for k, s in (("floor_id", "stack_floor"), ("z_level", "stack_level"), ("ceiling_height_m", "stack_height"))
+             if side.get(s) is not None}
+    extra = {"stack": stack} if stack else {}
+    await ms.async_update_map(map_id, floor_id=side["floor_id"], **extra)
+    if not await mdl.async_set_map_floor(map_id, side.get("t_floor") or side["floor_id"]):
+        return "not_placed"
+    return None
+
+
+def _refile_whole(hass: HomeAssistant, e: dict[str, Any]) -> bool:
+    """A refile at its `after` in every copy: the placement record's floor
+    (presence_coordinator reads it to pick the map a position is drawn on)
+    and the stack's, not only the maps record's that _at compares."""
+    mdl, ms, _cal = _house_stores(hass)
+    m, t, a = (ms.get_map(e["map_id"]) if ms is not None else None) or {}, (mdl.map_transform(e["map_id"]) if mdl is not None else None) or {}, e["after"]
+    stk = m.get("stack") or {}
+    return (t.get("floor_id") == (a.get("t_floor") or a["floor_id"])
+            and all(a.get(s) is None or stk.get(k) == a[s] for k, s in (("floor_id", "stack_floor"), ("z_level", "stack_level"),
+                                                                       ("ceiling_height_m", "stack_height"))))
+
+
+async def _write_side(hass: HomeAssistant, e: dict[str, Any], side: str, pins: dict[str, Any] | None = None,
+                      from_side: str | None = None) -> str | None:
+    """One ledger entry taken to its before or its after; never raises.
+    `from_side`: written only while the plan is still at that side of the
+    entry, else "changed" and nothing written (the Align editor, 3D Stack or
+    the Rooms tab don't take the plan store's lock, so a hand save can land
+    between the checks and the writes: it is never written over). A save's
+    entry from its before also needs the anchor its placement was composed
+    on where it was ("changed"), and a refile a plan with nothing drawn on
+    it ("refile_refused"), read fresh (review B7)."""
+    if from_side is not None and not _at(_live(hass, e["map_id"]), e[from_side], e.get("kind")):
+        return "changed"
+    if from_side == "before" and isinstance(e.get("anchor"), dict):
+        live = _live(hass, e["anchor"]["map_id"])
+        if live is None or live["t"] != A.placement_of(e["anchor"]["t"]):
+            return "changed"
+    if from_side == "before" and e.get("empty"):
+        drawn = (A.house_snapshot(hass)["plans"].get(e["map_id"]) or {}).get("drawn")
+        if drawn is None or A.drawn_total(drawn):
+            return "refile_refused"
+    try:
+        if e.get("kind") == "refile":
+            return await _write_refile(hass, e["map_id"], e[side])
+        return await _write_place(hass, e["map_id"], e[side]["t"], pins)
+    except Exception as err:  # noqa: BLE001 — a write that throws is a write that failed
+        _LOGGER.error("PadSpan plan line-up: a write failed: %s", P._why(err))  # noqa: SLF001
+        return "error"
+
+
+async def _rederive(hass: HomeAssistant, map_ids: set[str]) -> None:
+    """The re-derivations reanchor makes, made again (both repeat safely): a
+    save cut short between the placement and the calibration or map files."""
+    mdl, ms, cal = _house_stores(hass)
+    for mid in sorted(map_ids):
+        try:
+            m = ms.get_map(mid) if ms is not None else None
+            if cal is not None and hasattr(cal, "async_remap_from_metres"):
+                await cal.async_remap_from_metres(mid)
+            if mdl is not None and m is not None and await mdl.async_rederive_map_fracs(mid, m):
+                await ms.store.async_save(ms.data)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("PadSpan plan line-up: re-deriving a plan's pins failed: %s", P._why(err))  # noqa: SLF001
+
+
+def _stop(hass: HomeAssistant, store: A.PlanAiStore, sess: dict | None, reason: str, map_id: str | None = None) -> None:
+    """A stop of the writes: named, counted, kept on the session (design 14)."""
+    A.note_stop(hass, store.data, sess, reason, map_id)
+    if sess is not None:
+        sess["rev"] = int(sess.get("rev") or 0) + 1
+
+
+def _floor_name(snap: dict, fid: Any) -> str:
+    return next((str(f.get("name") or f["id"]) for f in snap["floors"] if f["id"] == fid), str(fid or "this floor"))
+
+
+def _preflight(snap: dict, map_id: str, new_t: dict) -> tuple[int, int]:
+    """async_reanchor_map's calibration test, run in memory on the proposal
+    before anything is written (design 3.8.1): (points on the plan, of them
+    off its picture), through the reanchor's own metres-to-picture rule
+    (ModelStore.metres_to_map_frac) on the proposed placement. The reanchor
+    runs it again at the write."""
+    from types import SimpleNamespace  # noqa: PLC0415
+    from .model_store import ModelStore  # noqa: PLC0415
+    proposed = SimpleNamespace(data={"map_transforms": {map_id: new_t}})
+    owned = bad = 0
+    for p in snap["calibration"]:
+        if p.get("map_id") != map_id or p.get("x_m") is None:
+            continue
+        try:
+            fr = ModelStore.metres_to_map_frac(proposed, float(p["x_m"]), float(p["y_m"]), map_id)
+        except (TypeError, ValueError, KeyError):
+            continue
+        owned += 1
+        if not fr or not (-0.05 <= fr[0] <= 1.05 and -0.05 <= fr[1] <= 1.05):
+            bad += 1
+    return owned, bad
+
+
+def _ledger_entry(hass: HomeAssistant, iid: str, it: dict[str, Any]) -> dict[str, Any]:
+    """An item's before and after as the stores hold them now, under the lock."""
+    mdl, ms, cal = _house_stores(hass)
+    mid = it["map_id"]
+    m, t = ms.get_map(mid), mdl.map_transform(mid) or {}
+    stk = m.get("stack") or {}
+    before: dict[str, Any] = {"t": {k: t[k] for k in G.FIELDS if k in t}, "floor_id": str(m.get("floor_id") or ""),
+                              "t_floor": t.get("floor_id"), "stack_floor": stk.get("floor_id"),
+                              "stack_level": stk.get("z_level"), "stack_height": stk.get("ceiling_height_m")}
+    if it["kind"] == "refile":
+        to = it["proposal"]["to_floor_id"]
+        level, height = _storey(hass, to, mid)
+        after = {"t": dict(before["t"]), "floor_id": to, "t_floor": to, "stack_floor": to if before["stack_floor"] else None,
+                 "stack_level": before["stack_level"] if level is None else level, "stack_height": before["stack_height"] if height is None else height}
+    else:
+        after = {"t": {k: it["proposal"][k] for k in G.FIELDS if k in it["proposal"]}, "floor_id": before["floor_id"],
+                 "t_floor": before["t_floor"], "stack_floor": before["stack_floor"]}
+    points = [p for p in ((cal.data.get("points") or []) if cal is not None and isinstance(getattr(cal, "data", None), dict) else [])
+              if isinstance(p, dict) and p.get("map_id") == mid]
+    entry = {"item_id": iid, "kind": it["kind"], "map_id": mid, "name": it.get("name") or "", "before": before, "after": after,
+             "pins_before": _pins(m), "cal_before": {str(p.get("id")): [p.get("x_frac"), p.get("y_frac")] for p in points}}
+    anchor = (it.get("evidence") or {}).get("anchor")
+    if it["kind"] == "place" and anchor and isinstance(it.get("anchor_now"), dict):
+        entry["anchor"] = {"map_id": anchor, "t": it["anchor_now"]}      # checked again at its write (_write_side, review B7)
+    if it["kind"] == "refile":
+        entry["empty"] = True                                            # a refile only of a plan with nothing drawn on it, at its write too
+    return entry
+
+
+def _fitted_to(hass: HomeAssistant, store: A.PlanAiStore, anchor_id: str) -> list[str]:
+    """The saved placements, not undone, that were fitted to this plan and
+    still sit where their save put them: composed on the anchor's placement,
+    they would come off their drawings if its scale changed under them."""
+    out: list[str] = []
+    for b in (store.data.get("lineup_batches") or {}).values():
+        if not isinstance(b, dict) or b.get("undo_of") or b.get("undone_at") or b.get("pending"):
+            continue
+        items = (store.lineup(b.get("session")) or {}).get("items") or {}
+        for e in b.get("items") or []:
+            it = items.get(e.get("item_id")) or {}
+            if e.get("kind") == "place" and (it.get("evidence") or {}).get("anchor") == anchor_id and _at(_live(hass, e["map_id"]), e["after"], "place"):
+                out.append(e.get("name") or e["map_id"])
+    return out
+
+
+def _resign(hass: HomeAssistant, store: A.PlanAiStore, b: dict[str, Any]) -> None:
+    """The batch's plans as its own writes left them, signed again on its
+    session (review B1): a save or an undo moves a plan's placement (a refile
+    its floor), and the session's guard and Resume must not take the
+    line-up's own write for a plan moved in Mapping. Only a plan still where
+    the batch put it: a hand move since stays a change. The reads are in the
+    picture's own pixels, so the line-up's own move doesn't make them stale."""
+    sess = store.lineup(b.get("session"))
+    if sess is None:
+        return
+    landed = {e["map_id"] for e in b.get("items") or [] if _at(_live(hass, e["map_id"]), e["after"], e["kind"])}
+    for pl in sess.get("plans") or []:
+        now = A.plan_now(hass, pl["map_id"]) if pl.get("map_id") in landed else None
+        if now is not None:
+            pl["place_sig"], pl["floor_id"] = now["place_sig"], now["floor_id"]
+
+
+def _landed(hass: HomeAssistant, store: A.PlanAiStore, bid: str, b: dict[str, Any], at: float) -> None:
+    """A batch whose writes all landed: its items say so (a commit's committed,
+    an undo's undone, and the saves it undid spent), and its plans are signed
+    again on the session."""
+    _resign(hass, store, b)
+    sess = store.lineup(b.get("session"))
+    items = (sess or {}).get("items") or {}
+    for e in b.get("items") or []:
+        it = items.get(e["item_id"])
+        if isinstance(it, dict):
+            it["state"] = "undone" if b.get("undo_of") else "committed"
+    for of in b.get("undo_of") or []:
+        ob = (store.data.get("lineup_batches") or {}).get(of)
+        if isinstance(ob, dict):
+            ob["undone_at"] = at
+    if sess is not None:
+        if not b.get("undo_of") and bid not in (sess.get("batches") or []):
+            sess.setdefault("batches", []).append(bid)
+        sess["rev"] = int(sess.get("rev") or 0) + 1
+
+
+async def settle_lineups(hass: HomeAssistant, store: A.PlanAiStore) -> bool:
+    """A line-up save or undo cut short (a restart, a crash) between its
+    writes: run before any line-up command. The house decides. Every plan at
+    its `after`: the batch stands; the mark comes off, and the re-derivations
+    are made again in case the cut fell between the placement and the pin
+    files. Otherwise it never happened: each plan at its `after` is put back
+    to its `before` (its pins exactly), and the batch goes. A put-back that
+    can't be written (the reanchor's preflight refuses the old placement, say)
+    is settled once, never retried: the plans it couldn't put back stand as
+    saved, the batch keeps only them, Undo takes them back, and the session
+    says so by a named stop. In memory; the caller saves when it returns True."""
+    if not A.writable(store.data):
+        return False
+    batches = store.data.get("lineup_batches") or {}
+    settled = False
+    for bid, b in list(batches.items()):
+        p = b.get("pending") if isinstance(b, dict) else None
+        if not isinstance(p, dict):
+            continue
+        settled = True
+        entries = b.get("items") or []
+        lives = [_live(hass, e["map_id"]) for e in entries]
+        if entries and all(_at(lv, e["after"], e["kind"]) for lv, e in zip(lives, entries)):
+            for e in entries:                          # a refile cut between its writes: the placement record's floor too (presence reads it)
+                if e["kind"] == "refile" and not _refile_whole(hass, e):
+                    await _write_side(hass, e, "after")
+            b.pop("pending", None)
+            await _rederive(hass, {e["map_id"] for e in entries if e["kind"] != "refile"})
+            _landed(hass, store, bid, b, float(p.get("at") or time.time()))
+            A._bump(hass, "plan_build_settled:finished")  # noqa: SLF001
+            continue
+        kept = True
+        for lv, e in zip(reversed(lives), reversed(entries)):
+            if _at(lv, e["after"], e["kind"]) and not _at(lv, e["before"], e["kind"]):
+                pins = e.get("pins_before") if e["kind"] != "refile" else None     # the pins as they were when this batch began
+                if await _write_side(hass, e, "before", pins):
+                    kept = False
+        if kept:
+            batches.pop(bid, None)
+            _invalidate(hass)
+            A._bump(hass, "plan_build_settled:put_back")  # noqa: SLF001
+            continue
+        _stood(hass, store, bid, b, float(p.get("at") or time.time()))
+    return settled
+
+
+def _stood(hass: HomeAssistant, store: A.PlanAiStore, bid: str, b: dict[str, Any], at: float) -> None:
+    """A batch cut short whose put-back couldn't be written: it stands for
+    the plans still at its `after` (the others are back at `before`), its
+    mark off, and it is said once (save_stands or undo_stands). A save that
+    stands is undone like any other; an undo that stands leaves the rest of
+    the saves it was undoing to the next Undo."""
+    batches = store.data.get("lineup_batches") or {}
+    stand = [e for e in b.get("items") or [] if _at(_live(hass, e["map_id"]), e["after"], e["kind"])]
+    if not stand:                                      # nothing of it is left in the house after all: it never happened
+        batches.pop(bid, None)
+        _invalidate(hass)
+        A._bump(hass, "plan_build_settled:put_back")  # noqa: SLF001
+        return
+    b["items"] = stand
+    b.pop("pending", None)
+    b["stood"] = True
+    sess = store.lineup(b.get("session"))
+    if not b.get("undo_of"):
+        _landed(hass, store, bid, b, at)
+    else:
+        covered = {(e.get("of"), e["item_id"]) for e in stand}
+        for of in b["undo_of"]:
+            ob = batches.get(of)
+            if isinstance(ob, dict):                   # what this undo reached is taken out of the save; the rest stays to undo
+                ob["items"] = [e for e in ob.get("items") or [] if (of, e["item_id"]) not in covered]
+                if not ob["items"]:
+                    ob["undone_at"] = at
+        _resign(hass, store, b)
+        items = (sess or {}).get("items") or {}
+        for e in stand:
+            if isinstance(items.get(e["item_id"]), dict):
+                items[e["item_id"]]["state"] = "undone"
+    _stop(hass, store, sess, "undo_stands" if b.get("undo_of") else "save_stands")
+    _invalidate(hass)
+    _LOGGER.warning("PadSpan plan line-up (experimental): a %s cut short couldn't be put back; %d plan(s) stand as it left them",
+                    "undo" if b.get("undo_of") else "save", len(stand))
+    A._bump(hass, "plan_build_settled:stood")  # noqa: SLF001
+
+
+async def _backup(hass: HomeAssistant, note: str) -> str | None:
+    from .ws_backup import _auto_backup  # noqa: PLC0415
+    return await _auto_backup(hass, note, [MODEL_STORE_KEY, MAPS_STORE_KEY, CALIBRATION_STORE_KEY], slot=LINEUP_SLOT, slot_keep=A.S1_BACKUPS_KEPT)
+
+
+def _invalidate(hass: HomeAssistant) -> None:
+    try:
+        from .ws_common import _invalidate_snapshot_cache  # noqa: PLC0415
+        _invalidate_snapshot_cache(hass)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def lineup_commit(hass: HomeAssistant, store: A.PlanAiStore, sid: str, rev: int, item_ids: Any, group: bool = False) -> dict[str, Any]:
+    """Save accepted line-up items: one at a time, or a group of items that
+    shift nothing drawn on their plans (form q8). Everything is checked
+    before anything is written (design 3.8.1); then a backup (refused without
+    one), the ledger pending, the writes one plan at a time (a failure puts
+    back the plans already written), the mark off. The caller holds the store's lock."""
+    if not A.writable(store.data):
+        raise Refused("plan_ai_newer", LP + "this plan store was saved by a newer PadSpan: update PadSpan to save.")
+    if await settle_lineups(hass, store):
+        await _save(store)
+    sess = store.lineup(sid)
+    if sess is None:
+        raise Refused("not_found", LP + "that session isn't here any more: line the floor up again.")
+    if A.running(hass) is not None or sess.get("status") == "running":
+        raise Refused("already_running", LP + "a session is reading your plans: save when it ends.")
+    if int(sess.get("rev") or 0) != rev:
+        raise Refused(REV_CODE, LP + "the session changed since you looked. Nothing was saved: it is reloaded, try again.")
+    ids = list(item_ids) if isinstance(item_ids, list) else []
+    if not ids or len(set(ids)) != len(ids) or not all(isinstance(i, str) for i in ids):
+        raise Refused("invalid", LP + "nothing to save.")
+    if not group and len(ids) != 1:
+        raise Refused("invalid", LP + "items are accepted one at a time; only items that shift nothing drawn on a plan go as a group.")
+    items = sess.get("items") or {}
+    wanted = [(iid, items.get(iid)) for iid in ids]
+    if any(not isinstance(it, dict) for _, it in wanted):
+        raise Refused("not_found", LP + "that item isn't here any more.")
+    shut = [iid for iid, it in wanted if it.get("state") not in LINEUP_ACCEPT or it.get("kind") not in A.ITEM_KINDS]
+    if shut:
+        raise Refused("not_open", LP + "that item can't be accepted now.", {"items": shut, "rev": sess.get("rev")})
+
+    snap = A.house_snapshot(hass)
+
+    async def refuse(code: str, message: str, stop: str | None, mid: str | None, counter: str, extra: dict | None = None) -> None:
+        """Nothing written: the stop named and counted, the session's rev moved on, the refusal said."""
+        if stop:
+            _stop(hass, store, sess, stop, mid)
+        else:
+            sess["rev"] = int(sess.get("rev") or 0) + 1
+        A._bump(hass, f"plan_build_commit:{counter}")  # noqa: SLF001
+        await _save(store)
+        raise Refused(code, message, {**(extra or {}), "rev": sess.get("rev")})
+
+    flags_now: dict[str, list] = {}
+
+    async def recheck(snap: dict, during: bool) -> None:
+        """Each item against the house as it is: its plan, picture, placement,
+        floor, anchor and flags, a refile's plan still clean. `during`: again
+        after the backup, which leaves the event loop free for the Align
+        editor's own save; a change then is its own named stop (design 14)."""
+        changed: list[dict[str, str]] = []
+        for iid, it in wanted:
+            why = A.item_now(snap, sess, it)
+            if why is None and it["kind"] != "refile":
+                flags_now[iid], _others = A.effects(snap, it["map_id"], it["proposal"])
+                seen = {(f["what"], f["id"]) for f in it.get("flags") or []}
+                if any((f["what"], f["id"]) not in seen for f in flags_now[iid]):
+                    why = "new_flag"                       # something drawn on the plan since the person looked
+            if why:
+                changed.append({"item_id": iid, "why": why})
+        if changed:
+            for c in changed:
+                it = items[c["item_id"]]
+                if it.get("state") != "stale":
+                    it["state"] = "stale"
+                    A._bump(hass, f"plan_build_item:{it['kind']}_stale")  # noqa: SLF001
+            gone = next((c for c in changed if c["why"] == "floor_gone"), None)
+            if gone:
+                await refuse("floor_gone", LP + " ".join(A.STOPS["floor_gone"]), "floor_gone", items[gone["item_id"]]["map_id"], "changed_since",
+                             {"changed": changed})
+            if during:
+                await refuse("changed_since", LP + " ".join(A.STOPS["changed_while_saving"]), "changed_while_saving", None, "changed_since",
+                             {"changed": changed})
+            await refuse("changed_since", LP + "the plan changed since you looked (moved, a new picture, or something drawn on it). "
+                         "Nothing was saved: line the floor up again.", None, None, "changed_since", {"changed": changed})
+        for iid, it in wanted:
+            if it["kind"] == "refile" and A.drawn_total(snap["plans"][it["map_id"]]["drawn"]):
+                it["state"] = "refused"
+                await refuse("refile_refused", LP + " ".join(A.STOPS["refile_refused"]), "refile_refused", it["map_id"], "refile_refused", {"items": [iid]})
+
+    # 1. Check everything; write nothing if any check fails.
+    for iid, it in wanted:
+        if it["map_id"] == snap["gauge_map"]:
+            await refuse("measured_plan_protected", LP + " ".join(A.STOPS["measured_plan_protected"]), "measured_plan_protected", it["map_id"],
+                         "measured_plan_protected", {"items": [iid]})
+    await recheck(snap, False)
+    if group:
+        shifting = [iid for iid, it in wanted if it.get("flags") or flags_now.get(iid)]
+        if shifting:
+            await refuse("group_refused", LP + " ".join(A.STOPS["group_refused"]), "group_refused", None, "group_refused", {"items": shifting})
+    scaled = {it["map_id"] for _, it in wanted if it["kind"] == "anchor_scale"}
+    if any(it["kind"] == "place" and (it.get("evidence") or {}).get("anchor") in scaled for _, it in wanted):
+        raise Refused("invalid", LP + "save the anchor's own scale on its own: the plans fitted to it are lined up again after.", {"rev": sess.get("rev")})
+    for iid, it in wanted:                             # a saved plan fitted to this one would be left off its drawing (review S4, B6)
+        fitted = _fitted_to(hass, store, it["map_id"]) if it["kind"] in ("anchor_scale", "place") else []
+        if fitted:
+            await refuse("anchor_after_fit", LP + f"{', '.join(fitted)} {'is' if len(fitted) == 1 else 'are'} saved lined up to this plan as it is. "
+                         + " ".join(A.STOPS["anchor_after_fit"]), "anchor_after_fit", it["map_id"], "anchor_after_fit", {"items": [iid]})
+    for iid, it in wanted:
+        if it["kind"] == "refile":
+            continue
+        owned, bad = _preflight(snap, it["map_id"], it["proposal"])
+        A._bump(hass, "plan_build_preflight:checked")  # noqa: SLF001
+        if owned and bad * 2 > owned:
+            A._bump(hass, "plan_build_preflight:blocked")  # noqa: SLF001
+            it["refused"] = {"why": "points_out_of_range", "owned": owned, "off": bad}
+            await refuse("points_out_of_range", LP + f"{bad} of {owned} calibration points on {it.get('name') or 'this plan'} would fall off its picture, "
+                         "so nothing was saved. " + A.STOPS["preflight_blocked"][1], "preflight_blocked", it["map_id"], "points_out_of_range",
+                         {"items": [iid]})
+
+    # 2. The backup, before each save, in its own slot.
+    backup_id = await _backup(hass, f"Before plan line-up (experimental): {_floor_name(snap, sess.get('floor_id'))}")
+    if not backup_id:
+        await refuse("backup_failed", LP + " ".join(A.STOPS["backup_failed"]), "backup_failed", None, "backup_failed")
+    # The backup awaited: a hand save may have landed meanwhile. The checks again, on the house as it is now.
+    await recheck(A.house_snapshot(hass), True)
+
+    # 3. The ledger, pending, from the stores as they are now (under the lock).
+    snap_store = copy.deepcopy(store.data)
+    at = time.time()
+    bid = "lb_" + secrets.token_hex(4)
+    entries = [_ledger_entry(hass, iid, it) for iid, it in wanted]
+    batch = {"session": sid, "floor_id": sess.get("floor_id"), "committed_at": at, "backup_id": backup_id, "group": bool(group),
+             "items": entries, "undone_at": None, "undo_of": None, "pending": {"at": at}}
+    store.data.setdefault("lineup_batches", {})[bid] = batch
+    store.trim()
+    if not await store.async_checked_save():
+        await _put_back(store, snap_store)
+        sess = store.lineup(sid) or sess
+        await refuse("save_failed", LP + "couldn't save the line-up's record, so nothing was changed. Try again.", None, None, "save_failed")
+
+    # 4. The writes, one plan at a time.
+    done: list[dict] = []
+    failed: str | None = None
+    for e in entries:
+        failed = await _write_side(hass, e, "after", from_side="before")     # still where the ledger found it, or not written
+        if failed:
+            break
+        e["pins_after"] = _pins(_house_stores(hass)[1].get_map(e["map_id"]))
+        done.append(e)
+    if failed:
+        put_back = True
+        for e in reversed(done):                       # only a plan still as this save left it: a hand save since stands
+            if await _write_side(hass, e, "before", e.get("pins_before") if e["kind"] != "refile" else None, from_side="after") not in (None, "changed"):
+                put_back = False
+        if put_back:
+            await _put_back(store, snap_store)         # the batch never happened
+        else:
+            await _save(store)                         # left pending: settle_lineups puts it back next time
+        if done:
+            A._bump(hass, "plan_build_commit:rolled_back")  # noqa: SLF001
+        _invalidate(hass)
+        sess = store.lineup(sid) or sess
+        if failed == "points_out_of_range":
+            A._bump(hass, "plan_build_preflight:blocked")  # noqa: SLF001
+        if failed == "changed":
+            await refuse("changed_since", LP + " ".join(A.STOPS["changed_while_saving"]), "changed_while_saving", None, "changed_since")
+        if failed == "refile_refused":                 # something was drawn on the plan since the last check
+            ((sess.get("items") or {}).get(e["item_id"]) or {})["state"] = "refused"      # the session as put back
+            await refuse("refile_refused", LP + " ".join(A.STOPS["refile_refused"]), "refile_refused", e["map_id"], "refile_refused",
+                         {"items": [e["item_id"]]})
+        await refuse("save_failed", LP + ("couldn't write the line-up, so what was written is put back: nothing was changed. " if put_back else
+                                          "couldn't write the line-up; what was written is put back the next time Line up plans opens. ")
+                     + "Try again; check Home Assistant's storage.", "preflight_blocked" if failed == "points_out_of_range" else None, None, "save_failed")
+
+    # 5. The mark off; what was saved is said and counted.
+    batch.pop("pending", None)
+    for iid, it in wanted:
+        it["state"] = "committed"
+        it["verdict"] = {"v": "accepted", "group": bool(group), "at": at, "batch": bid, "why": None, "was": (it.get("verdict") or {}).get("was")}
+        it.pop("refused", None)
+    sess.setdefault("batches", []).append(bid)
+    _resign(hass, store, batch)
+    sess["rev"] = int(sess.get("rev") or 0) + 1
+    await _save(store)
+    _invalidate(hass)
+    _LOGGER.info("PadSpan plan line-up (experimental): saved %d item(s) of session %s (backup %s)", len(entries), sid, backup_id)
+    for iid, it in wanted:
+        A._bump(hass, f"plan_build_item:{it['kind']}_{'accepted_group' if group else 'accepted'}")  # noqa: SLF001
+        if it["kind"] == "refile":
+            A._bump(hass, "plan_build_refile:accepted")  # noqa: SLF001
+        elif it.get("max_move_m") is not None:
+            A._bump(hass, f"plan_build_move:accepted_{A._band_m(float(it['max_move_m']))}")  # noqa: SLF001
+            A._bump(hass, f"plan_build_scale_change:accepted_{A._scale_band(float(it.get('scale_change') or 0) * 100)}")  # noqa: SLF001
+    A._bump(hass, "plan_build_commit:done")  # noqa: SLF001
+    return {"ok": True, "rev": sess["rev"], "batch": bid, "backup_id": backup_id, "items": {iid: items[iid] for iid in ids},
+            "undo": A.lineup_undo_info(store, sid)}
+
+
+async def lineup_undo(hass: HomeAssistant, store: A.PlanAiStore, sid: str) -> dict[str, Any]:
+    """Undo a whole line-up session: every save of it, newest first. A plan
+    still exactly as a save left it goes back to what it was (its placement or
+    floor through the same writes, its scanner and beacon pins exactly when
+    nothing moved them since, its calibration pins re-derived from their
+    unchanged metres); one moved since by hand is left and said. Allowed
+    whatever the AI Task (form q3). Backed up first, and a batch of its own in
+    the ledger. The caller holds the store's lock."""
+    if not A.writable(store.data):
+        raise Refused("plan_ai_newer", LP + "this plan store was saved by a newer PadSpan: update PadSpan to undo.")
+    if await settle_lineups(hass, store):
+        await _save(store)
+    if A.running(hass) is not None:
+        raise Refused("already_running", LP + "a session is reading your plans: undo when it ends.")
+    sess = store.lineup(sid)
+    batches = store.data.setdefault("lineup_batches", {})
+    mine = sorted(((bid, b) for bid, b in batches.items() if isinstance(b, dict) and b.get("session") == sid and not b.get("undo_of")
+                   and not b.get("undone_at") and not b.get("pending")), key=lambda t: float(t[1].get("committed_at") or 0), reverse=True)
+    if not mine:
+        raise Refused("nothing_to_undo", LP + "nothing of this session is left to undo.")
+    todo: list[tuple[str, dict, dict | None]] = []
+    skipped: list[dict] = []
+    for bid, b in mine:
+        for e in reversed(b.get("items") or []):
+            lv = _live(hass, e["map_id"])
+            if _at(lv, e["after"], e["kind"]):
+                todo.append((bid, e, lv))
+            else:
+                skipped.append({"item_id": e["item_id"], "map_id": e["map_id"], "name": e.get("name") or "", "why": "gone" if lv is None else "moved"})
+    at = time.time()
+    if not todo:                                  # every plan moved since: nothing can be put back, so the saves are spent
+        for _bid, b in mine:
+            b["undone_at"] = at
+            b["skipped"] = skipped
+        if sess is not None:
+            sess["rev"] = int(sess.get("rev") or 0) + 1
+        await _save(store)
+        A._bump(hass, "plan_build_undo:item_skipped", len(skipped))  # noqa: SLF001
+        return {"ok": True, "undone": 0, "skipped": skipped, "rev": (sess or {}).get("rev"), "undo": A.lineup_undo_info(store)}
+
+    snap = A.house_snapshot(hass)
+    floor = _floor_name(snap, (sess or {}).get("floor_id") or mine[0][1].get("floor_id"))
+
+    async def failed_undo(code: str, reason: str) -> None:
+        _stop(hass, store, store.lineup(sid), reason)
+        A._bump(hass, "plan_build_undo:failed")  # noqa: SLF001
+        await _save(store)
+        raise Refused(code, LP + " ".join(A.STOPS[reason]), {"rev": (store.lineup(sid) or {}).get("rev")})
+
+    backup_id = await _backup(hass, f"Before undoing a plan line-up (experimental): {floor}")
+    if not backup_id:
+        await failed_undo("backup_failed", "backup_failed")
+
+    snap_store = copy.deepcopy(store.data)
+    ubid = "lb_" + secrets.token_hex(4)
+    u_items = []
+    for bid, e, lv in todo:
+        exact = e.get("pins_before") if e["kind"] != "refile" and lv is not None and lv["pins"] == e.get("pins_after") else None
+        u_items.append({"item_id": e["item_id"], "kind": e["kind"], "map_id": e["map_id"], "name": e.get("name") or "", "of": bid,
+                        "before": copy.deepcopy(e["after"]), "after": copy.deepcopy(e["before"]),
+                        "pins_before": lv["pins"] if lv else None, "pins_restore": exact})
+    batches[ubid] = {"session": sid, "floor_id": mine[0][1].get("floor_id"), "committed_at": at, "backup_id": backup_id, "items": u_items,
+                     "undo_of": [bid for bid, _ in mine], "undone_at": None, "skipped": skipped, "pending": {"at": at}}
+    store.trim()
+    if not await store.async_checked_save():
+        await _put_back(store, snap_store)
+        await failed_undo("undo_failed", "undo_failed")
+    done: list[dict] = []
+    failed = None
+    for u in u_items:
+        failed = await _write_side(hass, u, "after", u.get("pins_restore"), from_side="before")
+        if failed:
+            break
+        done.append(u)
+    if failed:
+        put_back = True
+        for u in reversed(done):
+            if await _write_side(hass, u, "before", u.get("pins_before") if u["kind"] != "refile" else None, from_side="after") not in (None, "changed"):
+                put_back = False
+        if put_back:
+            await _put_back(store, snap_store)
+        _invalidate(hass)
+        await failed_undo("undo_failed", "undo_failed")
+
+    ub = batches[ubid]
+    ub.pop("pending", None)
+    _landed(hass, store, ubid, ub, at)
+    await _save(store)
+    _invalidate(hass)
+    _LOGGER.info("PadSpan plan line-up (experimental): undid session %s, %d plan(s) back, %d left (backup %s)", sid, len(u_items), len(skipped), backup_id)
+    A._bump(hass, "plan_build_undo:session")  # noqa: SLF001
+    if skipped:
+        A._bump(hass, "plan_build_undo:item_skipped", len(skipped))  # noqa: SLF001
+    for u in u_items:
+        A._bump(hass, f"plan_build_item:{u['kind']}_undone")  # noqa: SLF001
+        if u["kind"] == "refile":
+            A._bump(hass, "plan_build_refile:undone")  # noqa: SLF001
+    sess = store.lineup(sid)
+    return {"ok": True, "undone": len(u_items), "skipped": skipped, "batch": ubid, "backup_id": backup_id, "rev": (sess or {}).get("rev"),
+            "items": {u["item_id"]: ((sess or {}).get("items") or {}).get(u["item_id"]) for u in u_items}, "undo": A.lineup_undo_info(store)}
+
+
+# ══ Build from plans: rooms, doors, windows and stairs (Stage 2; experimental) ══
+# Plan-build design 5 ("Stage 2 as built"). ONE save writes a floor's accepted
+# rooms, doors, windows and stairs: a room's outline through
+# FabricStore.async_correct_room (the room editor's own path; a new room is
+# first made as fabric_room_add makes one: ModelStore.async_ensure_rooms, its
+# floor and its adjacency entry), the doors, windows and stairs in one 3D file
+# write (apply_edit, async_write; a stair as Add data via plans keeps one).
+# Before it: every check, the rooms gate, ONE backup (fabric, model, 3D file;
+# its own slot, the last six kept), the ledger with every item's `before`,
+# pending until the writes land; settle_rooms finishes a save cut short or puts
+# it back. rooms_undo takes the session back: what is still as the save left it
+# goes back to `before`, what changed since is left and said. Never a rename,
+# never a deleted room of the person's, never a calibration point, a barrier, a
+# placement or anything in metres but these outlines, openings and stairs
+# (tests/test_plan_build_rooms.py scans for it).
+
+from .const import DATA_FABRIC, FABRIC_STORE_KEY  # noqa: E402
+
+ROOMS_SLOT = "plan_build_rooms"                                    # the backups' own slot (the last A.S1_BACKUPS_KEPT)
+RP = "Rooms from plans (experimental): "
+ROOM_KINDS = ("room", "room_new")
+HOUSE_KINDS = ("opening", "stairs")
+
+
+def _fab_record(hass: HomeAssistant, room: str) -> dict[str, Any] | None:
+    """A room's fabric record as stored (any floor), a copy; None: no such room."""
+    fab = hass.data.get(DOMAIN, {}).get(DATA_FABRIC)
+    for floor in ((getattr(fab, "data", None) or {}).get("floors") or {}).values():
+        rec = ((floor or {}).get("rooms") or {}).get(room) if isinstance(floor, dict) else None
+        if isinstance(rec, dict):
+            return copy.deepcopy(rec)
+    return None
+
+
+def _shape(rec: Any) -> Any:
+    """What makes two room records the same shape: the outline, as stored."""
+    if not isinstance(rec, dict):
+        return None
+    return (rec.get("type", "poly"), [[round(float(v), 3) for v in p[:2]] for p in rec.get("points_m") or []],
+            rec.get("cx_m"), rec.get("cy_m"), rec.get("r_m"), str(rec.get("floor_id") or ""))
+
+
+def _room_at(hass: HomeAssistant, e: dict[str, Any], side: str) -> bool:
+    want = e.get(side)
+    rec = _fab_record(hass, e["room"])
+    if want is None:
+        return rec is None
+    return rec is not None and _shape(rec) == _shape({**want, "floor_id": e["floor_id"]})
+
+
+def _house_at(house: dict, e: dict[str, Any], side: str) -> bool:
+    section, _, key = e["target"].partition("/")
+    return ((house.get(section) or {}).get(key) if isinstance(house.get(section), dict) else None) == e.get(side)
+
+
+def _at_side(hass: HomeAssistant, house: dict, e: dict[str, Any], side: str) -> bool:
+    return _room_at(hass, e, side) if e["kind"] in ROOM_KINDS else _house_at(house, e, side)
+
+
+async def _write_room(hass: HomeAssistant, e: dict[str, Any], side: str) -> str | None:
+    """THE room write: one room to its `before` or `after`, through the room
+    editor's own writer. A room the save made is taken away again only by
+    ModelStore.async_remove_room (geometry, meta, adjacency), and only by an
+    undo or a put-back that found it still as made. A `before` with a
+    provenance stamp gets it back (async_correct_room's source fields); an
+    external import's record comes back as a correction (that writer refuses
+    to import over a room). None, or why it failed."""
+    dom = hass.data.get(DOMAIN, {})
+    fab, mdl = dom.get(DATA_FABRIC), dom.get(DATA_MODEL)
+    if fab is None or mdl is None:
+        return "no_fabric"
+    want, room, fl = e.get(side), e["room"], e["floor_id"]
+    try:
+        had = e.get("meta_before") or {}
+        if want is None and (had.get("room_meta") is not None or had.get("adjacency") is not None or had.get("scanners")):
+            # A new room under a name that already had settings (a Home Assistant area with its floor, colour,
+            # height, adjacency) or a receiver in it: only the shape the save added goes; the settings come back as
+            # they were (review B1), and the receivers stay (ModelStore.async_remove_room would take them along).
+            res = await fab.async_remove_room(room)
+            if not res.get("ok"):
+                return str(res.get("error") or "remove_failed")
+            for key, was in (("room_meta", had.get("room_meta")), ("room_adjacency", had.get("adjacency"))):
+                if was is None:
+                    (mdl.data.get(key) or {}).pop(room, None)
+                else:
+                    mdl.data.setdefault(key, {})[room] = copy.deepcopy(was)
+            await mdl.store.async_save(mdl.data)
+            return None
+        if want is None:
+            res = await mdl.async_remove_room(room)
+            return None if res.get("ok") else str(res.get("error") or "remove_failed")
+        if e["kind"] == "room_new" and side == "after":
+            await mdl.async_ensure_rooms([room])
+            rm = mdl.data.get("room_meta", {})
+            if room in rm:
+                rm[room]["floor_id"] = fl
+            mdl.data.setdefault("room_adjacency", {}).setdefault(room, [])
+            await mdl.store.async_save(mdl.data)
+        whole = "committed_by" in want or "source_map_id" in want          # a record as it was stored (an undo's or a put-back's side)
+        stamp = {k: want.get(k) for k in ("source_map_id", "source_transform", "source_image")} if whole else {}
+        by = want.get("committed_by") if whole and want.get("committed_by") not in (None, "external_import") else "correction"
+        geo = {k: want[k] for k in ("type", "points_m", "cx_m", "cy_m", "r_m") if k in want}
+        res = await fab.async_correct_room(fl, room, geo, committed_by=by, **stamp)
+        return None if res.get("ok") else str(res.get("error") or "correct_failed")
+    except Exception as err:  # noqa: BLE001 — a write that throws is a write that failed
+        _LOGGER.error("PadSpan rooms from plans: a room write failed: %s", P._why(err))  # noqa: SLF001
+        return "error"
+
+
+async def _write_house(house: H.House3dStore, entries: list[dict], side: str) -> str | None:
+    """THE 3D write: these doors, windows and stairs to one side, in one
+    apply_edit and one checked write. None, or why it failed."""
+    if not entries:
+        return None
+    changes: dict[str, dict] = {}
+    for e in entries:
+        section, _, key = e["target"].partition("/")
+        changes.setdefault(section, {})[key] = copy.deepcopy(e.get(side))
+    try:
+        new = H.apply_edit(house.data, changes)
+        return None if await house.async_write(new) else "save_failed"
+    except H.EditError as err:
+        return f"invalid: {err}"
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.error("PadSpan rooms from plans: the 3D file couldn't be written: %s", P._why(err))  # noqa: SLF001
+        return "error"
+
+
+async def _write_entries(hass: HomeAssistant, house: H.House3dStore, entries: list[dict], side: str, only_from: str | None = None
+                         ) -> tuple[list[dict], str | None]:
+    """Entries to one side: the 3D file's in one write first, then each room.
+    `only_from`: an entry is written only while it is still at that side
+    (a hand edit since stays). (written, why it stopped or None)."""
+    live = house.data
+    todo = [e for e in entries if only_from is None or _at_side(hass, live, e, only_from)]
+    done: list[dict] = []
+    houses = [e for e in todo if e["kind"] in HOUSE_KINDS]
+    why = await _write_house(house, houses, side)
+    if why:
+        return done, why
+    done += houses
+    for e in todo:
+        if e["kind"] in ROOM_KINDS:
+            why = await _write_room(hass, e, side)
+            if why:
+                return done, why
+            done.append(e)
+    return done, None
+
+
+def _mint(existing: Any, prefix: str) -> str:
+    while True:
+        oid = f"{prefix}_{secrets.token_hex(4)}"
+        if oid not in (existing or {}):
+            return oid
+
+
+def _opening_entry(o: dict) -> dict[str, Any]:
+    """A proposed door, doorway or window as the 3D editor would add it (its defaults)."""
+    base = {"kind": o["kind"], "floor_id": o["floor_id"], "a_m": list(o["a_m"]), "b_m": list(o["b_m"])}
+    if o["kind"] == "window":
+        return {**base, "sill_m": A.S2_WINDOW_SILL_M, "head_m": A.S2_WINDOW_HEAD_M}
+    if o["kind"] == "doorway":
+        return {**base, "head_m": A.S2_DOOR_HEAD_M}
+    return {**base, "head_m": A.S2_DOOR_HEAD_M, "hinge": "left", "swing": "in", **({"type": o["type"]} if o.get("type") else {})}
+
+
+def _offered(prop: dict, iid: str) -> bool:
+    """An item a save may write."""
+    kind, _, key = iid.partition(":")
+    if kind == "room":
+        return key in (prop.get("rooms") or {})
+    if kind == "space":
+        s = (prop.get("spaces") or {}).get(iid) or {}
+        return bool(s.get("new")) and not s.get("merged_into")
+    if kind in ("door", "window"):
+        o = (prop.get("openings") or {}).get(iid) or {}
+        return bool(o.get("placed")) and (not o.get("existing") or (o["existing"].get("what") == "opening" and bool(o["existing"].get("entry"))))
+    if kind == "stairs":
+        return ((prop.get("stairs") or {}).get(iid) or {}).get("relation") in ("new", "correction", "stacked")
+    return False
+
+
+def _writes_of(prop: dict, iid: str) -> Any:
+    """What a save of this item writes, to compare a fresh proposal with the one the person saw."""
+    kind = iid.partition(":")[0]
+    if kind == "room":
+        r = prop["rooms"].get(iid[5:]) or {}
+        return (r.get("outline_m"), r.get("now_m"))
+    if kind == "space":
+        s = prop["spaces"].get(iid) or {}
+        return (s.get("outline_m"), s.get("new"), s.get("merged_into"))
+    if kind in ("door", "window"):
+        o = prop["openings"].get(iid) or {}
+        return (o.get("a_m"), o.get("b_m"), o.get("kind"), o.get("existing"))
+    s = prop["stairs"].get(iid) or {}
+    return (s.get("geom"), s.get("floor_id"), s.get("relation"), s.get("target"), s.get("target_snap"))
+
+
+async def settle_rooms(hass: HomeAssistant, store: A.PlanAiStore, house: H.House3dStore) -> bool:
+    """A rooms save or undo cut short between its writes: run before any rooms
+    command. Every entry at its `after`: the batch stands (the mark comes
+    off). Otherwise what is at `after` goes back to `before` and the batch
+    goes; a put-back that can't be written leaves the batch standing for what
+    it still holds, said once (save_stands or undo_stands). In memory; the
+    caller saves when it returns True."""
+    if not A.writable(store.data):
+        return False
+    settled = False
+    batches = store.data.get("room_batches") or {}
+    for bid, b in list(batches.items()):
+        p = b.get("pending") if isinstance(b, dict) else None
+        if not isinstance(p, dict):
+            continue
+        settled = True
+        entries = b.get("items") or []
+        if entries and all(_at_side(hass, house.data, e, "after") for e in entries):
+            b.pop("pending", None)
+            _rooms_landed(store, bid, b, float(p.get("at") or time.time()))
+            A._bump(hass, "plan_build_settled:finished")  # noqa: SLF001
+            continue
+        back = [e for e in entries if _at_side(hass, house.data, e, "after") and not _at_side(hass, house.data, e, "before")]
+        _done, why = await _write_entries(hass, house, back, "before", only_from="after")
+        _invalidate(hass)
+        if why is None:
+            batches.pop(bid, None)
+            A._bump(hass, "plan_build_settled:put_back")  # noqa: SLF001
+            continue
+        b["items"] = [e for e in entries if _at_side(hass, house.data, e, "after")]
+        b.pop("pending", None)
+        b["stood"] = True
+        _rooms_landed(store, bid, b, float(p.get("at") or time.time()))
+        _stop(hass, store, store.rooms_session(b.get("session")), "undo_stands" if b.get("undo_of") else "save_stands")
+        A._bump(hass, "plan_build_settled:stood")  # noqa: SLF001
+    return settled
+
+
+def _rooms_landed(store: A.PlanAiStore, bid: str, b: dict[str, Any], at: float) -> None:
+    """A batch whose writes all landed: the session says which items are saved, an undo's saves are spent."""
+    sess = store.rooms_session(b.get("session"))
+    saved = (sess or {}).setdefault("saved", {})
+    for e in b.get("items") or []:
+        if b.get("undo_of"):
+            for iid in e.get("item_ids") or [e["item_id"]]:
+                saved.pop(iid, None)
+        else:
+            saved[e["item_id"]] = bid
+    for of in b.get("undo_of") or []:
+        ob = (store.data.get("room_batches") or {}).get(of)
+        if isinstance(ob, dict):
+            ob["undone_at"] = at
+    if sess is not None:
+        if not b.get("undo_of") and bid not in (sess.get("batches") or []):
+            sess.setdefault("batches", []).append(bid)
+        sess["rev"] = int(sess.get("rev") or 0) + 1
+
+
+async def rooms_commit(hass: HomeAssistant, store: A.PlanAiStore, house: H.House3dStore, sid: str, rev: int, item_ids: Any,
+                       finals: Any = None) -> dict[str, Any]:
+    """Accept all for this floor (Garry: "an all or nothing option"): the
+    ticked rooms, new rooms, doors, windows and stairs in ONE save. Every
+    check first, then the gate, one backup, the ledger pending, the writes
+    (a failure puts back what was written), the mark off. `finals`: a new
+    stair's piece as the panel builds it ({item id: piece}). The caller holds
+    the 3D store's lock and then the plan store's."""
+    if not A.writable(store.data):
+        raise Refused("plan_ai_newer", RP + "this plan store was saved by a newer PadSpan: update PadSpan to save.")
+    if not H.writable(house.data):
+        raise Refused("house3d_newer", RP + H.NEWER_MESSAGE)
+    if await settle_rooms(hass, store, house):
+        await _save(store)
+    sess = store.rooms_session(sid)
+    if sess is None:
+        raise Refused("not_found", RP + "that session isn't here any more: read the floor again.")
+    if A.running(hass) is not None or sess.get("status") == "running":
+        raise Refused("already_running", RP + "a session is reading your plans: save when it ends.")
+    if int(sess.get("rev") or 0) != rev:
+        raise Refused(REV_CODE, RP + "the session changed since you looked. Nothing was saved: it is reloaded, try again.")
+    ids = list(item_ids) if isinstance(item_ids, list) else []
+    prop = sess.get("proposal") or {}
+    if not ids or len(set(ids)) != len(ids) or not all(isinstance(i, str) for i in ids) or not prop:
+        raise Refused("invalid", RP + "nothing to save.")
+    shut = [i for i in ids if not _offered(prop, i) or i in (sess.get("saved") or {})]
+    if shut:
+        raise Refused("not_open", RP + "some items can't be saved now.", {"items": shut, "rev": sess.get("rev")})
+    finals = finals if isinstance(finals, dict) else {}
+    fid = sess["floor_id"]
+
+    async def refuse(code: str, message: str, stop: str | None, counter: str, extra: dict | None = None) -> None:
+        if stop:
+            _stop(hass, store, sess, stop)
+        else:
+            sess["rev"] = int(sess.get("rev") or 0) + 1
+        A._bump(hass, f"plan_build_commit:{counter}")  # noqa: SLF001
+        await _save(store)
+        raise Refused(code, message, {**(extra or {}), "rev": sess.get("rev")})
+
+    async def fresh() -> tuple[dict, dict, list, list, dict]:
+        snap, house_now, points, barriers = await A.rooms_inputs(hass)
+        return snap, house_now, points, barriers, await hass.async_add_executor_job(A.rooms_proposal, copy.deepcopy(sess), snap, house_now, points, barriers)
+
+    async def recheck(during: bool) -> tuple[dict, list, dict]:
+        """The plans, the line-up and every item against the house as it is now."""
+        snap, _house_now, points, _barriers, now = await fresh()
+        if A.plans_moved(hass, sess):                 # a plan moved or changed since the read: its metres are not what was read
+            changed = [i for i in ids if i.startswith(("room:", "space:", "door:", "window:", "stairs:"))]
+            sess["stale"] = changed
+            await refuse("changed_since", RP + " ".join(A.STOPS["plan_changed"]), "plan_changed", "changed_since", {"changed": changed})
+        changed = [i for i in ids if _writes_of(now, i) != _writes_of(prop, i)]
+        names = [i for i in ids if i.startswith("space:") and str(prop["spaces"][i]["new"]).lower() in {n.lower() for n in snap["rooms"]}]
+        if names:
+            await refuse("name_taken", RP + " ".join(A.STOPS["name_taken"]), "name_taken", "changed_since", {"items": names})
+        if changed:
+            sess["stale"] = changed
+            await refuse("changed_since", RP + " ".join(A.STOPS["changed_while_saving" if during else "rooms_changed"]),
+                         "changed_while_saving" if during else "rooms_changed", "changed_since", {"changed": changed})
+        return snap, points, now
+
+    # 1. Check everything; write nothing if any check fails.
+    snap, points, _now = await recheck(False)
+    stairs_new = [i for i in ids if i.startswith("stairs:") and prop["stairs"][i]["relation"] in ("new", "stacked")]
+    missing = [i for i in stairs_new if not isinstance(finals.get(i), dict)]
+    if missing:
+        raise Refused("invalid", RP + "a new stair is built in the 3D view: open Live Aboard to save it, or untick it.", {"items": missing, "rev": sess.get("rev")})
+    at = time.time()
+    bid = "rb_" + secrets.token_hex(4)
+    note = {"session": sid, "batch": bid, "kind": "stairs", "at": at}
+    house_entries: list[dict] = []
+    live_open, live_pieces = house.data.get("openings") or {}, house.data.get("pieces") or {}
+    indoor = _indoor(hass)
+    minted: set[str] = set()
+    for iid in ids:
+        if iid.startswith(("door:", "window:")):
+            o = prop["openings"][iid]
+            ex = o.get("existing")
+            if ex:                                       # a correction: the opening already there (unchanged since the read: recheck), moved or resized to the read one
+                live = live_open.get(ex["id"])
+                house_entries.append({"item_id": iid, "kind": "opening", "target": f"openings/{ex['id']}", "before": copy.deepcopy(live),
+                                      "after": {**copy.deepcopy(live), "a_m": list(o["a_m"]), "b_m": list(o["b_m"])}})
+                continue
+            oid = _mint({**live_open, **dict.fromkeys(minted)}, {"window": "win", "door": "door", "doorway": "doorway"}[o["kind"]])
+            minted.add(oid)
+            house_entries.append({"item_id": iid, "kind": "opening", "target": f"openings/{oid}", "before": None, "after": _opening_entry(o)})
+        elif iid.startswith("stairs:"):
+            st = prop["stairs"][iid]
+            if st["relation"] == "correction":
+                tgt = st["target"]
+                house_entries.append({"item_id": iid, "kind": "stairs", "target": f"pieces/{tgt}", "before": copy.deepcopy(live_pieces.get(tgt)),
+                                      "after": _corrected({"geom": st["geom"]}, live_pieces[tgt], None, note)})
+            else:
+                pid = _new_piece_id({**live_pieces, **dict.fromkeys(minted)})
+                minted.add(pid)
+                house_entries.append({"item_id": iid, "kind": "stairs", "target": f"pieces/{pid}", "before": None,
+                                      "after": _new_piece({"id": iid}, pid, finals[iid], note, indoor)})
+    if house_entries:                                   # checked in full before anything is touched
+        changes: dict[str, dict] = {}
+        for e in house_entries:
+            section, _, key = e["target"].partition("/")
+            changes.setdefault(section, {})[key] = e["after"]
+        try:
+            new = H.apply_edit(house.data, changes)
+        except H.EditError as err:
+            raise Refused("invalid", RP + str(err), {"rev": sess.get("rev")}) from err
+        for e in house_entries:                          # as the file will hold it (apply_edit stamps a piece)
+            section, _, key = e["target"].partition("/")
+            e["after"] = copy.deepcopy(new[section][key])
+    room_entries: list[dict] = []
+    for iid in ids:
+        if iid.startswith("room:"):
+            r = prop["rooms"][iid[5:]]
+            room_entries.append({"item_id": iid, "kind": "room", "room": r["room"], "floor_id": fid, "before": _fab_record(hass, r["room"]),
+                                 "after": {"type": "poly", "points_m": [[round(x, 3), round(y, 3)] for x, y in r["outline_m"]]}})
+        elif iid.startswith("space:"):
+            s = prop["spaces"][iid]
+            mdata = getattr(hass.data.get(DOMAIN, {}).get(DATA_MODEL), "data", None) or {}
+            room_entries.append({"item_id": iid, "kind": "room_new", "room": s["new"], "floor_id": fid, "before": None,
+                                 "after": {"type": "poly", "points_m": [[round(x, 3), round(y, 3)] for x, y in s["outline_m"]]},
+                                 # What the name had before the save (an area's settings, the scanners in it): undo puts it back (review B1).
+                                 "meta_before": {"room_meta": copy.deepcopy((mdata.get("room_meta") or {}).get(s["new"])),
+                                                 "adjacency": copy.deepcopy((mdata.get("room_adjacency") or {}).get(s["new"])),
+                                                 "scanners": sorted(k for k, v in (mdata.get("scanners") or {}).items()
+                                                                    if isinstance(v, dict) and v.get("room") == s["new"])}})
+
+    # 2. The room score on this floor's calibration spots: kept with the save and counted, never a refusal (Garry, 2026-11-10:
+    #    accuracy is information and a choice per room; a wrong save costs one undo, a refusal costs the tool).
+    gate = await hass.async_add_executor_job(A.rooms_gate, points, fid, snap["rooms"], A.chosen_outlines(prop, ids), _excluded(hass))
+    sess["gate"] = gate
+    A._bump(hass, f"plan_build_heldout:{A.gate_event(gate)}")  # noqa: SLF001
+
+    # 3. One backup, in its own slot.
+    backup_id = await _auto_backup_rooms(hass, f"Before rooms from plans (experimental): {_floor_name(snap, fid)}")
+    if not backup_id:
+        await refuse("backup_failed", RP + " ".join(A.STOPS["backup_failed"]), "backup_failed", "backup_failed")
+    await recheck(True)                                   # the backup awaited: a hand edit may have landed meanwhile
+    if any(not _house_at(house.data, e, "before") for e in house_entries) or any(not _room_at(hass, e, "before") for e in room_entries):
+        await refuse("changed_since", RP + " ".join(A.STOPS["changed_while_saving"]), "changed_while_saving", "changed_since")
+
+    # 4. The ledger, pending.
+    snap_store = copy.deepcopy(store.data)
+    entries = house_entries + room_entries
+    batch = {"session": sid, "floor_id": fid, "committed_at": at, "backup_id": backup_id, "items": entries, "undone_at": None,
+             "undo_of": None, "gate": gate, "pending": {"at": at}}
+    store.data.setdefault("room_batches", {})[bid] = batch
+    store.trim()
+    if not await store.async_checked_save():
+        await _put_back(store, snap_store)
+        await refuse("save_failed", RP + "couldn't save the record of this save, so nothing was changed. Try again.", None, "save_failed")
+
+    # 5. The writes: the 3D file in one, then each room.
+    done, why = await _write_entries(hass, house, entries, "after", only_from="before")
+    if why or len(done) != len(entries):
+        _back, back_why = await _write_entries(hass, house, list(reversed(done)), "before", only_from="after")
+        if back_why is None:
+            await _put_back(store, snap_store)
+        else:
+            await _save(store)                             # left pending: settle_rooms puts it back next time
+        _invalidate(hass)
+        if done:
+            A._bump(hass, "plan_build_commit:rolled_back")  # noqa: SLF001
+        sess = store.rooms_session(sid) or sess
+        await refuse("save_failed", RP + ("couldn't write it all, so what was written is put back: nothing was changed. " if back_why is None else
+                                          "couldn't write it all; what was written is put back the next time Rooms from plans opens. ")
+                     + "Try again; check Home Assistant's storage.", None, "save_failed")
+
+    # 6. The mark off; what was saved is said and counted. The proposal is worked out again on the house as it is now,
+    #    so a second save of what isn't saved yet is checked against it, not refused as changed (review B12).
+    batch.pop("pending", None)
+    _rooms_landed(store, bid, batch, at)
+    await _repropose(hass, sess)
+    await _save(store)
+    _invalidate(hass)
+    _LOGGER.info("PadSpan rooms from plans (experimental): saved %d item(s) of session %s (backup %s)", len(entries), sid, backup_id)
+    for e in entries:
+        k = {"room": "room", "room_new": "space", "stairs": "stairs"}.get(e["kind"]) or e["item_id"].partition(":")[0]
+        A._bump(hass, f"plan_build_item:{k}_accepted")  # noqa: SLF001
+    for m in (sess.get("edits") or {}).get("merges") or []:
+        A._bump(hass, f"plan_build_merge:{'into_room' if m.get('into') else 'together'}")  # noqa: SLF001
+    for _ in (e for e in room_entries if e["kind"] == "room_new"):
+        A._bump(hass, "plan_build_merge:new_room")  # noqa: SLF001
+    A._bump(hass, "plan_build_commit:done")  # noqa: SLF001
+    return {"ok": True, "rev": sess["rev"], "batch": bid, "backup_id": backup_id, "gate": gate, "saved": ids, "undo": A.rooms_undo_info(store, sid)}
+
+
+async def _repropose(hass: HomeAssistant, sess: dict | None) -> None:
+    """A session's proposal worked out again on the house as it is (after a
+    save or an undo). One that can't be worked out keeps the one it had."""
+    if not sess or not sess.get("proposal"):
+        return
+    _invalidate(hass)
+    try:
+        snap, house_now, points, barriers = await A.rooms_inputs(hass)
+        sess["proposal"] = await hass.async_add_executor_job(A.rooms_proposal, copy.deepcopy(sess), snap, house_now, points, barriers)
+    except Exception as err:  # noqa: BLE001 — what was saved stands; the next save checks against a fresh one anyway
+        _LOGGER.warning("PadSpan rooms from plans: the proposal couldn't be worked out again: %s", P._why(err))  # noqa: SLF001
+
+
+def _excluded(hass: HomeAssistant) -> frozenset:
+    from .const import DATA_CALIBRATION  # noqa: PLC0415
+    cal = hass.data.get(DOMAIN, {}).get(DATA_CALIBRATION)
+    try:
+        return frozenset(cal.excluded_sources()) if cal is not None and hasattr(cal, "excluded_sources") else frozenset()
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
+async def _auto_backup_rooms(hass: HomeAssistant, note: str) -> str | None:
+    from .ws_backup import _auto_backup  # noqa: PLC0415
+    return await _auto_backup(hass, note, [FABRIC_STORE_KEY, MODEL_STORE_KEY, HOUSE3D_STORE_KEY], mark_absent=True, slot=ROOMS_SLOT,
+                              exact=True, slot_keep=A.S1_BACKUPS_KEPT)
+
+
+async def rooms_undo(hass: HomeAssistant, store: A.PlanAiStore, house: H.House3dStore, sid: str) -> dict[str, Any]:
+    """Undo a rooms session: every save of it, newest first. What is still as
+    a save left it goes back (an outline with its stamp as it was; a room the
+    save made is taken away, unless a scanner was put in it since; an opening
+    or a stair to what it was); what changed since is left and said. A backup
+    first; a batch of its own in the ledger. Allowed whatever the AI Task. The
+    caller holds the 3D store's lock and then the plan store's."""
+    if not A.writable(store.data):
+        raise Refused("plan_ai_newer", RP + "this plan store was saved by a newer PadSpan: update PadSpan to undo.")
+    if not H.writable(house.data):
+        raise Refused("house3d_newer", RP + H.NEWER_MESSAGE)
+    if await settle_rooms(hass, store, house):
+        await _save(store)
+    if A.running(hass) is not None:
+        raise Refused("already_running", RP + "a session is reading your plans: undo when it ends.")
+    sess = store.rooms_session(sid)
+    batches = store.data.setdefault("room_batches", {})
+    mine = sorted(((bid, b) for bid, b in batches.items() if isinstance(b, dict) and b.get("session") == sid and not b.get("undo_of")
+                   and not b.get("undone_at") and not b.get("pending")), key=lambda t: float(t[1].get("committed_at") or 0), reverse=True)
+    if not mine:
+        raise Refused("nothing_to_undo", RP + "nothing of this session is left to undo.")
+    mdl = hass.data.get(DOMAIN, {}).get(DATA_MODEL)
+    scanners = (getattr(mdl, "data", None) or {}).get("scanners") or {}
+    todo: list[dict] = []
+    skipped: list[dict] = []
+    # One undo per target (review B3): two saves of the session may touch one room, door or stair. The newest `after`
+    # is checked against the house as it is; the oldest `before` is written back.
+    targets: dict[tuple, list[tuple[str, dict]]] = {}
+    for bid, b in mine:
+        for e in reversed(b.get("items") or []):
+            targets.setdefault(("room", e["room"]) if e["kind"] in ROOM_KINDS else ("house", e["target"]), []).append((bid, e))
+    for got in targets.values():
+        (bid, newest), (_obid, oldest) = got[0], got[-1]
+        had = set((oldest.get("meta_before") or {}).get("scanners") or [])
+        in_use = oldest["kind"] == "room_new" and any(isinstance(v, dict) and v.get("room") == oldest["room"] and k not in had
+                                                      for k, v in scanners.items())
+        if _at_side(hass, house.data, newest, "after") and not in_use:
+            todo.append({**copy.deepcopy(oldest), "item_id": newest["item_id"], "item_ids": [e["item_id"] for _b, e in got],
+                         "before": copy.deepcopy(newest["after"]), "after": copy.deepcopy(oldest["before"]), "of": bid})
+        else:
+            skipped += [{"item_id": e["item_id"], "why": "in_use" if in_use else "changed"} for _b, e in got]
+    at = time.time()
+    if not todo:                                          # everything changed since: nothing can go back, so the saves are spent
+        for _bid, b in mine:
+            b["undone_at"] = at
+            b["skipped"] = skipped
+        if sess is not None:
+            sess["saved"] = {}
+            sess["rev"] = int(sess.get("rev") or 0) + 1
+        await _save(store)
+        A._bump(hass, "plan_build_undo:item_skipped", len(skipped))  # noqa: SLF001
+        return {"ok": True, "undone": 0, "skipped": skipped, "rev": (sess or {}).get("rev"), "undo": A.rooms_undo_info(store)}
+
+    snap = A.house_snapshot(hass)
+
+    async def failed_undo(code: str, reason: str) -> None:
+        _stop(hass, store, store.rooms_session(sid), reason)
+        A._bump(hass, "plan_build_undo:failed")  # noqa: SLF001
+        await _save(store)
+        raise Refused(code, RP + " ".join(A.STOPS[reason]), {"rev": (store.rooms_session(sid) or {}).get("rev")})
+
+    backup_id = await _auto_backup_rooms(hass, f"Before undoing rooms from plans (experimental): {_floor_name(snap, (sess or {}).get('floor_id'))}")
+    if not backup_id:
+        await failed_undo("backup_failed", "backup_failed")
+    snap_store = copy.deepcopy(store.data)
+    ubid = "rb_" + secrets.token_hex(4)
+    batches[ubid] = {"session": sid, "floor_id": mine[0][1].get("floor_id"), "committed_at": at, "backup_id": backup_id, "items": todo,
+                     "undo_of": [bid for bid, _ in mine], "undone_at": None, "skipped": skipped, "pending": {"at": at}}
+    store.trim()
+    if not await store.async_checked_save():
+        await _put_back(store, snap_store)
+        await failed_undo("undo_failed", "undo_failed")
+    done, why = await _write_entries(hass, house, todo, "after", only_from="before")
+    if why or len(done) != len(todo):
+        _back, back_why = await _write_entries(hass, house, list(reversed(done)), "before", only_from="after")
+        if back_why is None:
+            await _put_back(store, snap_store)
+        _invalidate(hass)
+        await failed_undo("undo_failed", "undo_failed")
+    ub = batches[ubid]
+    ub.pop("pending", None)
+    _rooms_landed(store, ubid, ub, at)
+    await _repropose(hass, store.rooms_session(sid))
+    await _save(store)
+    _invalidate(hass)
+    _LOGGER.info("PadSpan rooms from plans (experimental): undid session %s, %d item(s) back, %d left (backup %s)", sid, len(todo), len(skipped), backup_id)
+    A._bump(hass, "plan_build_undo:session")  # noqa: SLF001
+    if skipped:
+        A._bump(hass, "plan_build_undo:item_skipped", len(skipped))  # noqa: SLF001
+    for e in todo:
+        k = {"room": "room", "room_new": "space", "stairs": "stairs"}.get(e["kind"]) or e["item_id"].partition(":")[0]
+        A._bump(hass, f"plan_build_item:{k}_undone")  # noqa: SLF001
+    return {"ok": True, "undone": len(todo), "skipped": skipped, "batch": ubid, "backup_id": backup_id,
+            "rev": (store.rooms_session(sid) or {}).get("rev"), "undo": A.rooms_undo_info(store)}

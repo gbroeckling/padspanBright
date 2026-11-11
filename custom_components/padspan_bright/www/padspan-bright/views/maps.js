@@ -9756,6 +9756,22 @@ function _lightsTab(ctx, maps, active) {
     ctx.toast(room ? `Mapping → Atlas, ${room}: choose a light, then drop its pin where the plan draws it.` : "Mapping → Atlas: choose a light, then drop its pin where the plan draws it.");
     ctx.actions.setMapsTab("lights");
   };
+  // Live Aboard's ⋯ list: its links and "Set it up" open that Settings card
+  // (scrolled to) or Mapping tab. Not in Basic (expert screens).
+  const la3dGoTo = !FOCUS.expertLinks(ctx.state) ? null : (t) => {
+    if (t.view === "settings") {
+      ctx.state._settingsPart = t.part || null;
+      FOCUS.openFocus(ctx, { view: "settings", tab: t.tab, part: t.part || "", title: "" });
+      return;
+    }
+    // Already here (Mapping → Atlas): Showcase and the devices are in the bar and on the flat map.
+    if (t.tab === "lights" && ctx.state.mapsTab === "lights") {
+      ctx.toast(t.where === "showcase" ? "Showcase and its theme are in the bar above the map (✦ Showcase)."
+        : "Devices are placed on the flat map: switch Map / 3D to Map.");
+      return;
+    }
+    if (ctx.actions.setMapsTab) ctx.actions.setMapsTab(t.tab); else { ctx.state.mapsTab = t.tab; ctx.actions.renderRooms(); }
+  };
   // The builder's checklist: how much of the house is actually placed.
   const nPlaced = placeableLights.filter(l => placements[l.entity_id]).length;
   const nApprox = placeableLights.filter(l => placements[l.entity_id] && placements[l.entity_id].source === "auto").length;
@@ -10408,6 +10424,19 @@ function _lightsTab(ctx, maps, active) {
       states: ctx.hass?.states || {}, entities: ctx.hass?.entities,
       telemetry: (name) => { if (ctx.actions.telemetryEvent) ctx.actions.telemetryEvent(name); },
     } : null,
+    // The scene row under the map and in Live Aboard (views/scene_row.js), as
+    // on the sidebar Atlas: the same tiles, taps and rules (lights_map.js),
+    // through this page's own calls; + New scene and ✎ open Home Assistant's
+    // scene editor, an administrator's. Hidden by this screen's ⋯ list.
+    scenes: {
+      slot: "builder", states: ctx.hass?.states || {}, entities: ctx.hass?.entities || null,
+      admin: !!ctx.hass?.user?.is_admin, kiosk: !!ctx.state.kioskMode,
+      callService: (d, svc, data) => ctx.hass.callService(d, svc, data),
+      setMany: (eids, on) => setManyStates(ctx.hass, eids, on, { toast: (m, e) => ctx.toast(m, e), rerender: () => ctx.actions.renderRooms() }),
+      toast: (m, e) => ctx.toast(m, e),
+      rerender: () => ctx.actions.renderRooms(),
+      telemetry: (name) => { if (ctx.actions.telemetryEvent) ctx.actions.telemetryEvent(name); },
+    },
     // The 3D house: the same Map / 3D switch the Atlas sidebar draws (its own
     // slot and its own remembered choice), only while the setting is on and
     // the tier is Pro.
@@ -10451,6 +10480,8 @@ function _lightsTab(ctx, maps, active) {
         ctx.actions.renderRooms();
         return true;
       },
+      // The ⋯ list's links and "Set it up" (live_aboard_show.js GO_TO): la3dGoTo below.
+      goTo: la3dGoTo,
       // The 3D file (doors and windows drawn in 3D, heights): read when the
       // 3D view shows, never on the poll.
       load: () => ctx.actions.wsCall("padspan_bright/house3d_get"),
@@ -11113,6 +11144,38 @@ function _lightsTab(ctx, maps, active) {
 // real space saved via padspan_bright/fabric_correct_room. Deliberately NOT
 // Pro-gated — room shapes are the positioning ground truth, and correcting
 // them is data integrity, not a styling feature.
+
+// A room's corners with one added halfway along edge i (from corner i to the
+// next), and with corner i taken away (a room keeps three at least). Both edit
+// the open draft only: Save keeps them, Discard takes them back, as a dragged
+// corner (2026-11-10: rooms from plans are cleaned up here too).
+export function _roomCornerAdd(points, i) {
+  const n = points.length, a = points[i], b = points[(i + 1) % n];
+  const mid = [Math.round((a[0] + b[0]) / 2 * 1000) / 1000, Math.round((a[1] + b[1]) / 2 * 1000) / 1000];
+  return [...points.slice(0, i + 1), mid, ...points.slice(i + 1)];
+}
+export function _roomCornerDrop(points, i) {
+  return points.length > 3 ? points.filter((_, k) => k !== i) : points;
+}
+// Which selected rooms can merge into one: two or more outlined rooms, none
+// with unsaved changes (the merge is saved at once, from the stored shapes).
+export function _roomsMergeable(sel, draft, changed) {
+  const rooms = [...sel];
+  if (rooms.length < 2) return { ok: false, why: "Select two or more rooms (Shift-click) to merge them." };
+  if (rooms.some(r => !draft[r] || draft[r].type === "circle")) return { ok: false, why: "Only outlined rooms merge; a circle can't." };
+  if (rooms.some(r => changed(r))) return { ok: false, why: "Save or discard your changes to these rooms first." };
+  return { ok: true, why: "" };
+}
+// A merge saved: into the open draft only, as Delete does, so the other unsaved
+// edits stay. The rooms deleted leave it; the kept one takes the merged outline.
+export function _roomsAfterMerge(draft, orig, keep, others, res) {
+  const gone = Array.isArray(res && res.removed) ? res.removed : others;
+  for (const m of [draft, orig]) {
+    if (!m) continue;
+    for (const r of gone) delete m[r];
+    if (res && Array.isArray(res.points_m) && m[keep]) m[keep] = { ...m[keep], type: "poly", points_m: JSON.parse(JSON.stringify(res.points_m)) };
+  }
+}
 
 // Connected-component count over room bounding boxes (gap ≤ gapM = same
 // cluster). Mirrors the backend's _cluster_count so the readout here and the
@@ -12342,7 +12405,33 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
         pinLayer.appendChild(h);
         handleEls.push({ room, idx, elDiv: h });
       };
-      if (g && g.type === "poly") g.points_m.forEach((p, i) => mkHandle(i, p[0], p[1], `${room} corner ${i + 1}`));
+      if (g && g.type === "poly") {
+        g.points_m.forEach((p, i) => mkHandle(i, p[0], p[1], `${room} corner ${i + 1}${g.points_m.length > 3 ? " (double-click to remove it)" : ""}`));
+        // Double-click a corner: it goes (a room keeps three). A "+" halfway along each side: a corner added there, to drag.
+        handleEls.filter(h => h.room === room && typeof h.idx === "number").forEach(({ idx, elDiv }) => elDiv.addEventListener("dblclick", (ev) => {
+          ev.stopPropagation();
+          if (g.points_m.length <= 3) { ctx.toast("A room keeps three corners at least"); return; }
+          g.points_m = _roomCornerDrop(g.points_m, idx);
+          ctx.actions.renderRooms();
+        }));
+        g.points_m.forEach((a, i) => {
+          const b = g.points_m[(i + 1) % g.points_m.length], mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+          const add = document.createElement("div");
+          add.title = `${room}: add a corner here`;
+          add.textContent = "+";
+          add.setAttribute("data-room-corner-add", String(i));
+          add.style.cssText = `position:absolute;left:${((mx - bbox.minX) / bbox.width * 100).toFixed(3)}%;top:${((my - bbox.minY) / bbox.height * 100).toFixed(3)}%;` +
+            `width:12px;height:12px;line-height:11px;text-align:center;font:700 11px system-ui,sans-serif;color:#e879f9;transform:translate(-50%,-50%);` +
+            `border-radius:3px;background:#0a150e;border:1px dashed #e879f9;cursor:copy;z-index:4;pointer-events:auto`;
+          add.addEventListener("mousedown", (ev) => {
+            if (ev.button !== 0) return;
+            ev.stopPropagation();
+            g.points_m = _roomCornerAdd(g.points_m, i);
+            ctx.actions.renderRooms();
+          });
+          pinLayer.appendChild(add);
+        });
+      }
       else if (g && g.type === "circle") { mkHandle("c", g.cx_m, g.cy_m, `${room} centre`); mkHandle("r", g.cx_m + g.r_m, g.cy_m, `${room} radius`); }
     }
 
@@ -12386,6 +12475,34 @@ ${p.x_m.toFixed(2)}, ${p.y_m.toFixed(2)} m — drag to pin`,
         applyXform((x, y) => [x * c - y * s, x * s + y * c]);
       } }, "Apply"));
       tools.appendChild(el("button", { class: "btn inline", onclick: () => { mapState._roomsSel = []; ctx.actions.renderRooms(); } }, "Deselect"));
+      // Merge into one (2026-11-10): one clean outline round the selected rooms, worked out on the server by the
+      // same function Rooms from plans merges with (padspan_bright/fabric_rooms_merge); the room picked keeps its
+      // name, the others are deleted as Delete deletes them. Asked first, a safety backup taken; saved at once.
+      if (sel.size >= 2 && !previewing) {
+        const m = _roomsMergeable(sel, draft, _changed);
+        const keepSel = el("select", { "data-rooms-merge-keep": "", title: "The room that keeps its name",
+          style: "background:#0a150e;color:#e2e8f0;border:1px solid #2d5a3d;border-radius:4px;padding:3px 6px" },
+          [...sel].map(r => el("option", { value: r }, r)));
+        tools.appendChild(el("label", { style: "display:flex;gap:6px;align-items:center;color:#94a3b8" }, ["Merge into", keepSel]));
+        const mb = el("button", { class: "btn inline", "data-rooms-merge": "", title: m.ok ? "One outline round them all; the others are deleted" : m.why, onclick: async (e) => {
+          if (!m.ok) { ctx.toast(m.why, true); return; }
+          const keep = keepSel.value, others = [...sel].filter(r => r !== keep);
+          if (!confirm(`Merge ${others.map(r => `"${r}"`).join(", ")} into "${keep}"? "${keep}" gets one outline round them all; ${others.length === 1 ? "the other room is" : "the others are"} deleted with ${others.length === 1 ? "its" : "their"} adjacency and scanner assignments. A safety backup is taken first.`)) return;
+          const btn = e.currentTarget; btn.disabled = true;
+          try {
+            const res = await ctx.actions.wsCall("padspan_bright/fabric_rooms_merge", { floor_id: floorId, keep, rooms: others }) || {};
+            if (res.ok === false && res.message) ctx.toast(res.message, true);
+            else ctx.toast(`✔ Merged into "${keep}"`);
+            mapState._roomsSel = [keep];
+            _roomsAfterMerge(mapState._roomsDraft, mapState._roomsOrig, keep, others, res);
+            mapState._roomsTruthCache = null;
+            await ctx.actions.modelRefresh();
+            ctx.actions.renderRooms();
+          } catch (err) { ctx.toast("Merge failed: " + (err.message || err), true); btn.disabled = false; }
+        } }, "Merge into one");
+        if (!m.ok) mb.style.opacity = ".5";
+        tools.appendChild(mb);
+      }
       if (sel.size === 1 && !previewing) {
         const only = [...sel][0];
         // The room's own height (Live Aboard): from its floor to the top of

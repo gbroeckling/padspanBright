@@ -63,6 +63,7 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 
+from . import ai_usage as U
 from . import house3d_builders as B
 from .const import DATA_SETTINGS, DOMAIN
 from .house3d_store import enabled
@@ -633,13 +634,18 @@ def _media_dir(hass: HomeAssistant) -> tuple[str, Path] | None:
     return (key, Path(dirs[key])) if isinstance(key, str) and dirs[key] else None
 
 
-def _write(folder: Path, path: Path, raw: bytes) -> None:
+def _write(folder: Path, path: Path, raw: bytes) -> tuple[int, int] | None:
     """The photo as an owner-only file in a new owner-only folder. The media
-    folder itself must be there already: nothing else is created."""
+    folder itself must be there already: nothing else is created. Its size
+    from its header, for the AI credit tracker (here, off the event loop)."""
     folder.mkdir(mode=0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(raw)
+    try:
+        return U.picture_size(raw)
+    except Exception:  # noqa: BLE001 — the tracker's count never stops a read
+        return None
 
 
 def _remove(folder: Path, path: Path) -> None:
@@ -682,7 +688,29 @@ class _NoMedia(Exception):
 async def ask(hass: HomeAssistant, eid: str, instructions: str, structure: dict | None, raw: bytes, mime: str,
               task_name: str = "PadSpan Live Aboard photo", timeout_s: float | None = None) -> Any:
     """One ai_task.generate_data call with the photo; the answer's data (with
-    no structure, the AI's text). The photo's file exists only for the call."""
+    no structure, the AI's text). The photo's file exists only for the call.
+    Every call is counted once by the AI credit tracker (ai_usage.note_read),
+    whatever happened, with the reason when it failed."""
+    await U.async_ready(hass)
+    sent: list[bool] = []
+    size: list[Any] = []                   # the picture's size, read from its header in the executor job that writes it
+    reason: str | None = None
+    t0 = time.monotonic()
+    try:
+        return await _ask_once(hass, eid, instructions, structure, raw, mime, task_name, timeout_s, sent, size)
+    except _NoMedia:
+        reason = "no_media"
+        raise
+    except Exception as err:
+        reason = U.stop_reason(err, no_media=False, unreachable=unreachable(err))
+        raise
+    finally:                               # nothing here can raise over the AI's answer (prompt_chars never raises)
+        U.note_read(hass, eid, task_name, size=size[0] if size else None, secs=time.monotonic() - t0, sent=bool(sent),
+                    prompt_chars=U.prompt_chars(instructions, structure), reason=reason)
+
+
+async def _ask_once(hass: HomeAssistant, eid: str, instructions: str, structure: dict | None, raw: bytes, mime: str,
+                    task_name: str, timeout_s: float | None, sent: list[bool], size: list[Any]) -> Any:
     media = _media_dir(hass)
     if media is None:
         raise _NoMedia
@@ -694,7 +722,7 @@ async def ask(hass: HomeAssistant, eid: str, instructions: str, structure: dict 
     reading.add(folder.name)
     try:
         try:
-            await hass.async_add_executor_job(_write, folder, path, raw)
+            size.append(await hass.async_add_executor_job(_write, folder, path, raw))
         except OSError:
             raise _NoMedia from None
         async with asyncio.timeout(PHOTO_TIMEOUT_S if timeout_s is None else timeout_s):
@@ -703,6 +731,7 @@ async def ask(hass: HomeAssistant, eid: str, instructions: str, structure: dict 
                                      "media_content_type": mime}]}
             if structure is not None:
                 call["structure"] = structure
+            sent.append(True)
             resp = await hass.services.async_call("ai_task", "generate_data", call, blocking=True, return_response=True)
     finally:
         try:
@@ -1012,6 +1041,7 @@ async def ws_house3d_from_photo(hass: HomeAssistant, connection, msg) -> None:
         return
     if not ai["ready"]:
         _bump(hass, "photo_read:no_ai_task")
+        await U.refused(hass, "no_ai", ai.get("ai_task"))
         connection.send_error(msg["id"], NO_AI_CODE, ai["message"])
         return
     try:
@@ -1044,6 +1074,8 @@ async def ws_house3d_from_photo(hass: HomeAssistant, connection, msg) -> None:
         return
     _bump(hass, _secs_event(time.monotonic() - t0))
     _bump(hass, "photo_read:ok" if out["ok"] else "photo_read:bad_answer")
+    if not out["ok"]:
+        U.unusable(hass, by)
     # Which AI Task answered; by_backup only where the backup did (Settings → AI).
     connection.send_result(msg["id"], {**out, "ai_task": by, **({"by_backup": True} if by != ai["ai_task"] else {})})
 

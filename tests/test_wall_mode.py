@@ -290,9 +290,60 @@ def test_the_wake_tap_only_eats_a_tap_on_a_hidden_control():
     # Review, 2026-10-21: the rail, drawers and lights stay showing on a faded
     # wall, so a first tap on them must work; only one where a faded control was is eaten.
     lp = _src("lights_panel.js")
-    assert 'const FADED = ".la3d-bar, .la3d-compass, .la3d-hud, .lv-alone-anchor > button";' in lp
+    assert 'const FADED = ".la3d-bar, .la3d-compass, .la3d-more, .la3d-hud, .la3d-mchip, .la3d-mkey, .psc-atlas .psc-scroll, .lv-alone-anchor > button";' in lp
     assert "if(!onFaded(e.clientX, e.clientY)) return;" in lp
+    # Review B8: every control the wall fades is in FADED (or a part of it that takes taps is), so a tap where it was only wakes the wall.
+    fade = lp[lp.index(":host([data-wall]:not([data-wall-active])) .la3d-bar"):]
+    fade = fade[:fade.index("{opacity:0;pointer-events:none}")]
+    faded = [x.strip().replace(":host([data-wall]:not([data-wall-active])) ", "") for x in fade.split(",")]
+    eaten = [x.strip() for x in re.search(r'const FADED = "([^"]+)"', lp).group(1).split(",")]
+    assert ".la3d-mkey" in faded and all(any(f == x or f.startswith(x + " ") for f in eaten) for x in faded), (faded, eaten)
     assert '"translate"];' in _src("views/live_aboard.js"), "leaving full screen clears the wall's shift on the 3D view"
+
+
+
+def test_the_more_button_fades_and_comes_back_with_the_compass():
+    # Garry's wall, 2026-11-07: nobody there for 30 s, the compass and the bars
+    # faded but the ⋯ beside the compass stayed on its own.
+    lp = _src("lights_panel.js")
+    assert ":host([data-wall]) .la3d-compass, :host([data-wall]) .la3d-more," in lp, "it fades as slowly"
+    assert ":host([data-wall]:not([data-wall-active])) .la3d-more," in lp, "gone while nobody is at the wall"
+
+def test_the_motion_chip_fades_and_comes_back_with_the_other_controls():
+    # Garry's wall, 2026-11-09: nobody there for 30 s, the bars, the compass and
+    # the ⋯ faded but the Motion chip stayed on its own.
+    lp = _src("lights_panel.js")
+    assert ":host([data-wall]) .la3d-mchip, :host([data-wall]) .la3d-mkey," in lp, "it fades as slowly"
+    assert ":host([data-wall]:not([data-wall-active])) .la3d-mchip, :host([data-wall]:not([data-wall-active])) .la3d-mkey," in lp, "gone while nobody is there"
+
+def test_the_flat_maps_scene_row_lies_over_the_cards_foot_and_fades():
+    """Garry's wall, 2026-11-09 (BUG_LOG: "too much space since 0.38.225"): the
+    scene row sat in the map's height-limited column under it, so the map lost
+    ~136 px x --wall-ctl. On a wall it lies over the card's foot (the card is
+    position:relative), so the map keeps the whole height (560 -> 700 px on his
+    house at 1280x720), and it fades with the other controls."""
+    sr = _src("views/scene_row.js")
+    assert (".lv-mapcard.lv-display.lv-wall > .psc-atlas{position:absolute;left:0;right:0;bottom:0;z-index:3;pointer-events:none;\n"
+            "  zoom:var(--wall-ctl,var(--wall-ui,1));margin:6px 64px 8px 52px}") in sr
+    assert ".lv-mapcard.lv-display.lv-wall > .psc-atlas .psc-scroll{pointer-events:auto;" in sr, "a touch beside the tiles is the map's"
+    assert ".lv-mapcard.lv-display{padding:0;overflow:hidden;position:relative;" in _src("styles.css")
+    lp = _src("lights_panel.js")
+    assert ":host([data-wall]) .la3d-mchip, :host([data-wall]) .la3d-mkey, :host([data-wall]) .psc-atlas," in lp
+    assert ":host([data-wall]:not([data-wall-active])) .psc-atlas,\n" in lp
+    assert ":host([data-wall]:not([data-wall-active])) .psc-atlas *{pointer-events:none}" in lp, "its tiles can't be tapped unseen"
+
+
+def test_zoomed_past_100_the_drawing_stays_on_the_wall():
+    """BUG_LOG 2026-11-09: past 100% the forest's wall branch (atlas_forest.js
+    fit) turns the drawing's width into a height and a negative margin, and a
+    `%` there means the stage's height in one and its width in the other, so the
+    layer kept a net height and pushed the drawing down (a portrait wall at
+    130%: 570 px) or up. The width is in cqw, the stage's width either way."""
+    lm = _src("views/lights_map.js")
+    assert "? `min(${Math.round((view.zoom || 1) * 100)}cqw, calc(${(view.zoom || 1)} * 100cqh * " in lm
+    assert "? `min(${Math.round((view.zoom || 1) * 100)}%, calc(" not in lm
+    fo = _src("views/atlas_forest.js")
+    assert 'const tall = `max(100cqh, calc(${width} * ${a}))`;' in fo and 'st.marginBottom = `calc(-1 * ${tall})`;' in fo
 
 
 def test_the_atlas_page_runs_without_the_wall_module():
@@ -312,13 +363,30 @@ def test_a_wall_draws_every_pixel_and_fills_its_screen():
     assert "if ((liveMs || more || wallSoft()) && !pending)" in src, "and only while it is soft: no frames at rest"
     assert 'if (step.use !== "high") wallMoves = wallCapped = false;' in src, "on Low nothing waits to go sharp"
     assert "HOUSE.wallNextTry(quality.setting, quality.measured)" in src
-    assert 'wall ? ".la3d-tip, .la3d-mchip, .la3d-wet, .la3d-pchip" : ".la3d-tip, .la3d-mchip, .la3d-wet, .la3d-bar"' in src
+    # The scene row keeps its room on a wall (scene_row.js): it is what is tapped there.
+    assert 'wall ? ".la3d-tip, .la3d-mchip, .la3d-wet, .la3d-pchip, .psc-row" : ".la3d-tip, .la3d-mchip, .la3d-wet, .la3d-bar"' in src
     assert "if (wall && !narrow) out.top = Math.max(out.top, WALL_CHIPS_PX * wallUiOf(root));" in src, "the framing doesn't depend on the moment"
     assert 'rot === "90" ? r0.right - r.right : rot === "270" ? r.left - r0.left : r.top - r0.top' in src, "a turned wall's chips measured along the page"
     assert "turnBy(-2 * Math.PI * dx / h);" in src and "turnBy(Math.PI / 2);" in src, "a wall framed whole turns about the house's middle"
     assert src.count("turnBy(HOUSE.northUpTheta(bearingNow()) - cam.theta);") == 2, "the compass too"
     assert "wallPivot.top !== topElev" in src, "worked out when it turns: a saved home never ran a fit"
-    assert "if (pad.H && onWallPage(root)) {" in src, "every other screen frames the house as before"
+    assert "if (banded(pad)) {" in src
+    # Off a wall, only a short screen with the scene row on the bar is framed in the band (the
+    # house's front ran under the row, 2026-11-07): every other screen frames the house as before.
+    assert ("const banded = (pad) => !!pad.H && (onWallPage(root)\n"
+            '    || (!!bar && bar.classList.contains("psc-has") && 1 - 2 * Math.max(pad.top, pad.bottom) / pad.H < 0.6));') in src
+    assert "Math.max(0.6, 1 - 2 * Math.max(pad.top, pad.bottom) / pad.H)" in src, "elsewhere, still never under 60% of the view"
+
+
+def test_the_90_turn_frames_the_whole_house_again_as_fit_does():
+    """Garry's wall, 2026-11-09: after ⟳ 90° without Fit a corner of the house
+    dipped behind the scene row. Not zoomed in, the turn frames the house again
+    at its new angle (frameFor, the band Fit uses); zoomed out, as far out again."""
+    src = (_WWW / "views" / "live_aboard.js").read_text(encoding="utf-8")
+    assert "const pts = visiblePoints(), k = cam.radius / frameFor(cam.theta, cam.phi, pts).radius;" in src
+    assert ("if (k >= 0.9) { const g = frameFor(cam.theta, cam.phi, pts); cam.target.copy(g.target); "
+            "cam.radius = Math.min(MAX_R, g.radius * Math.max(1, k)); }") in src
+    assert 'else if (name === "turn") { turnBy(Math.PI / 2); applyCam(); }' not in src
 
 
 def test_a_motion_sensors_reach_is_soft_light_with_no_hard_edge():

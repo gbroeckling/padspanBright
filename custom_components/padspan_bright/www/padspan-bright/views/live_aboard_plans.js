@@ -54,6 +54,9 @@ const CSS = `
 .la3d-sheet.plans h5{font-size:12px;color:#a7f3d0;margin:10px 0 4px}
 .la3d-sheet.plans .pl-row{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid rgba(255,255,255,.08)}
 .la3d-sheet.plans .pl-row canvas{flex:none;width:120px;height:84px;border-radius:6px;background:#0b1510;border:1px solid rgba(255,255,255,.1)}
+.la3d-sheet.plans .pl-row.pl-lu{display:block}
+.la3d-sheet.plans .pl-row.pl-lu canvas{display:block;width:auto;height:auto;max-width:100%;max-height:420px;margin:0 auto 6px;background:#fff}
+.la3d-sheet.plans .pl-lu-key{font-size:10px;color:#94a3b8;margin:0 0 4px}
 .la3d-sheet.plans .pl-txt{flex:1;min-width:0;font-size:12px;line-height:1.45;color:#e2e8f0}
 .la3d-sheet.plans .pl-sub{font-size:11px;color:#94a3b8}
 .la3d-sheet.plans .pl-rel{display:inline-block;font-size:10px;font-weight:700;border-radius:999px;padding:0 7px;margin-right:6px;border:1px solid}
@@ -1154,11 +1157,11 @@ export function createPlans(ctx){
   }
 
   // ── ghosts: the real builders, outside the draft ──────────────────────────
-  const dashMat = () => new THREE.MeshBasicMaterial({ color: DASH_COL, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
-  function dashMesh(tris, y){
+  const dashMat = (colour = DASH_COL) => new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
+  function dashMesh(tris, y, colour){
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(tris, 3));
-    const m = new THREE.Mesh(geo, dashMat());
+    const m = new THREE.Mesh(geo, dashMat(colour));
     m.position.y = y; m.renderOrder = 8; m.frustumCulled = false;
     return m;
   }
@@ -1961,6 +1964,1146 @@ export function createPlans(ctx){
     if (ctx.render) ctx.render();
   }
 
+
+  // ── Line up plans (Build from plans, experimental; plan_ai.py's line-up) ─
+  // The Plans tool's second tab, drawn only when the server says it is on
+  // (plan_build_info: the master switch, Build from plans, and Claude Opus 5.5
+  // or newer as the AI Task). One floor at a time: Claude reads the text, the
+  // server measures. Each proposal is shown on the vetting map, the 3D view
+  // the Plans tool already uses (no new screen): the plan as a ghost where the
+  // proposal puts it (red) over the plan it is fitted to (blue), purple where
+  // the drawings agree, its outline now (grey) and proposed (amber), every flag
+  // an arrow from where a thing is stored to where its click would land. With no
+  // 3D view, or "As a list", the same items are cards with a 2D overlay drawn
+  // from the signed picture links and the server's corners. Verdicts are
+  // written at the click; Accept saves that one item (plan_build_commit, the one
+  // writer, a backup first); the floor's Save saves only the items that shift
+  // nothing drawn on a plan; Undo this line-up session takes every save back.
+  // Every control here says experimental (tests/js/plan_build_tab.mjs scans it).
+  let mode = "add", lu = null, luSess = null, luFloor = null, luPoll = null, luBusy = false, luErr = "", luWrongFor = null, luTyped = null;
+  let luNow = false;                                   // the overlays show where each plan is now, not the proposal
+  let luCur = null, luList = false, luDimFor = null, luRefileFor = null, luAskUndo = false, luFade = 0.8;
+  let luAwake = false, luKey = null, luTok = 0, luFly = false;
+  const luMeshes = [];
+  const luPicked = new Set(), luTaps = new Map(), tints = new Map();
+  const LU_PREFIX = "Line up plans (experimental): ";
+  const LU_BANNER = "Experimental. Claude reads the text; PadSpan measures. Matches and scales can still be wrong; look at each overlay before you accept.";
+  const LU_WRONG = [["wrong_match", "Wrong match"], ["wrong_scale", "Wrong scale"], ["wrong_floor", "Wrong floor"], ["cant_tell", "Can't tell"]];
+  const LU_ORDER = { place: 0, refile: 1, anchor_scale: 2 };
+  const LU_TAKES = new Set(["open", "undone"]);        // what Accept saves (an undone item can be saved again)
+  const pct = (v) => (num(v) === null ? "?" : `${(Math.round(v * 1000) / 10).toFixed(1)} %`);
+  const f1 = (v) => (num(v) === null ? "?" : v.toFixed(1));
+  const luSaid = (e) => LU_PREFIX + String((e && e.message) || e).replace(LU_PREFIX, "");   // every message of the tab says experimental (design 7)
+  const luCall = (type, extra) => call(type, extra).catch((e) => { throw Object.assign(new Error(String((e && e.message) || e)), { code: e && e.code }); });
+  const luPlan = (mid) => ((luSess && luSess.plans) || []).find(p => p.map_id === mid) || null;
+  const luFloorName = (fid) => { const f = ((lu && lu.floors) || []).find(x => x.id === fid); return f ? f.name || fid : floorName(fid); };
+  const luItems = () => Object.entries((luSess && luSess.items) || {}).sort((a, b) => ((LU_ORDER[a[1].kind] ?? 9) - (LU_ORDER[b[1].kind] ?? 9)) || String(a[1].name).localeCompare(String(b[1].name)));
+  const luAcceptable = (it) => LU_TAKES.has(it.state) || (it.state === "not_now" && it.kind === "anchor_scale" && !it.verdict);
+  const luShifts = (it) => (it.flags || []).length > 0;
+  const luMapWanted = () => mapCan() && !luList && !!luSess && luSess.status !== "running" && luItems().length > 0;
+  async function luInfo(){
+    try { lu = await luCall("plan_build_info"); } catch (_) { lu = null; }
+    if (!lu || !lu.on) { lu = null; if (mode === "lineup" || mode === "rooms") mode = "add"; }
+    return lu;
+  }
+  function luTabs(){
+    if (!lu || !lu.on) return;
+    const row = d("div", "pl-choose");
+    row.setAttribute("data-plan-build", "tabs");
+    const tabs = [["add", "Add data via plans"], ["lineup", "Line up plans (experimental)"], ...(lu.rooms ? [["rooms", "Rooms from plans (experimental)"]] : [])];
+    for (const [m, word] of tabs) {
+      const b = btn(word, m === "lineup" ? "Claude reads one floor's plans and PadSpan lines them up (experimental)"
+        : m === "rooms" ? "Claude reads a lined-up floor's rooms, doors, windows and stairs (experimental)" : "Stairs, railings and lights from your plans", () => {
+        mode = m; luErr = ""; rbErr = "";
+        if (m === "lineup" && !luSess) luOpen(); else if (m === "rooms" && !rbSess) rbOpen(); else redraw();
+      });
+      b.setAttribute("aria-pressed", String(mode === m));
+      row.appendChild(b);
+    }
+    sheet.appendChild(row);
+  }
+  async function luOpen(){
+    luBusy = true; redraw();
+    await luInfo();
+    loadUrls();
+    if (lu && lu.running) { luPollStart(lu.running); luBusy = false; return; }
+    const last = ((lu && lu.floors) || []).map(f => f.last).filter(Boolean).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+    if (last && last.session) { try { luSess = (await luCall("plan_build_status", { session: last.session })).session; luFloor = luSess && luSess.floor_id; } catch (e) { luErr = luSaid(e); } }
+    luBusy = false; luKey = null; luFly = true; redraw();
+  }
+  function luPick(fid){
+    luFloor = fid; luSess = null; luPicked.clear();
+    const f = ((lu && lu.floors) || []).find(x => x.id === fid);
+    for (const p of (f && f.plans) || []) luPicked.add(p.map_id);
+    redraw();
+  }
+  async function luStart(){
+    if (luBusy || !luFloor) return;
+    luBusy = true; luErr = ""; redraw();
+    try { const r = await luCall("plan_build_start", { floor_id: luFloor, map_ids: [...luPicked] }); luPollStart(r.session); }
+    catch (e) { luErr = LU_PREFIX + String(e.message || e).replace(LU_PREFIX, ""); }
+    luBusy = false; redraw();
+  }
+  function luPollStart(sid){
+    luPollStop();
+    const tick = guard(async () => {
+      try {
+        const r = await luCall("plan_build_status", { session: sid });
+        luSess = r.session; luFloor = luSess && luSess.floor_id;
+        if (luSess && luSess.status !== "running") { luPollStop(); luKey = null; luFly = true; }
+      } catch (e) { luErr = luSaid(e); luPollStop(); }
+      redraw();
+    });
+    luPoll = setInterval(tick, POLL_MS);
+    tick();
+  }
+  function luPollStop(){ if (luPoll) { clearInterval(luPoll); luPoll = null; } }
+  async function luReload(){
+    try { const r = await luCall("plan_build_status", { session: luSess.id }); if (r && r.session) luSess = r.session; } catch (_) { /* what is shown stays */ }
+  }
+  async function luDo(type, extra, after){
+    if (luBusy || !luSess) return;
+    luBusy = true; luErr = ""; redraw();
+    try { const r = await luCall(type, { session: luSess.id, ...(extra || {}) }); if (after) after(r); }
+    catch (e) {
+      if (e.code === "rev_mismatch") await luReload();
+      luErr = LU_PREFIX + String(e.message || e).replace(LU_PREFIX, "");
+    }
+    luBusy = false; redraw();
+  }
+  /** A save, an undo or a refile: an ok: false answer is a refusal (nothing written), said in its words. */
+  async function luWrite(type, extra, done){
+    if (luBusy || !luSess) return;
+    luBusy = true; luErr = ""; luAskUndo = false; redraw();
+    try {
+      const r = (await luCall(type, { session: luSess.id, ...(extra || {}) })) || {};
+      if (r.session) luSess = r.session;
+      if (r.ok === false) { luErr = LU_PREFIX + String(r.message || r.code || "").replace(LU_PREFIX, ""); if (!r.session) await luReload(); }
+      else if (done) done(r);
+    } catch (e) {
+      if (e.code === "rev_mismatch") await luReload();
+      luErr = LU_PREFIX + String(e.message || e).replace(LU_PREFIX, "");
+    }
+    luKey = null; luBusy = false; redraw();
+  }
+  const luVerdict = (id, v, why) => luDo("plan_build_verdict", { rev: luSess.rev, item_id: id, v, ...(why ? { why } : null) }, (r) => {
+    luSess.rev = r.rev; luSess.items[id] = r.item; luWrongFor = null; luKey = null;
+    ctx.hint(LU_PREFIX + (v === "back" ? "taken back." : v === "wrong" ? "noted: wrong. Nothing in your house changes." : "not now, then."));
+  });
+  const luSave = (ids, group) => luWrite("plan_build_commit", { rev: luSess.rev, items: ids, ...(group ? { group: true } : null) }, () =>
+    ctx.hint(`${LU_PREFIX}saved ${ids.length === 1 ? "it" : `${ids.length} items`}. A backup was taken first; Undo this line-up session takes it back.`));
+  const luUndo = () => luWrite("plan_build_undo", {}, (r) => {
+    const n = r.undone || 0, k = (r.skipped || []).length;
+    ctx.hint(`${LU_PREFIX}${n} plan${n === 1 ? "" : "s"} put back where ${n === 1 ? "it was" : "they were"}${k ? `; ${k} moved by hand since ${k === 1 ? "was" : "were"} left as ${k === 1 ? "it is" : "they are"}` : ""}.`);
+  });
+  const luRefile = (mid, fid) => { luRefileFor = null; return luWrite("plan_build_refile", { rev: luSess.rev, map_id: mid, to_floor_id: fid }, (r) => { if (r.item_id) luCur = r.item_id; }); };
+  const luAnswer = (q, answer) => luDo("plan_build_answer", { question_id: q.id, answer }, (r) => {
+    luSess = r.session; luTaps.delete(q.id); luTyped = null; luKey = null;
+    if (luSess && luSess.status === "running") luPollStart(luSess.id);   // re-measuring on the server, with Stop, until it ends
+  });
+
+  // -- pictures: the plan's ink in one colour, kept per link and colour ------
+  function tinted(url, rgb, done){
+    const key = `${url}|${rgb}`;
+    if (tints.has(key)) { const t = tints.get(key); if (t.ready) return t.c; t.waiting.push(done); return null; }
+    const t = { ready: false, c: null, waiting: [done] };
+    tints.set(key, t);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const [w, h] = fitSize(img.naturalWidth, img.naturalHeight), c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        const g = c.getContext("2d");
+        g.drawImage(img, 0, 0, w, h);
+        const px = g.getImageData(0, 0, w, h), a = px.data;
+        for (let i = 0; i < a.length; i += 4) {
+          const ink = 255 - (a[i] * 0.299 + a[i + 1] * 0.587 + a[i + 2] * 0.114);
+          a[i] = rgb[0]; a[i + 1] = rgb[1]; a[i + 2] = rgb[2]; a[i + 3] = Math.min(255, ink * 1.6);
+        }
+        g.putImageData(px, 0, 0);
+        t.c = c; t.ready = true;
+      } catch (_) { t.ready = true; }
+      for (const f of t.waiting.splice(0)) try { f(); } catch (_) { /* a card gone */ }
+    };
+    img.onerror = () => { t.ready = true; };
+    img.src = url;
+    return null;
+  }
+  /** One picture drawn with its four corners in metres (corners[0] its top left, [1] top right, [3] bottom left). */
+  function drawAt(g, pic, corners, toPx){
+    if (!pic || !Array.isArray(corners) || corners.length < 4) return;
+    const [p0, p1, , p3] = corners.map(toPx);
+    g.save();
+    g.setTransform((p1[0] - p0[0]) / pic.width, (p1[1] - p0[1]) / pic.width, (p3[0] - p0[0]) / pic.height, (p3[1] - p0[1]) / pic.height, p0[0], p0[1]);
+    g.drawImage(pic, 0, 0);
+    g.restore();
+  }
+  function outline(g, corners, toPx, colour, dash){
+    if (!Array.isArray(corners) || corners.length < 4) return;
+    g.save(); g.strokeStyle = colour; g.lineWidth = 2; g.setLineDash(dash);
+    g.beginPath(); corners.map(toPx).forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.closePath(); g.stroke(); g.restore();
+  }
+  /** What an item shows, on the 3D map or on a card: the plan it is fitted to (blue), this plan
+   *  where the proposal puts it (red; where it is now with "now"), the outlines, the flags. */
+  function luParts(it){
+    const anchorId = it.kind === "place" ? (it.evidence || {}).anchor : null, anchor = anchorId ? luPlan(anchorId) : null, pl = luPlan(it.map_id);
+    const now = it.corners_now_m || (pl && pl.corners_m) || null, next = it.kind === "refile" ? null : it.corners_new_m || null;
+    return { anchor, now, next, blueMid: anchor ? anchor.map_id : it.kind === "anchor_scale" ? it.map_id : null,
+             blueAt: anchor ? anchor.corners_m : it.kind === "anchor_scale" ? now : null, redAt: luNow || !next ? now : next };
+  }
+  /** The overlay of one item on a card (no 3D view, or the list): the same drawing, flat. */
+  function overlay(c, it){
+    const p = luParts(it);
+    const all = [...(p.now || []), ...(p.next || []), ...(p.blueAt || [])];
+    if (!all.length) return;
+    const xs = all.map(q => q[0]), ys = all.map(q => q[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    c.height = Math.round(Math.min(720, Math.max(200, c.width * (y1 - y0) / Math.max(0.1, x1 - x0))));   // the plans' own shape
+    const paintIt = () => {
+      const g = c.getContext("2d");
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.fillStyle = "#ffffff"; g.fillRect(0, 0, c.width, c.height);
+      const k = Math.min((c.width - 16) / Math.max(0.1, x1 - x0), (c.height - 16) / Math.max(0.1, y1 - y0));
+      const toPx = ([x, y]) => [8 + (x - x0) * k, 8 + (y - y0) * k];
+      const blue = p.blueMid && urls && urls[p.blueMid] ? tinted(urls[p.blueMid], [37, 99, 235], paintIt) : null;
+      const red = urls && urls[it.map_id] ? tinted(urls[it.map_id], [220, 38, 38], paintIt) : null;
+      if (blue) drawAt(g, blue, p.blueAt, toPx);
+      g.globalCompositeOperation = "multiply";
+      if (red) drawAt(g, red, p.redAt, toPx);
+      g.globalCompositeOperation = "source-over";
+      outline(g, p.now, toPx, "#64748b", [6, 4]);
+      outline(g, p.next, toPx, "#f59e0b", [10, 4]);
+      for (const f of it.flags || []) {
+        if (!f.stored_m || !f.click_m) continue;
+        const [ax, ay] = toPx(f.stored_m), [bx, by] = toPx(f.click_m);
+        g.strokeStyle = f.what === "calibration" ? "#7c3aed" : "#0f766e"; g.lineWidth = 2; g.setLineDash([]);
+        g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by); g.stroke();
+        g.beginPath(); g.arc(ax, ay, 3.5, 0, Math.PI * 2); g.fill();
+      }
+    };
+    paintIt();
+  }
+  /** A picture's crop: a question's dimension with its ticks, a dimension measured on a proposal, or a whole plan to tap on. */
+  function questionPic(c, q, mid, onTap){
+    const url = urls && urls[mid];
+    if (!url) return;
+    const img = new Image();
+    const paintIt = () => {
+      const g = c.getContext("2d"), W = img.naturalWidth, H = img.naturalHeight;
+      if (!W || !H) return;
+      let sx = 0, sy = 0, sw = W, sh = H;
+      const pl = luPlan(mid), fw = pl ? pl.size_px[0] : W, fh = pl ? pl.size_px[1] : H, kx = W / fw, ky = H / fh;
+      if (q.kind === "confirm_dimension" && Array.isArray(q.box)) {
+        const [x1, y1, x2, y2] = q.box, m = 40;
+        sx = Math.max(0, (x1 - m) * kx); sy = Math.max(0, (y1 - m) * ky); sw = Math.min(W - sx, (x2 - x1 + 2 * m) * kx); sh = Math.min(H - sy, (y2 - y1 + 2 * m) * ky);
+      }
+      const k = Math.min(c.width / sw, c.height / sh);
+      g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(img, sx, sy, sw, sh, 0, 0, sw * k, sh * k);
+      const at = (x, y) => [(x * kx - sx) * k, (y * ky - sy) * k];
+      if (q.kind === "confirm_dimension" && Array.isArray(q.box) && q.mark) {   // the dimension line as read, highlighted
+        const [a, b] = [at(q.box[0], q.box[1]), at(q.box[2], q.box[3])];
+        g.fillStyle = "rgba(251,191,36,.28)"; g.fillRect(a[0], a[1], b[0] - a[0], b[1] - a[1]);
+        g.strokeStyle = "#f59e0b"; g.lineWidth = 1.5; g.setLineDash([5, 3]); g.strokeRect(a[0], a[1], b[0] - a[0], b[1] - a[1]); g.setLineDash([]);
+      }
+      g.strokeStyle = "#16a34a"; g.lineWidth = 2;
+      if (q.kind === "confirm_dimension" && Array.isArray(q.ticks_px) && q.ticks_px.length === 2) {
+        const [a, b] = q.ticks_px.map(p => at(p[0], p[1]));
+        g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+        for (const p of [a, b]) { g.beginPath(); g.moveTo(p[0], p[1] - 12); g.lineTo(p[0], p[1] + 12); g.stroke(); }
+      }
+      for (const [i, t] of (luTaps.get(q.id) || []).entries()) {
+        if ((i % 2 === 0) !== (mid === q.map_id)) continue;
+        const [x, y] = [t[0] * fw * kx * k - sx * k, t[1] * fh * ky * k - sy * k];
+        g.fillStyle = "#f59e0b"; g.beginPath(); g.arc(x, y, 6, 0, Math.PI * 2); g.fill();
+        g.fillStyle = "#111"; g.font = "bold 11px system-ui"; g.fillText(String(Math.floor(i / 2) + 1), x + 8, y - 6);
+      }
+      if (onTap) c.onclick = (e) => { const r = c.getBoundingClientRect(), x = (e.clientX - r.left) * c.width / r.width, y = (e.clientY - r.top) * c.height / r.height;
+        onTap([Math.min(1, Math.max(0, (x / k + sx) / W)), Math.min(1, Math.max(0, (y / k + sy) / H))]); };
+    };
+    img.onload = paintIt;
+    img.src = url;
+  }
+
+  // -- on the vetting map (the Live Aboard view the Plans tool already uses) --
+  function luDrop(){
+    luTok++;
+    for (const m of luMeshes.splice(0)) { if (m.material && m.material.map) { m.material.map.dispose(); texLive--; } dropMesh(m); }
+  }
+  function luSleep(){
+    if (!luAwake) return;
+    luAwake = false; luKey = null;
+    luDrop();
+    if (ctx.quiet) ctx.quiet(false);
+    if (ctx.render) ctx.render();
+  }
+  function luPlane(canvas, cs, y, opacity){
+    const tex = new THREE.CanvasTexture(canvas);
+    if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+    texLive++;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array([cs[0][0], y, cs[0][1], cs[1][0], y, cs[1][1], cs[2][0], y, cs[2][1], cs[3][0], y, cs[3][1]]), 3));
+    geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array([0, 1, 1, 1, 1, 0, 0, 0]), 2));
+    geo.setIndex([0, 2, 1, 0, 3, 2]);
+    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 }));
+    m.renderOrder = 2; m.frustumCulled = false;
+    return m;
+  }
+  /** The item on the map: two pictures at most (one on a phone: Now / Proposed is its blink), the outlines, the flags' arrows. */
+  function luBuild(it, F){
+    const tok = luTok, y = F.fl.elev, p = luParts(it), add = (m) => { luMeshes.push(m); group.add(m); };
+    const later = () => { if (tok === luTok && luAwake) { luKey = null; luSync(); } };
+    if (p.blueMid && p.blueAt && urls && urls[p.blueMid] && !touchy()) {
+      const c = tinted(urls[p.blueMid], [37, 99, 235], later);
+      if (c) add(luPlane(c, p.blueAt, y + 0.03, 0.7));
+    }
+    if (p.redAt && urls && urls[it.map_id]) {
+      const c = tinted(urls[it.map_id], [220, 38, 38], later);
+      if (c) { const m = luPlane(c, p.redAt, y + 0.036, luFade); m.renderOrder = 3; m.userData.proposed = true; add(m); }
+    }
+    if (p.now) add(dashMesh(dashTriangles(p.now, true, 0.4, 0.25, 0.1), y + 0.05, "#cbd5e1"));
+    if (p.next) add(dashMesh(dashTriangles(p.next, true, 0.6, 0.25, 0.12), y + 0.055, DASH_COL));
+    for (const f of it.state === "committed" ? [] : it.flags || []) {          // saved: what it shifted is drawn from metres again
+      if (!f.stored_m || !f.click_m) continue;
+      const col = f.what === "calibration" ? "#a855f7" : "#14b8a6", ring = [];
+      for (let i = 0; i < 12; i++) ring.push([f.stored_m[0] + Math.cos(i * Math.PI / 6) * 0.2, f.stored_m[1] + Math.sin(i * Math.PI / 6) * 0.2]);
+      add(dashMesh(dashTriangles([f.stored_m, f.click_m], false, 0.15, 0.08, 0.08), y + 0.06, col));
+      add(dashMesh(dashTriangles(ring, true, 0.08, 0.03, 0.07), y + 0.06, col));
+    }
+  }
+  function luFlyTo(it, F){
+    if (!ctx.flySpot) return;
+    const p = luParts(it), pts = [...(p.blueAt || []), ...(p.redAt || []), ...(p.now || [])];
+    if (!pts.length) return;
+    const xs = pts.map(q => q[0]), ys = pts.map(q => q[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    ctx.flySpot(F, (x0 + x1) / 2, (y0 + y1) / 2, Math.max(x1 - x0, y1 - y0) + 2, padNow());
+  }
+  function luSync(){
+    if (!mapCan() || !luSess) return;
+    const sc = ctx.scene();
+    if (!sc) return;
+    if (!group) { group = new THREE.Group(); group.name = "plan-ai"; }
+    if (group.parent !== sc) sc.add(group);
+    const list = luItems(), F = floorUi(luSess.floor_id);
+    if (!list.some(([id]) => id === luCur)) luCur = (list.find(([, it]) => luAcceptable(it)) || list[0] || [null])[0];
+    if (!luAwake) {
+      luAwake = true; luFly = true; luKey = null;
+      if (ctx.quiet) ctx.quiet(true);
+      if (touchy() && ctx.root.scrollIntoView) { try { ctx.root.scrollIntoView({ block: "start" }); } catch (_) { /* it stays where it is */ } }
+    }
+    const it = luCur ? luSess.items[luCur] : null;
+    if (luFly && F && ctx.setTopFloor && (ctx.currentFloor ? ctx.currentFloor() : null) !== F) ctx.setTopFloor(String(F.fl.id));
+    const key = it && F ? JSON.stringify([luCur, it.state, luNow, F.fl.elev, !!urls, touchy(), it.corners_new_m]) : "";
+    if (key !== luKey) { luDrop(); luKey = key; if (it && F) { try { luBuild(it, F); } catch (_) { /* a plan that won't draw: its card still says it all */ } } }
+    for (const m of luMeshes) if (m.userData && m.userData.proposed) m.material.opacity = luFade;
+    if (luFly && it && F) { luFly = false; requestAnimationFrame(guard(() => { if (luAwake) luFlyTo(it, F); })); }
+    if (ctx.render) ctx.render();
+  }
+
+  // -- the tab ---------------------------------------------------------------
+  function luSection(cls){ const s = d("div", cls || "pl-row"); s.setAttribute("data-plan-build", ""); return s; }
+  function paintLineup(onMap){
+    luTabs();
+    head("Line up plans", "Claude reads one floor's plans; PadSpan measures and lines them up. Experimental.");
+    sheet.appendChild(d("div", "pl-ban", LU_BANNER));
+    if (luErr) { const e = d("div", "pl-note pl-bad", luErr); e.setAttribute("role", "alert"); sheet.appendChild(e); }
+    if (luBusy && !luSess) { sheet.appendChild(d("div", "pl-note", "Looking…")); return; }
+    if (luSess && luSess.status === "running") return paintLuProgress();
+    if (luSess) return paintLuSession(onMap);
+    paintLuPicker();
+  }
+  function paintLuPicker(){
+    const floors = (lu && lu.floors) || [];
+    sheet.appendChild(d("h5", null, "Which floor (experimental)"));
+    const chips = d("div", "pl-choose");
+    chips.setAttribute("data-plan-build", "floors");
+    for (const f of floors) {
+      const n = (f.plans || []).length;
+      const b = btn(`${f.name || f.id} · ${n} plan${n === 1 ? "" : "s"}`, f.last ? `Last lined up: ${new Date((f.last.at || 0) * 1000).toLocaleDateString()}` : "Not lined up yet", () => luPick(f.id));
+      b.setAttribute("aria-pressed", String(luFloor === f.id)); b.disabled = !n;
+      chips.appendChild(b);
+    }
+    sheet.appendChild(chips);
+    const f = floors.find(x => x.id === luFloor);
+    if (!f) { sheet.appendChild(d("div", "pl-note", "Pick a floor. One floor is read at a time; the plans of other floors are used as they are.")); return; }
+    for (const p of f.plans || []) {
+      const l = d("label", "pl-tick");
+      l.setAttribute("data-plan-build", "plan");
+      const cb = d("input"); cb.type = "checkbox"; cb.checked = luPicked.has(p.map_id);
+      cb.addEventListener("change", () => { if (cb.checked) luPicked.add(p.map_id); else luPicked.delete(p.map_id); redraw(); });
+      l.appendChild(cb);
+      if (urls && urls[p.map_id]) { const im = d("img"); im.src = urls[p.map_id]; im.alt = ""; l.appendChild(im); }
+      const dr = p.drawn || {}, bits = [dr.rooms ? `rooms traced: ${dr.rooms}` : "", dr.calibration ? `calibration points: ${dr.calibration}` : "",
+        (dr.receivers || 0) + (dr.beacons || 0) + (dr.lights || 0) ? `devices drawn: ${(dr.receivers || 0) + (dr.beacons || 0) + (dr.lights || 0)}` : ""].filter(Boolean);
+      l.appendChild(d("span", null, `${p.name || "a plan"}${p.gauge ? " · your measured plan (never moved)" : ""} — ${bits.length ? bits.join(", ") : "nothing drawn on it"}`));
+      sheet.appendChild(l);
+    }
+    // The AI credit tracker's own estimate for the ticked plans (plan_ai.plan_estimate): every read once, to every read twice.
+    const ticked = (f.plans || []).filter(p => luPicked.has(p.map_id)), priced = ticked.filter(p => Array.isArray(p.est_usd));
+    const est = !ticked.length ? "tick the plans to read" : priced.length === ticked.length
+      ? `about $${priced.reduce((s, p) => s + p.est_usd[0], 0).toFixed(2)}–$${priced.reduce((s, p) => s + p.est_usd[1], 0).toFixed(2)} for ${ticked.length === 1 ? "this plan" : `these ${ticked.length} plans`} (estimate, experimental)`
+      : "no price is known for this model";
+    sheet.appendChild(d("div", "pl-note", `${(lu && lu.unlock && lu.unlock.display) || "Claude"} reads them: the plans leave the house for Anthropic. About 5 reads a plan; ${est}. `
+      + "Nothing is saved until you accept a proposal: a backup is taken before each save, and one undo takes the whole session back."));
+    const acts = d("div", "pl-acts");
+    acts.setAttribute("data-plan-build", "start");
+    const go = btn(`Line up ${f.name || f.id} (experimental)`, "Claude reads; PadSpan measures; you check every proposal", () => luStart(), "go");
+    go.disabled = luBusy || !luPicked.size || !!(lu && lu.start_blocked);
+    acts.appendChild(go);
+    sheet.appendChild(acts);
+    if (lu && lu.start_blocked) sheet.appendChild(d("div", "pl-note", { already_running: "A reading of your plans is running.", too_soon: "A session started less than a minute ago.", daily_cap: "That's the day's sessions." }[lu.start_blocked] || ""));
+  }
+  function paintLuProgress(){
+    const pr = luSess.progress || {};
+    sheet.appendChild(d("div", "pl-sum", `${pr.step === "measure" ? "Measuring" : pr.step === "dimension" ? `Reading a dimension on ${pr.name || "a plan"}` : `Reading ${pr.name || "a plan"}`} (${pr.plan || 0} of ${pr.of || 0})… experimental.`));
+    sheet.appendChild(d("div", "pl-note", `${luSess.reads || 0} reads so far, ${mins(luSess.spent_s)} of ${mins(luSess.budget_s)}.`));
+    const acts = d("div", "pl-acts");
+    acts.setAttribute("data-plan-build", "cancel");
+    acts.appendChild(btn("Stop (experimental)", "Stops after the read in flight; what was read is kept", () => luCall("plan_build_cancel", { session: luSess.id }).then(r => ctx.hint(r.message)).catch(() => {})));
+    sheet.appendChild(acts);
+  }
+  function luSummary(){
+    const s = luSess, items = Object.values(s.items || {});
+    const n = (k) => items.filter(i => i.kind === k).length, saved = items.filter(i => i.state === "committed").length;
+    const word = { done: "done", needs_help: "needs your help", cancelled: "stopped", failed: "failed", out_of_time: "ran out of time", no_credit: "out of credit" }[s.status] || s.status;
+    const cost = num(s.est_usd) !== null ? `, about $${s.est_usd.toFixed(2)} (estimate)` : "";
+    return `${luFloorName(s.floor_id)}: ${word}. ${s.reads || 0} reads${s.reused ? `, ${s.reused} plan${s.reused === 1 ? "" : "s"} reused` : ""}${cost}, in ${mins(s.spent_s)}. `
+      + `${n("place")} placement${n("place") === 1 ? "" : "s"}, ${n("refile")} refile${n("refile") === 1 ? "" : "s"}${n("anchor_scale") ? ", the anchor's own scale" : ""}.`
+      + (saved ? ` ${saved} saved.` : "")
+      + (s.cross_floor ? ` Its stairs sit ${m1(s.cross_floor.stairs_m)} m from ${luFloorName(s.cross_floor.floor_id)}'s.` : "");
+  }
+  function paintLuSession(onMap){
+    sheet.appendChild(d("div", "pl-sum", luSummary()));
+    const stops = (luSess.stops || []).filter(x => x.reason !== "help_unanswered" || (luSess.questions || []).some(q => q.state === "open"));
+    if (stops.length || luSess.resumable) {            // the server says whether Resume can carry it on (a plan moved under it: line up again)
+      const box = luSection("pl-note");
+      box.appendChild(d("div", "pl-sub", "Where it stopped (experimental):"));
+      for (const st of stops.slice(-6)) box.appendChild(d("div", null, `${st.say}${st.next ? ` ${st.next}` : ""}`));
+      if (luSess.resumable) {
+        const b = btn("Resume (experimental)", "Reads what is left; what was read is kept", () => luDo("plan_build_resume", {}, (r) => luPollStart(r.session)));
+        b.disabled = luBusy;
+        box.appendChild(b);
+      }
+      sheet.appendChild(box);
+    }
+    for (const q of (luSess.questions || []).filter(q => q.state === "open")) paintLuQuestion(q);
+    const items = luItems();
+    if (items.length) sheet.appendChild(d("h5", null, "Proposals (experimental)"));
+    if (onMap && items.length) {
+      const at = Math.max(0, items.findIndex(([id]) => id === luCur));
+      const nav = d("div", "pl-q");
+      nav.setAttribute("data-plan-build", "nav");
+      const go = (k) => { luCur = items[(at + k + items.length) % items.length][0]; luDimFor = null; luWrongFor = null; luFly = true; luKey = null; redraw(); };
+      nav.append(d("span", "pl-title", `${at + 1} of ${items.length} on the map (experimental)`), btn("‹", "The one before", () => go(-1)), btn("›", "The next one", () => go(1)));
+      sheet.appendChild(nav);
+      paintLuItem(items[at][0], items[at][1], true);
+    } else for (const [id, it] of items) paintLuItem(id, it, false);
+    if (!items.length && luSess.status === "done") sheet.appendChild(d("div", "pl-note", "Nothing to propose on this floor."));
+    paintLuRefile();
+    paintLuFoot(onMap, items);
+  }
+  /** "This plan isn't Basement?": a refile by hand (design 2), only for a plan with nothing drawn on it; the server says so when not. */
+  function paintLuRefile(){
+    const others = ((lu && lu.floors) || []).filter(f => f.id !== luSess.floor_id);
+    const has = new Set(Object.values(luSess.items || {}).filter(it => it.kind === "refile").map(it => it.map_id));
+    const plans = (luSess.plans || []).filter(p => p.role !== "gauge" && !has.has(p.map_id));
+    if (!plans.length || !others.length) return;
+    const box = luSection("pl-row pl-lu");
+    box.setAttribute("data-plan-build", "refile");
+    box.appendChild(d("div", "pl-sub", "A plan filed on the wrong floor? Say which floor it shows: a refile, checked and saved like any proposal. Only a plan with nothing drawn on it can move here (experimental)."));
+    const here = luFloorName(luSess.floor_id);
+    for (const p of plans) {
+      const a = d("div", "pl-acts");
+      if (luRefileFor === p.map_id) {
+        a.appendChild(d("span", "pl-sub", `${p.name || "This plan"} shows:`));
+        for (const f of others) a.appendChild(btn(f.name || f.id, `A refile of ${p.name || "this plan"} to ${f.name || f.id}`, () => luRefile(p.map_id, f.id)));
+        a.appendChild(btn("Cancel", "Leave it on " + here, () => { luRefileFor = null; redraw(); }));
+      } else a.appendChild(btn(`${p.name || "This plan"} isn't ${here}? (experimental)`, "Say which floor it shows", () => { luRefileFor = p.map_id; redraw(); }));
+      for (const b of a.querySelectorAll("button")) b.disabled = luBusy;
+      box.appendChild(a);
+    }
+    sheet.appendChild(box);
+  }
+  function paintLuFoot(onMap, items){
+    const foot = d("div", "pl-foot");
+    foot.setAttribute("data-plan-build", "foot");
+    const open = items.filter(([, it]) => LU_TAKES.has(it.state) && (it.kind === "place" || it.kind === "refile"));
+    const calm = open.filter(([, it]) => !luShifts(it)), loud = open.length - calm.length;
+    if (calm.length) {
+      const np = calm.filter(([, it]) => it.kind === "place").length, nr = calm.length - np;
+      const save = btn(`Save line-up for ${luFloorName(luSess.floor_id)} (experimental): ${[np ? `${np} plan${np === 1 ? "" : "s"}` : "", nr ? `${nr} refile${nr === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ")}`,
+        "Saves the proposals that shift nothing drawn on their plans, together; a backup is taken first", () => luSave(calm.map(([id]) => id), true), "go");
+      save.disabled = luBusy;
+      foot.appendChild(save);
+    }
+    if (loud) foot.appendChild(d("div", "pl-note", `${loud} proposal${loud === 1 ? "" : "s"} would shift what is drawn on ${loud === 1 ? "its plan" : "their plans"}: accept ${loud === 1 ? "it" : "them"} one by one.`));
+    if (items.some(([, it]) => it.state === "committed")) {
+      if (luAskUndo) {
+        foot.appendChild(d("div", "pl-note", "Put every plan this session saved back where it was? A backup is taken first; a plan you moved by hand since is left as it is."));
+        const yes = btn("Undo it (experimental)", "Takes the whole line-up session back", () => luUndo(), "go");
+        yes.disabled = luBusy;
+        foot.append(yes, btn("Cancel", "Keep what was saved", () => { luAskUndo = false; redraw(); }));
+      } else foot.appendChild(btn("Undo this line-up session (experimental)", "Puts every plan this session saved back where it was", () => { luAskUndo = true; redraw(); }));
+    }
+    foot.appendChild(btn(luNow ? "Show the proposals (experimental)" : "Show where they are now (experimental)", "The overlays: now or proposed", () => { luNow = !luNow; luKey = null; redraw(); }));
+    if (onMap) {
+      const r = d("input");
+      r.type = "range"; r.min = "0.15"; r.max = "1"; r.step = "0.05"; r.value = String(luFade);
+      r.title = "How strongly the proposed plan shows (experimental)"; r.setAttribute("aria-label", r.title);
+      r.addEventListener("input", guard(() => { luFade = Number(r.value); for (const m of luMeshes) if (m.userData && m.userData.proposed) m.material.opacity = luFade; if (ctx.render) ctx.render(); }));
+      foot.appendChild(r);
+    }
+    if (mapCan()) foot.appendChild(btn(luList ? "On the map (experimental)" : "As a list (experimental)", luList ? "Each proposal on the 3D view" : "The same proposals as cards", () => { luList = !luList; luKey = null; luFly = true; redraw(); }));
+    foot.appendChild(btn("Line up again (experimental)", "Pick a floor and read it again", () => { luSess = null; luKey = null; luInfo().then(() => redraw()); }));
+    sheet.appendChild(foot);
+  }
+  function paintLuQuestion(q){
+    const box = luSection();
+    box.setAttribute("data-plan-build", "question");
+    const t = d("div", "pl-txt");
+    const h = d("div");
+    h.append(d("span", null, q.kind === "confirm_dimension" ? `A dimension on ${q.name || "a plan"}` : `Tap the same corner on ${q.name || "a plan"} and ${q.other_name || "the other plan"}`),
+      d("span", "pl-chip", "EXPERIMENTAL"));
+    t.appendChild(h);
+    if (q.kind === "confirm_dimension") {
+      const c = d("canvas"); c.width = 460; c.height = 120; c.style.width = "100%"; c.style.height = "auto";
+      t.appendChild(c); questionPic(c, q, q.map_id);
+      const ai = q.ai || {};
+      t.appendChild(d("div", "pl-sub", `Claude reads ${ai.text ? `“${ai.text}”` : "a length"} (${m1(ai.metres)} m) here. Is that what the plan says? Experimental: if unsure, Skip.`));
+      const a = d("div", "pl-acts");
+      a.appendChild(btn("Yes", "That's what it says", () => luAnswer(q, "yes"), "go"));
+      if (luTyped === q.id) {
+        const inp = d("input"); inp.type = "number"; inp.step = "0.001"; inp.min = "0.1"; inp.placeholder = "metres"; inp.style.width = "90px";
+        a.appendChild(inp);
+        a.appendChild(btn("Use it", "The length printed, in metres", () => { const v = parseFloat(inp.value); if (v > 0) luAnswer(q, { metres: v }); }));
+      } else a.appendChild(btn("It says…", "Type what the plan says, in metres", () => { luTyped = q.id; redraw(); }));
+      a.appendChild(btn("Skip this one", "Leave this dimension out", () => luAnswer(q, "skip")));
+      t.appendChild(a);
+    } else {
+      const taps = luTaps.get(q.id) || [];
+      t.appendChild(d("div", "pl-sub", `Tap a corner on the first plan, then the same corner on the second; then a second corner far from it, on both. ${taps.length} of 4. Experimental: if unsure, Skip.`));
+      const two = d("div", "pl-choose");
+      for (const mid of [q.map_id, q.other_map_id]) {
+        const c = d("canvas"); c.width = 220; c.height = 220; c.style.border = "1px solid rgba(255,255,255,.2)";
+        two.appendChild(c);
+        questionPic(c, q, mid, (frac) => {
+          const list = luTaps.get(q.id) || [];
+          if (list.length >= 4 || ((list.length % 2 === 0) !== (mid === q.map_id))) return;
+          list.push(frac); luTaps.set(q.id, list); redraw();
+        });
+      }
+      t.appendChild(two);
+      const a = d("div", "pl-acts");
+      const use = btn("Use these taps", "Line it up from them", () => luAnswer(q, { taps: luTaps.get(q.id) }), "go");
+      use.disabled = taps.length !== 4 || luBusy;
+      a.append(use, btn("Clear", "Tap again", () => { luTaps.delete(q.id); redraw(); }), btn("Skip", "Leave this plan out: Mapping → Align does it by hand", () => luAnswer(q, "skip")));
+      t.appendChild(a);
+    }
+    box.appendChild(t);
+    sheet.appendChild(box);
+  }
+  function flagLine(f){
+    const m = m1(f.moved_m);
+    if (f.what === "calibration") return `A calibration click lands ${m} m from where it is stored${f.room_click && f.room_click !== f.room_now ? `, in ${f.room_click}` : ""}. This tool never moves calibration points.`;
+    if (f.what === "room_trace") return `${f.label || "A room"} was traced on this plan; its outline in the house stays where it is. The trace would sit up to ${m} m off.`;
+    return `${f.label || "A device"} drawn on this plan would land ${m} m from where it is stored. This tool never moves it: Mapping moves it.`;
+  }
+  /** The printed dimensions a proposal stands on: this plan's (and the plan it is fitted to), measured between their ticks. */
+  function luDims(it){
+    const out = [], add = (mid, role) => {
+      const pl = luPlan(mid);
+      for (const x of ((pl && pl.dims) || []).filter(x => x.ok && Array.isArray(x.box)).slice(0, 2)) out.push({ mid, name: (pl && pl.name) || "a plan", role, d: x });
+    };
+    if (it.kind !== "refile") add(it.map_id, "this plan");
+    const a = it.kind === "place" ? (it.evidence || {}).anchor : null;
+    if (a) add(a, "the plan it is fitted to");
+    return out;
+  }
+  function paintLuDims(t, it){
+    const list = luDims(it), ev = it.evidence || {}, box = d("div");
+    box.setAttribute("data-plan-build", "dimension");
+    box.appendChild(d("div", "pl-sub", "The printed dimensions this proposal stands on (experimental). Amber: the dimension line as read; green: between the ticks PadSpan found."));
+    for (const x of list) {
+      const tall = x.d.axis === "y", c = d("canvas");             // a dimension down the page gets a tall crop, not a sliver
+      c.width = tall ? 200 : 460; c.height = tall ? 340 : 110; c.style.width = tall ? "auto" : "100%"; c.style.maxWidth = "100%"; c.style.height = "auto";
+      c.style.display = "block"; c.style.background = "#fff"; c.style.borderRadius = "6px"; c.style.marginTop = "4px";
+      box.appendChild(c);
+      questionPic(c, { id: `dim_${x.mid}`, kind: "confirm_dimension", box: x.d.box, ticks_px: x.d.ticks_px, map_id: x.mid, mark: true }, x.mid);
+      const m = num(x.d.parse_m) ?? num(x.d.metres);
+      box.appendChild(d("div", "pl-sub", `${x.name} (${x.role}): “${x.d.text || "?"}” = ${m === null ? "?" : m.toFixed(3)} m ${x.d.axis === "y" ? "down" : "across"}; `
+        + `${num(x.d.span_px) === null ? "?" : Math.round(x.d.span_px)} px between its ticks, so ${f1(x.d.ppm)} px a metre${x.d.source === "person" ? " (as you typed it)" : ""}.`));
+    }
+    const pp = ev.ppm_printed || [], pn = ev.ppm_now || [], pw = ev.ppm_new || [];
+    if (pp.some(v => num(v) !== null)) box.appendChild(d("div", "pl-sub", `Pixels a metre, across / down: printed ${f1(pp[0])} / ${f1(pp[1])}; as placed now ${f1(pn[0])} / ${f1(pn[1])}; as proposed ${f1(pw[0])} / ${f1(pw[1])}.`));
+    if (!list.length) box.appendChild(d("div", "pl-sub", "No printed dimension could be measured on this plan: its placement comes from the picture match alone."));
+    t.appendChild(box);
+  }
+  function paintLuItem(id, it, onMap){
+    const box = luSection("pl-row pl-lu");
+    box.setAttribute("data-plan-build", `item:${it.kind}`);
+    if (it.kind !== "refile" && !onMap) {
+      const c = d("canvas"); c.width = 480; c.height = 320;
+      box.appendChild(c);
+      overlay(c, it);
+    }
+    const anchorName = (it.evidence || {}).anchor_name || "the anchor";
+    if (it.kind !== "refile") box.appendChild(d("div", "pl-lu-key", onMap
+      ? (it.kind === "place" ? `On the map: blue is ${anchorName}, red this plan ${luNow ? "where it is now" : "as proposed"}; purple where they agree. Grey dashes: now; amber: proposed; arrows: where a click would land.`
+        : "On the map: blue is this plan now, red at its own printed scale. Grey dashes: now; amber: proposed.")
+      : (it.kind === "place" ? `Blue: ${anchorName}. Red: this plan ${luNow ? "where it is now" : "as proposed"}; purple where they agree. Grey dashes: now; amber: proposed.`
+        : "Blue: this plan now. Red: at its own printed scale. Grey dashes: now; amber: proposed.")));
+    const t = d("div", "pl-txt");
+    const head_ = d("div");
+    head_.append(d("span", null, `${{ place: "Placement", refile: "Refile", anchor_scale: "The anchor's own scale" }[it.kind] || it.kind} · ${it.name || "a plan"}`),
+      d("span", "pl-chip", "EXPERIMENTAL"));
+    t.appendChild(head_);
+    const ev = it.evidence || {};
+    const lines = [];
+    if (it.state === "committed") lines.push("Saved (experimental). A backup was taken first; Undo this line-up session takes it back.");
+    if (it.state === "undone") lines.push("Undone: it is back where it was. Accept saves it again.");
+    if (it.refused && it.refused.why === "points_out_of_range" && it.state !== "committed") lines.push(`Not saved: ${it.refused.off} of ${it.refused.owned} calibration points on this plan would fall off its picture.`);
+    if (it.kind === "place") {
+      if (it.state === "same") lines.push(`Already lined up: no corner would move more than ${Math.max(1, Math.round((num(it.max_move_m) || 0) * 100))} cm. Nothing to change.`);
+      else lines.push(`Moves up to ${m1(it.max_move_m)} m; scale changes ${pct(it.scale_change)}.`);
+      if (ev.anchor_name) lines.push(`Fits ${ev.anchor_name} at ${num(ev.corr) === null ? "?" : ev.corr.toFixed(2)} (from ${ev.seed === "stairs" ? "the stairs" : ev.seed === "taps" ? "your taps" : "a search"}); turned ${num(ev.tilt_deg) === null ? "0" : Math.abs(ev.tilt_deg).toFixed(2)}°.`);
+      if (it.held === "no_anchor") lines.push("Nothing on this floor agrees with its own printed dimensions: look closely.");
+    } else if (it.kind === "anchor_scale") {
+      const e = ev.scale_err || [];
+      lines.push(`The plan the others are lined up to: by its own printed dimensions ${pct(Math.abs(e[0] || 0))} off across, ${pct(Math.abs(e[1] || 0))} down. ${it.state === "info" ? "Under 3 %: information only." : "3 % or more: Not now unless you choose it."}`);
+    } else {
+      const why = (it.proposal || {}).why || {};
+      lines.push(`${it.by_hand ? "You say it" : "It"} shows ${it.to_name || "another floor"}${why.title ? ` (“${why.title}”)` : ""}${(why.rooms || []).length ? `: ${why.rooms.join(", ")}` : ""}. Then line it up on ${it.to_name || "that floor"}.`);
+      if (it.state === "refused") { const dr = it.drawn || {}; lines.push(`${[dr.rooms ? `${dr.rooms} rooms traced` : "", dr.calibration ? `${dr.calibration} calibration points` : "", (dr.receivers || 0) + (dr.beacons || 0) + (dr.lights || 0) ? "devices" : ""].filter(Boolean).join(" and ")} are drawn on this plan; move it by hand in Mapping → 3D Stack if you're sure.`); }
+    }
+    if (it.state !== "committed") for (const f of it.flags || []) lines.push(flagLine(f));
+    if ((it.others || {}).n && it.state !== "committed") lines.push(`${it.others.n} other device${it.others.n === 1 ? "" : "s"} on this floor lie under this plan; check them against the corrected picture.`);
+    if (it.state === "stale") lines.push("The plan moved or changed since this was read: line the floor up again.");
+    for (const ln of lines) t.appendChild(d("div", "pl-sub", ln));
+    const a = d("div", "pl-acts");
+    if (luAcceptable(it)) {
+      const nf = (it.flags || []).length;
+      a.appendChild(btn(nf ? `Accept: ${nf} thing${nf === 1 ? "" : "s"} drawn here would sit elsewhere` : "Accept", "Saves this one (experimental): a backup first; Undo this line-up session takes it back", () => luSave([id], false), "go"));
+    }
+    if (["open", "same", "info"].includes(it.state)) a.appendChild(btn("Not now", "Leave it (noted at once)", () => luVerdict(id, "not_now")));
+    if (["open", "same", "info", "not_now", "undone"].includes(it.state)) {
+      if (luWrongFor === id) { for (const [k, w] of LU_WRONG) a.appendChild(btn(w, `Mark it wrong: ${w.toLowerCase()}`, () => luVerdict(id, "wrong", k), "why")); }
+      else a.appendChild(btn("Wrong", "Mark it wrong, with one reason (noted at once)", () => { luWrongFor = id; redraw(); }));
+    }
+    if (it.verdict && ["not_now", "wrong"].includes(it.state)) a.appendChild(btn("Take that back", "Back as it was", () => luVerdict(id, "back")));
+    if (it.kind !== "refile" && luDims(it).length) a.appendChild(btn(luDimFor === id ? "Hide the dimension" : "Show me the dimension", "The printed dimensions it stands on, on the plan (experimental)", () => { luDimFor = luDimFor === id ? null : id; redraw(); }));
+    for (const b of a.querySelectorAll("button")) if (!b.disabled) b.disabled = luBusy;
+    t.appendChild(a);
+    if (luDimFor === id) paintLuDims(t, it);
+    box.appendChild(t);
+    sheet.appendChild(box);
+  }
+
+  // ── Rooms from plans (Build from plans, Stage 2, experimental) ───────────
+  // The Plans tool's third tab (design 5): on a floor whose line-up has ended,
+  // Claude reads each lined-up plan twice for its rooms, doors, windows and
+  // stairs together; the server proposes the person's own rooms by overlap
+  // (never by name), the extra spaces, the doors and windows both reads found
+  // (one read only: "maybe", unticked) and the stairs. A flat floor map (and,
+  // with a 3D view, the same outlines on it) shows them; a tap selects rooms
+  // and spaces to merge. Everything ticked is saved by one "Accept all for this
+  // floor" (plan_build_rooms_commit: one backup, one undo), after the rooms gate.
+  // Every control here says experimental (tests/js/plan_build_rooms.mjs scans it).
+  let rbSess = null, rbFloor = null, rbPoll = null, rbBusy = false, rbErr = "", rbAreas = [], rbUndo = null, rbAskUndo = false;
+  let rbGate = null, rbGateKey = "", rbBoth = null, rbNameFor = null, rbAwake = false, rbKey = null, rbFly = false, rbTok = 0;
+  const rbPicked = new Set(), rbTicks = new Set(), rbSel = new Set(), rbMeshes = [];
+  const RB_PREFIX = "Rooms from plans (experimental): ";
+  const RB_BANNER = "Experimental. Claude reads each plan twice; where the two reads agree, that outline is proposed even if yours differs. Where they differ, look closely. "
+    + "Nothing is saved until Accept all: a backup is taken first, and one undo takes it all back.";
+  const RB_COL = { his: "#94a3b8", ready: "#22c55e", look: "#f59e0b", space: "#fb923c", sel: "#3b82f6", r1: "#06b6d4", r2: "#d946ef", door: "#ef4444", window: "#60a5fa", stairs: "#f97316" };
+  const rbSaid = (e) => RB_PREFIX + String((e && e.message) || e).replace(RB_PREFIX, "");
+  const rbProp = () => (rbSess && rbSess.proposal) || null;
+  const rbSaved = (id) => !!(rbSess && rbSess.saved && rbSess.saved[id]);
+  const rbInfo = (fid) => ((lu && lu.rooms) || {})[fid] || null;
+  const rbArea = (pts) => { let a = 0; for (let i = 0; i < (pts || []).length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; a += p[0] * q[1] - q[0] * p[1]; } return Math.abs(a) / 2; };
+  const rbInside = (x, y, p) => inPolygon(x, y, p);
+  const rbSpaceShown = (s) => !s.merged_into;
+  const rbMapWanted = () => mapCan() && !!rbProp() && rbSess.status !== "running";
+  /** What a session proposes, ticked by default (the server's `default`): a room the reads agree on, a new room once named, doors, windows and stairs both reads found. */
+  function rbDefaults(){
+    rbTicks.clear();
+    const p = rbProp();
+    if (!p) return;
+    for (const r of Object.values(p.rooms || {})) if (r.default !== false && !rbSaved(r.id)) rbTicks.add(r.id);
+    for (const s of Object.values(p.spaces || {})) if (s.new && rbSpaceShown(s) && !rbSaved(s.id)) rbTicks.add(s.id);
+    for (const o of Object.values(p.openings || {})) if (o.default && !rbSaved(o.id)) rbTicks.add(o.id);
+    for (const s of Object.values(p.stairs || {})) if (s.default && !rbSaved(s.id)) rbTicks.add(s.id);
+  }
+  function rbTake(r, fresh){
+    if (!r) return;
+    const was = rbSess && rbSess.id;
+    if ("session" in r) rbSess = r.session;
+    if (r.areas) rbAreas = r.areas;
+    if ("undo" in r) rbUndo = r.undo;
+    if (rbSess) rbFloor = rbSess.floor_id;
+    if (fresh || !rbSess || rbSess.id !== was) { rbDefaults(); rbSel.clear(); }
+    else {                                                      // after an edit: what is new is ticked as offered, what went is dropped
+      const p = rbProp() || {};
+      const have = new Set([...Object.keys(p.openings || {}), ...Object.keys(p.stairs || {}), ...Object.values(p.rooms || {}).map(x => x.id),
+        ...Object.values(p.spaces || {}).filter(rbSpaceShown).map(x => x.id)]);
+      for (const id of [...rbTicks]) if (!have.has(id) || rbSaved(id)) rbTicks.delete(id);
+      for (const r2 of Object.values(p.rooms || {})) if (!rbSaved(r2.id) && !rbSel.has(r2.id) && r2.default !== false && !rbTicks.has(r2.id) && r2.flags && r2.flags.includes("merge_only")) rbTicks.add(r2.id);
+      for (const s of Object.values(p.spaces || {})) if (s.new && rbSpaceShown(s) && !rbSaved(s.id)) rbTicks.add(s.id);
+      for (const id of [...rbSel]) if (!have.has(id)) rbSel.delete(id);
+    }
+    rbGateKey = "";
+  }
+  async function rbOpen(){
+    rbBusy = true; redraw();
+    await luInfo();
+    loadUrls();
+    if (lu && lu.rooms_running) { rbPollStart(lu.rooms_running); rbBusy = false; return; }
+    const last = Object.values((lu && lu.rooms) || {}).map(f => f.last).filter(Boolean).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+    if (last && last.session && !rbSess) { try { rbTake(await luCall("plan_build_rooms_status", { session: last.session }), true); } catch (e) { rbErr = rbSaid(e); } }
+    rbBusy = false; rbKey = null; rbFly = true; redraw();
+  }
+  function rbPick(fid){
+    rbFloor = fid; rbSess = null; rbPicked.clear(); rbErr = "";
+    for (const p of ((rbInfo(fid) || {}).plans || [])) if (p.tick !== false) rbPicked.add(p.map_id);
+    redraw();
+  }
+  /** The line-up's note (Garry, 2026-11-10: a note, not a block), with the way to finish it. */
+  const RB_NOTE = { no_lineup: "This floor hasn't been lined up", lineup_open: "Line-up not finished on this floor", moved: "A plan moved since this floor's line-up",
+                    not_lined_up: "Not every plan on this floor is lined up" };
+  function rbLineupNote(fid, note){
+    if (!note) return;
+    const box = luSection("pl-note");
+    box.setAttribute("data-plan-build", "rooms-lineup-note");
+    box.appendChild(d("div", null, `${RB_NOTE[note] || RB_NOTE.lineup_open}: outlines follow your plans as placed now. Finish the line-up for a closer fit. Experimental.`));
+    const a = d("div", "pl-acts");
+    a.appendChild(btn("Finish the line-up (experimental)", "Open Line up plans on this floor", () => { mode = "lineup"; luFloor = fid; luOpen().then(() => { if (!luSess) luPick(fid); }); }));
+    box.appendChild(a);
+    sheet.appendChild(box);
+  }
+  /** Read again: a third read of the plans a flagged room was read on; two of three decide it. */
+  const rbReadAgain = (room) => rbWrite("plan_build_rooms_read_again", { rev: rbSess.rev, room }, () => { if (rbSess && rbSess.status === "running") rbPollStart(rbSess.id); });
+  async function rbStart(){
+    if (rbBusy || !rbFloor) return;
+    rbBusy = true; rbErr = ""; redraw();
+    try { const r = await luCall("plan_build_rooms_start", { floor_id: rbFloor, map_ids: [...rbPicked] }); rbPollStart(r.session); }
+    catch (e) { rbErr = rbSaid(e); }
+    rbBusy = false; redraw();
+  }
+  function rbPollStart(sid){
+    rbPollStop();
+    const tick = guard(async () => {
+      try {
+        const r = await luCall("plan_build_rooms_status", { session: sid });
+        rbTake(r, true);
+        if (rbSess && rbSess.status !== "running") { rbPollStop(); rbKey = null; rbFly = true; }
+      } catch (e) { rbErr = rbSaid(e); rbPollStop(); }
+      redraw();
+    });
+    rbPoll = setInterval(tick, POLL_MS);
+    tick();
+  }
+  function rbPollStop(){ if (rbPoll) { clearInterval(rbPoll); rbPoll = null; } }
+  async function rbReload(){ try { rbTake(await luCall("plan_build_rooms_status", { session: rbSess.id }), false); } catch (_) { /* what is shown stays */ } }
+  async function rbEdit(op, extra, after){
+    if (rbBusy || !rbSess) return;
+    rbBusy = true; rbErr = ""; redraw();
+    try { rbTake(await luCall("plan_build_rooms_edit", { session: rbSess.id, rev: rbSess.rev, op, ...extra }), false); if (after) after(); }
+    catch (e) { if (e.code === "rev_mismatch") await rbReload(); rbErr = rbSaid(e); }
+    rbBusy = false; rbKey = null; redraw();
+  }
+  /** The rooms gate for the ticks as they are (plan_build_rooms_check), asked once a change of ticks or edits. */
+  function rbCheck(){
+    const p = rbProp();
+    if (!p || !rbSess || rbSess.status === "running") return;
+    const ids = [...rbTicks].filter(i => i.startsWith("room:") || i.startsWith("space:")).sort();
+    const key = `${rbSess.id}|${rbSess.rev}|${ids.join(",")}`;
+    if (key === rbGateKey) return;
+    rbGateKey = key;
+    luCall("plan_build_rooms_check", { session: rbSess.id, items: ids }).then((r) => { if (rbGateKey === key) { rbGate = r.gate; redraw(); } }).catch(() => { /* Save checks it again */ });
+  }
+  /** A new stair's piece, as Add data via plans builds one (the 3D view's builders); null with no 3D view. */
+  function rbFinals(ids){
+    const out = {}, p = rbProp();
+    for (const id of ids) {
+      const s = id.startsWith("stairs:") ? p.stairs[id] : null;
+      if (!s || s.relation === "correction") continue;
+      const piece = ctx.stairPiece ? ctx.stairPiece(s.geom, s.floor_id, PIECE_LABEL) : null;
+      if (piece) out[id] = ctx.DRAFT && ctx.DRAFT.planFinal ? ctx.DRAFT.planFinal(piece) : piece;
+    }
+    return out;
+  }
+  async function rbWrite(type, extra, done){
+    if (rbBusy || !rbSess) return;
+    rbBusy = true; rbErr = ""; rbAskUndo = false; redraw();
+    try {
+      const r = (await luCall(type, { session: rbSess.id, ...(extra || {}) })) || {};
+      rbTake(r, r.ok !== false);
+      if (r.gate) rbGate = r.gate;
+      if (r.ok === false) rbErr = RB_PREFIX + String(r.message || r.code || "").replace(RB_PREFIX, "");
+      else if (done) done(r);
+    } catch (e) {
+      if (e.code === "rev_mismatch") await rbReload();
+      rbErr = rbSaid(e);
+    }
+    rbKey = null; rbBusy = false; redraw();
+  }
+  const rbSave = () => { const ids = [...rbTicks]; return rbWrite("plan_build_rooms_commit", { rev: rbSess.rev, items: ids, finals: rbFinals(ids) }, () =>
+    ctx.hint(`${RB_PREFIX}saved ${ids.length} item${ids.length === 1 ? "" : "s"} in one save. A backup was taken first; Undo takes it all back.`)); };
+  const rbUndoIt = () => rbWrite("plan_build_rooms_undo", {}, (r) => {
+    const k = (r.skipped || []).length;
+    ctx.hint(`${RB_PREFIX}${r.undone || 0} put back${k ? `; ${k} changed since ${k === 1 ? "was" : "were"} left as ${k === 1 ? "it is" : "they are"}` : ""}.`);
+  });
+
+  // -- the flat floor map: his outlines, the proposal, the selection ---------
+  function rbShapes(){
+    const p = rbProp() || {}, out = [];
+    for (const r of Object.values(p.rooms || {})) {
+      out.push({ id: r.id, kind: "his", pts: r.now_m });
+      out.push({ id: r.id, kind: rbBoth === r.room ? "dim" : (r.ready ? "ready" : "look"), pts: r.outline_m, name: r.room });
+      if (rbBoth === r.room) (r.reads_m || []).forEach((q, i) => { if (q) out.push({ id: r.id, kind: i ? "r2" : "r1", pts: q }); });
+    }
+    for (const s of Object.values(p.spaces || {})) if (rbSpaceShown(s)) out.push({ id: s.id, kind: "space", pts: s.outline_m, name: s.new || s.name });
+    return out;
+  }
+  function rbHit(x, y){
+    const hits = rbShapes().filter(s => (s.kind === "ready" || s.kind === "look" || s.kind === "space" || s.kind === "dim") && rbInside(x, y, s.pts));
+    hits.sort((a, b) => rbArea(a.pts) - rbArea(b.pts));
+    return hits.length ? hits[0].id : null;
+  }
+  function rbToggleSel(id){ if (!id) return; if (rbSel.has(id)) rbSel.delete(id); else rbSel.add(id); rbKey = null; redraw(); }
+  function rbCanvas(){
+    const c = d("canvas"), shapes = rbShapes(), p = rbProp() || {};
+    c.setAttribute("data-plan-build", "rooms-map");
+    c.width = 480; c.height = 320; c.style.width = "100%"; c.style.height = "auto"; c.style.background = "#0b1510"; c.style.borderRadius = "8px"; c.style.cursor = "pointer";
+    const all = shapes.flatMap(s => s.pts || []);
+    if (!all.length) return c;
+    const xs = all.map(q => q[0]), ys = all.map(q => q[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    c.height = Math.round(Math.min(560, Math.max(220, c.width * (y1 - y0) / Math.max(0.1, x1 - x0))));
+    const k = Math.min((c.width - 20) / Math.max(0.1, x1 - x0), (c.height - 20) / Math.max(0.1, y1 - y0));
+    const toPx = ([x, y]) => [10 + (x - x0) * k, 10 + (y - y0) * k];
+    const g = c.getContext && c.getContext("2d");
+    if (g) {
+      const poly = (pts, stroke, dash, fill, w = 2) => {
+        if (!pts || pts.length < 3) return;
+        g.beginPath(); pts.map(toPx).forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.closePath();
+        if (fill) { g.fillStyle = fill; g.fill(); }
+        g.strokeStyle = stroke; g.lineWidth = w; g.setLineDash(dash); g.stroke(); g.setLineDash([]);
+      };
+      for (const s of shapes) {
+        const sel = rbSel.has(s.id);
+        if (s.kind === "his") poly(s.pts, RB_COL.his, [5, 4], null, 1.5);
+        else if (s.kind === "r1" || s.kind === "r2") poly(s.pts, RB_COL[s.kind], [8, 4], null, 2);
+        else poly(s.pts, sel ? RB_COL.sel : RB_COL[s.kind === "dim" ? "look" : s.kind] || RB_COL.look, s.kind === "dim" ? [2, 4] : [],
+          sel ? "rgba(59,130,246,.25)" : s.kind === "space" ? "rgba(251,146,60,.12)" : "rgba(34,197,94,.07)", sel ? 3 : 2);
+      }
+      for (const o of Object.values(p.openings || {})) {
+        if (!o.a_m || !o.b_m) continue;
+        const [a, b] = [toPx(o.a_m), toPx(o.b_m)];
+        g.strokeStyle = o.cls === "window" ? RB_COL.window : RB_COL.door; g.lineWidth = rbTicks.has(o.id) ? 4 : 2; g.setLineDash(rbTicks.has(o.id) ? [] : [3, 3]);
+        g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke(); g.setLineDash([]);
+      }
+      for (const s of Object.values(p.stairs || {})) {
+        const q = s.geom || {}, [cx, cy] = toPx([q.x_m, q.y_m]), r = Math.max(4, Math.min(q.width_m || 1, q.depth_m || 1) * k / 2);
+        g.strokeStyle = RB_COL.stairs; g.lineWidth = rbTicks.has(s.id) ? 3 : 1.5; g.strokeRect(cx - r, cy - r, 2 * r, 2 * r);
+      }
+      g.font = "11px system-ui"; g.fillStyle = "#e2e8f0";
+      for (const s of shapes) if (s.name && (s.kind === "ready" || s.kind === "look" || s.kind === "space")) {
+        const xs2 = s.pts.map(q => q[0]), ys2 = s.pts.map(q => q[1]), [tx, ty] = toPx([(Math.min(...xs2) + Math.max(...xs2)) / 2, (Math.min(...ys2) + Math.max(...ys2)) / 2]);
+        g.fillText(s.name.slice(0, 18), tx - 24, ty + 4);
+      }
+    }
+    c.onclick = guard((e) => { const r = c.getBoundingClientRect(), px = (e.clientX - r.left) * c.width / (r.width || c.width), py = (e.clientY - r.top) * c.height / (r.height || c.height);
+      rbToggleSel(rbHit(x0 + (px - 10) / k, y0 + (py - 10) / k)); });
+    return c;
+  }
+
+  // -- on the 3D view: the same outlines, at the floor ------------------------
+  function rbDrop(){ rbTok++; for (const m of rbMeshes.splice(0)) dropMesh(m); }
+  function rbSleep(){ if (!rbAwake) return; rbAwake = false; rbKey = null; rbDrop(); if (ctx.quiet) ctx.quiet(false); if (ctx.render) ctx.render(); }
+  function rbSync(){
+    if (!mapCan() || !rbProp()) return;
+    const sc = ctx.scene();
+    if (!sc) return;
+    if (!group) { group = new THREE.Group(); group.name = "plan-ai"; }
+    if (group.parent !== sc) sc.add(group);
+    const F = floorUi(rbSess.floor_id);
+    if (!rbAwake) { rbAwake = true; rbFly = true; rbKey = null; if (ctx.quiet) ctx.quiet(true); }
+    if (rbFly && F && ctx.setTopFloor && (ctx.currentFloor ? ctx.currentFloor() : null) !== F) ctx.setTopFloor(String(F.fl.id));
+    const key = F ? JSON.stringify([rbSess.id, rbSess.rev, [...rbSel], [...rbTicks], rbBoth, F.fl.elev]) : "";
+    if (key !== rbKey) {
+      rbDrop(); rbKey = key;
+      if (F) {
+        const y = F.fl.elev, add = (pts, col, h, closed = true) => { if (pts && pts.length >= 2) { const m = dashMesh(dashTriangles(pts, closed, closed ? 0.5 : 2, closed ? 0.2 : 0.01, 0.1), y + h, col); rbMeshes.push(m); group.add(m); } };
+        for (const s of rbShapes()) add(s.pts, rbSel.has(s.id) ? RB_COL.sel : RB_COL[s.kind === "dim" ? "look" : s.kind] || RB_COL.look, s.kind === "his" ? 0.04 : 0.06);
+        for (const o of Object.values(rbProp().openings || {})) if (o.a_m && rbTicks.has(o.id)) add([o.a_m, o.b_m], o.cls === "window" ? RB_COL.window : RB_COL.door, 0.08, false);
+      }
+    }
+    if (rbFly && F && ctx.flySpot) {
+      rbFly = false;
+      const pts = rbShapes().flatMap(s => s.pts || []);
+      if (pts.length) { const xs = pts.map(q => q[0]), ys = pts.map(q => q[1]);
+        requestAnimationFrame(guard(() => { if (rbAwake) ctx.flySpot(F, (Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2, Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) + 2, padNow()); })); }
+    }
+    if (ctx.render) ctx.render();
+  }
+
+  // -- the tab ---------------------------------------------------------------
+  function paintRooms(){
+    luTabs();
+    head("Rooms from plans", "Claude reads a floor's plans: rooms, doors, windows and stairs together. Experimental.");
+    sheet.appendChild(d("div", "pl-ban", RB_BANNER));
+    if (rbErr) { const e = d("div", "pl-note pl-bad", rbErr); e.setAttribute("role", "alert"); sheet.appendChild(e); }
+    if (rbBusy && !rbSess) { sheet.appendChild(d("div", "pl-note", "Looking…")); return; }
+    if (rbSess && rbSess.status === "running") return paintRbProgress();
+    if (rbSess) return paintRbSession();
+    paintRbPicker();
+  }
+  function paintRbPicker(){
+    const floors = (lu && lu.floors) || [];
+    sheet.appendChild(d("h5", null, "Which floor (experimental)"));
+    const chips = d("div", "pl-choose");
+    chips.setAttribute("data-plan-build", "rooms-floors");
+    for (const f of floors) {
+      const ri = rbInfo(f.id) || {}, n = (ri.plans || []).length;
+      const b = btn(`${f.name || f.id} · ${ri.ready ? `${n} plan${n === 1 ? "" : "s"}${ri.lined_up ? " lined up" : ""}` : "no plan placed"}`,
+        ri.ready ? "Read its rooms" : "Place a plan on this floor in Mapping first", () => rbPick(f.id));
+      b.setAttribute("aria-pressed", String(rbFloor === f.id));
+      chips.appendChild(b);
+    }
+    sheet.appendChild(chips);
+    const f = floors.find(x => x.id === rbFloor), ri = f ? rbInfo(f.id) : null;
+    if (!f) { sheet.appendChild(d("div", "pl-note", "Pick a floor. Its plans are read where they are placed now; a floor lined up first fits closer.")); return; }
+    if (!ri || !ri.ready) {                              // the one stop here: nothing placed in metres to read
+      sheet.appendChild(d("div", "pl-note", `${luFloorName(f.id)}: no plan is placed on this floor yet, so there is nothing to read. Place one in Mapping → 3D Stack first. Experimental.`));
+      return;
+    }
+    rbLineupNote(f.id, ri.note);
+    const LINE = { lined_up: "lined up", not_lined_up: "not lined up: read where it sits now", moved: "moved since its line-up: read where it sits now",
+                   other_floor: "the line-up says it shows another floor: not ticked" };
+    for (const p of ri.plans || []) {
+      const l = d("label", "pl-tick");
+      l.setAttribute("data-plan-build", "rooms-plan");
+      const cb = d("input"); cb.type = "checkbox"; cb.checked = rbPicked.has(p.map_id);
+      cb.addEventListener("change", () => { if (cb.checked) rbPicked.add(p.map_id); else rbPicked.delete(p.map_id); redraw(); });
+      l.appendChild(cb);
+      if (urls && urls[p.map_id]) { const im = d("img"); im.src = urls[p.map_id]; im.alt = ""; l.appendChild(im); }
+      l.appendChild(d("span", null, `${p.name || "a plan"} — ${LINE[p.lineup] || LINE.not_lined_up}`));
+      sheet.appendChild(l);
+    }
+    const ticked = (ri.plans || []).filter(p => rbPicked.has(p.map_id)), priced = ticked.filter(p => num(p.est_usd) !== null);
+    const est = !ticked.length ? "tick the plans to read" : priced.length === ticked.length ? `about $${priced.reduce((s, p) => s + p.est_usd, 0).toFixed(2)} for ${ticked.length === 1 ? "this plan" : `these ${ticked.length} plans`} (estimate, experimental)` : "no price is known for this model";
+    sheet.appendChild(d("div", "pl-note", `${(lu && lu.unlock && lu.unlock.display) || "Claude"} reads them, twice each: the plans leave the house for Anthropic; ${est}. `
+      + "Nothing is saved until you accept: one save for the floor, a backup first, one undo."));
+    const acts = d("div", "pl-acts");
+    acts.setAttribute("data-plan-build", "rooms-start");
+    const go = btn(`Read rooms on ${f.name || f.id} (experimental)`, "Claude reads each ticked plan twice; you check everything before it is saved", () => rbStart(), "go");
+    go.disabled = rbBusy || !rbPicked.size || !!(lu && lu.start_blocked);
+    acts.appendChild(go);
+    sheet.appendChild(acts);
+  }
+  function paintRbProgress(){
+    const pr = rbSess.progress || {};
+    sheet.appendChild(d("div", "pl-sum", `${pr.step === "measure" ? "Working out the rooms" : pr.step === "read 3" && rbSess.third_for ? `Reading ${rbSess.third_for.room} again, a third read` : `Reading ${pr.name || "a plan"}, ${pr.step || "read 1"}`} (${pr.plan || 0} of ${pr.of || 0})… experimental.`));
+    sheet.appendChild(d("div", "pl-note", `${rbSess.reads || 0} reads so far, ${mins(rbSess.spent_s)} of ${mins(rbSess.budget_s)}.`));
+    const acts = d("div", "pl-acts");
+    acts.setAttribute("data-plan-build", "rooms-cancel");
+    acts.appendChild(btn("Stop (experimental)", "Stops after the read in flight; what was read is kept", () => luCall("plan_build_cancel", { session: rbSess.id }).then(r => ctx.hint(r.message)).catch(() => {})));
+    sheet.appendChild(acts);
+  }
+  function rbTick(id, label, sub, opts = {}){
+    const l = d("label", "pl-tick");
+    l.setAttribute("data-plan-build-item", id.split(":")[0]);            // a row under its section's heading, which says experimental
+    const cb = d("input"); cb.type = "checkbox"; cb.checked = rbTicks.has(id); cb.disabled = !!opts.off || rbSaved(id) || rbBusy;
+    cb.addEventListener("change", () => { if (cb.checked) rbTicks.add(id); else rbTicks.delete(id); rbKey = null; redraw(); });
+    l.appendChild(cb);
+    const t = d("span", "pl-txt");
+    t.appendChild(d("div", null, rbSaved(id) ? `${label} · saved` : label));
+    for (const s of sub || []) if (s) t.appendChild(d("div", "pl-sub", s));
+    l.appendChild(t);
+    return l;
+  }
+  function paintRbSession(){
+    const s = rbSess, p = rbProp() || {}, rooms = Object.values(p.rooms || {}), spaces = Object.values(p.spaces || {}).filter(rbSpaceShown);
+    const ops = Object.values(p.openings || {}), stairs = Object.values(p.stairs || {});
+    const word = { done: "done", cancelled: "stopped", failed: "failed", out_of_time: "ran out of time", no_credit: "out of credit" }[s.status] || s.status;
+    const cost = num(s.est_usd) !== null ? `, about $${s.est_usd.toFixed(2)} (estimate)` : "";
+    sheet.appendChild(d("div", "pl-sum", `${luFloorName(s.floor_id)}: ${word}. ${s.reads || 0} reads${cost}. ${rooms.length} room${rooms.length === 1 ? "" : "s"} `
+      + `(${rooms.filter(r => r.ready).length} ready, ${rooms.filter(r => !r.ready).length} to look at), `
+      + `${spaces.length} extra space${spaces.length === 1 ? "" : "s"}, ${ops.filter(o => o.cls === "door").length} doors, ${ops.filter(o => o.cls === "window").length} windows, ${stairs.length} stair${stairs.length === 1 ? "" : "s"}.`));
+    rbLineupNote(s.floor_id, s.lineup_note);
+    const stops = (s.stops || []).slice(-4);
+    if (stops.length || s.resumable) {
+      const box = luSection("pl-note");
+      box.setAttribute("data-plan-build", "rooms-stops");
+      box.appendChild(d("div", "pl-sub", "Where it stopped (experimental):"));
+      for (const st of stops) box.appendChild(d("div", null, `${st.say}${st.next ? ` ${st.next}` : ""}`));
+      if (s.resumable) {
+        const b = btn("Resume (experimental)", "Reads what is left; what was read is kept", async () => {
+          try { const r = await luCall("plan_build_rooms_resume", { session: s.id }); rbPollStart(r.session); } catch (e) { rbErr = rbSaid(e); redraw(); }
+        });
+        b.disabled = rbBusy; box.appendChild(b);
+      }
+      sheet.appendChild(box);
+    }
+    if (!p.rooms) { paintRbFoot(); return; }
+    // The map, and what is selected on it.
+    const mapBox = luSection("pl-row pl-lu");
+    mapBox.appendChild(rbCanvas());
+    mapBox.appendChild(d("div", "pl-lu-key", "Grey dashes: your rooms now. Green: proposed, the reads agree; amber: look closely; orange: extra spaces; blue: selected. "
+      + "Red: doors, light blue: windows, orange squares: stairs (dotted: not ticked). Tap a room or a space to select it. Experimental."));
+    const sel = [...rbSel];
+    const bar = d("div", "pl-acts");
+    bar.setAttribute("data-plan-build", "rooms-merge");
+    if (sel.length) {
+      const names = sel.map(id => id.startsWith("room:") ? id.slice(5) : ((p.spaces || {})[id] || {}).name || id);
+      bar.appendChild(d("span", "pl-sub", `Selected: ${names.join(", ")}.`));
+      const m = btn(`Merge selected into one (experimental)`, "One clean outline; at most one of your rooms in it, never two", () => rbEdit("merge", { parts: sel }, () => rbSel.clear()), "go");
+      m.disabled = rbBusy || sel.length < 2 || sel.filter(i => i.startsWith("room:")).length > 1;
+      bar.append(m, btn("Clear", "Select nothing", () => { rbSel.clear(); rbKey = null; redraw(); }));
+      if (sel.filter(i => i.startsWith("room:")).length > 1) bar.appendChild(d("div", "pl-sub", "Two of your rooms can't be merged here: that would remove one. Merge spaces into one room."));
+    } else bar.appendChild(d("span", "pl-sub", "Extra spaces that belong to a room: select them with the room on the map, then Merge selected (experimental)."));
+    mapBox.appendChild(bar);
+    sheet.appendChild(mapBox);
+    paintRbGate();
+    paintRbRooms(rooms, p);
+    paintRbSpaces(spaces, p);
+    paintRbOpenings(ops);
+    paintRbStairs(stairs);
+    paintRbFoot();
+  }
+  function paintRbGate(){
+    rbCheck();
+    const g = rbGate, line = d("div", "pl-note");
+    line.setAttribute("data-plan-build", "rooms-gate");
+    if (!g || g.now === null || g.now === undefined) line.textContent = "Rooms right on your calibration spots: working it out… (experimental)";
+    else {
+      const f = (v) => `${Math.round(v * 10) / 10} %`;
+      line.textContent = g.scored ? `For information: calibration spots inside their room, ${f(g.now)} now, ${f(g.with)} with what is ticked (${g.spots} spots). Each room below says its own. Experimental.`
+        : `Only ${g.spots} calibration spot${g.spots === 1 ? "" : "s"} on this floor: too few to judge (${g.inside_now} inside their room now, ${g.inside_with} with these). Experimental.`;
+      if (g.held_out && g.held_out.now !== null) line.textContent += ` Held-out check: ${g.held_out.now} % now, ${g.held_out.with} % with these.`;
+    }
+    sheet.appendChild(line);
+  }
+  function paintRbRooms(rooms, p){
+    sheet.appendChild(d("h5", null, "Rooms (experimental)"));
+    for (const r of rooms.sort((a, b) => Number(a.ready) - Number(b.ready) || a.room.localeCompare(b.room))) {
+      const fl = r.flags || [], sub = [];
+      if (fl.includes("merge_only")) sub.push("Not on these plans: its outline now, with what you merged into it.");
+      else if (r.third && r.third.decided && r.ready) sub.push(`Read again: two of three reads agree (${Math.max(...(r.third.agree || [0])).toFixed(2)}).`);
+      else if (r.ready) sub.push(`Both reads agree (${(r.agree || 0).toFixed(2)}).`);
+      else if (fl.includes("one_read")) sub.push("Only one read found it: not ticked; tick it to use it.");
+      else if (fl.includes("three_differ")) sub.push("Look closely: read again, and all three reads differ. Not ticked: pick the one that fits and tick it, or keep yours.");
+      else if (fl.includes("reads_differ")) sub.push(`Look closely: the two reads differ (${(r.agree || 0).toFixed(2)}). Not ticked: show both reads to compare, read it again, or tick it to use it.`);
+      else sub.push(`Look closely: both reads agree (${(r.agree || 0).toFixed(2)}), but its printed rooms didn't join into one shape. Not ticked: merge, or tick it to use it.`);
+      if (!fl.includes("merge_only")) sub.push(`Overlap with your outline ${(r.iou_now || 0).toFixed(2)}; ${m1(r.area_now)} → ${m1(r.area_new)} m².`);
+      if (fl.includes("apart")) sub.push("Some of its printed rooms didn't join the rest: only the largest part is used.");
+      if (!fl.includes("merge_only") && (r.spots || [])[2]) sub.push(`Using read ${r.pick}${r.picked_by === "person" ? " (your pick)" : ""}: it keeps ${Math.max(0, r.spots[r.pick - 1])} of ${r.spots[2]} calibration spots inside it.`);
+      if ((r.cal || {}).leaving) sub.push(`${r.cal.leaving} of your ${r.cal.labelled} spots would fall outside it${r.cal.most ? " (half or more: not ticked)" : ""}; ${r.cal.leaving === 1 ? "it keeps its" : "they keep their"} room label. Your choice: keep yours, or use Claude's.`);
+      if ((r.merged || []).length) sub.push(`Merged in: ${r.merged.map(id => ((p.spaces || {})[id] || {}).name || id).join(", ")}.`);
+      const row = rbTick(r.id, r.room, sub);
+      const a = d("div", "pl-acts");
+      if (!fl.includes("merge_only") && (r.reads_m || []).every(Boolean)) {
+        a.appendChild(btn(rbBoth === r.room ? "Hide both reads" : "Show both reads", "Read 1 cyan, read 2 magenta, on the map (experimental)", () => { rbBoth = rbBoth === r.room ? null : r.room; rbKey = null; redraw(); }));
+        for (const k of [1, 2, 3].filter(k => k !== r.pick && (r.reads_m || [])[k - 1])) a.appendChild(btn(`Use read ${k}`, "Use that read's outline for this room (experimental)", () => rbEdit("pick", { room: r.room, read: k })));
+        if (fl.includes("reads_differ") || fl.includes("three_differ")) a.appendChild(btn("Read again (experimental)",
+          `A third read of ${(r.plans || []).length === 1 ? "its plan" : `its ${(r.plans || []).length} plans`}, the whole plan again (crops cut rooms off in the test); two of three decide`, () => rbReadAgain(r.room)));
+      }
+      if ((r.cal || {}).leaving) {
+        a.appendChild(btn("Keep mine", "Leave your outline as it is (untick)", () => { rbTicks.delete(r.id); rbKey = null; redraw(); }, rbTicks.has(r.id) ? "" : "go"));
+        a.appendChild(btn("Use Claude's", "Save Claude's outline anyway (tick)", () => { rbTicks.add(r.id); rbKey = null; redraw(); }, rbTicks.has(r.id) ? "go" : ""));
+      }
+      for (const m of ((rbSess.edits || {}).merges || []).filter(m => m.into === r.id)) a.appendChild(btn("Separate (experimental)", "Take this merge back", () => rbEdit("separate", { merge: m.id })));
+      a.appendChild(btn(rbSel.has(r.id) ? "Selected" : "Select", "Select it on the map, to merge", () => rbToggleSel(r.id)));
+      for (const b of a.querySelectorAll("button")) b.disabled = rbBusy || rbSaved(r.id);
+      row.lastChild.appendChild(a);
+      sheet.appendChild(row);
+    }
+    if ((p.unseen || []).length) sheet.appendChild(d("div", "pl-note", `Not on these plans, left as they are: ${p.unseen.join(", ")}. Experimental.`));
+  }
+  function paintRbSpaces(spaces, p){
+    if (!spaces.length) return;
+    sheet.appendChild(d("h5", null, "Extra spaces (experimental)"));
+    sheet.appendChild(d("div", "pl-note", "Printed spaces inside none of your rooms. Merge one into a room, add it as a new room with a name you pick, or leave it out (the default)."));
+    const his = Object.keys(p.rooms || {}).concat(p.unseen || []).sort();
+    for (const sp of spaces) {
+      const sub = [`${m1(rbArea(sp.outline_m))} m² · ${sp.reads.length > 1 ? "both reads" : "one read only"}`];
+      if (sp.new) sub.push(`New room: ${sp.new}. Ticked to save.`);
+      const row = sp.new ? rbTick(sp.id, `${sp.name} → ${sp.new}`, sub) : (() => { const b = luSection("pl-row"); b.setAttribute("data-plan-build-item", "space"); const t = d("div", "pl-txt"); t.appendChild(d("div", null, sp.name)); t.appendChild(d("div", "pl-sub", sub[0] + " · left out")); b.appendChild(t); return b; })();
+      const holder = sp.new ? row.lastChild : row.firstChild;
+      const a = d("div", "pl-acts");
+      const pick = d("select");
+      pick.appendChild(d("option", null, "Merge into…"));
+      for (const n of his) { const o = d("option", null, n); o.value = n; pick.appendChild(o); }
+      pick.addEventListener("change", guard(() => { if (pick.value && pick.value !== "Merge into…") rbEdit("merge", { parts: [`room:${pick.value}`, sp.id] }); }));
+      pick.title = "Merge it into one of your rooms (experimental)"; pick.disabled = rbBusy;
+      a.appendChild(pick);
+      if (rbNameFor === sp.id) {
+        const inp = d("input"); inp.type = "text"; inp.placeholder = "room name"; inp.maxLength = 40; inp.style.width = "120px";
+        const list = d("select");
+        list.appendChild(d("option", null, "Home Assistant areas…"));
+        for (const n of rbAreas) { const o = d("option", null, n); o.value = n; list.appendChild(o); }
+        list.addEventListener("change", () => { if (list.value && list.value !== "Home Assistant areas…") inp.value = list.value; });
+        a.append(list, inp, btn("Use it", "Add it as a new room with this name (experimental)", () => { const v = inp.value.trim(); if (v) rbEdit("space", { space: sp.id, name: v }, () => { rbNameFor = null; rbTicks.add(sp.id); }); }, "go"),
+          btn("Cancel", "Leave it as it is", () => { rbNameFor = null; redraw(); }));
+      } else if (!sp.new) a.appendChild(btn("Add as a new room (experimental)", "You pick its name: a Home Assistant area or your own", () => { rbNameFor = sp.id; redraw(); }));
+      if (sp.new) a.appendChild(btn("Leave out", "Not a room after all", () => rbEdit("space", { space: sp.id, name: "" }, () => rbTicks.delete(sp.id))));
+      if (sp.merge) a.appendChild(btn("Separate (experimental)", "Take this merge back", () => rbEdit("separate", { merge: sp.merge })));
+      a.appendChild(btn(rbSel.has(sp.id) ? "Selected" : "Select", "Select it on the map, to merge", () => rbToggleSel(sp.id)));
+      for (const b of a.querySelectorAll("button")) b.disabled = b.disabled || rbBusy || rbSaved(sp.id);
+      holder.appendChild(a);
+      sheet.appendChild(row);
+    }
+  }
+  function paintRbOpenings(ops){
+    if (!ops.length) return;
+    sheet.appendChild(d("h5", null, "Doors and windows (experimental)"));
+    const n = (f) => ops.filter(f).length;
+    sheet.appendChild(d("div", "pl-note", `Proposed when both reads found it: ${n(o => o.cls === "door" && o.reads > 1)} doors, ${n(o => o.cls === "window" && o.reads > 1)} windows. `
+      + `Found by one read only ("maybe", not ticked): ${n(o => o.reads === 1)}. Already in your house, offered as a correction (not ticked): ${n(o => o.existing && o.existing.what === "opening")}. `
+      + `On your map as a barrier, left as is: ${n(o => o.existing && o.existing.what !== "opening")}. Not on a wall of your rooms: ${n(o => !o.placed)}.`));
+    const what = (o) => o.cls === "window" ? `Window${o.rooms.length ? ` in ${o.rooms[0]}` : ""}` : `${o.kind === "doorway" ? "Doorway" : "Door"}${o.rooms.length > 1 ? ` between ${o.rooms[0]} and ${o.rooms[1]}` : o.rooms.length ? ` of ${o.rooms[0]}` : ""}${o.type ? ` (${o.type})` : ""}`;
+    for (const o of ops.sort((a, b) => (b.reads - a.reads) || a.id.localeCompare(b.id))) {
+      const fix = !!(o.existing && o.existing.what === "opening"), off = !o.placed || (!!o.existing && !fix);
+      sheet.appendChild(rbTick(o.id, what(o), [fix ? "Already in your house: a correction moves or resizes yours to the one read. Not ticked." : o.existing ? "Drawn on your map as a barrier: left as is."
+        : !o.placed ? "Not on a wall of your rooms: not offered." : o.reads > 1 ? "Both reads." : "Maybe: one read only."], { off }));
+    }
+  }
+  function paintRbStairs(stairs){
+    if (!stairs.length) return;
+    sheet.appendChild(d("h5", null, "Stairs (experimental)"));
+    for (const s of stairs) {
+      const rel = ({ new: "new", correction: `moves the stair you have by ${m1(s.distance_m)} m${s.hand ? "; you placed that one, so it isn't ticked" : ""}`, duplicate: "already in your house: left as is",
+        stacked: "a second staircase here? Not ticked" }[s.relation] || s.relation) + (s.other_floor ? `; it climbs from ${floorName(s.floor_id)}, best read with that floor, so it isn't ticked` : "");
+      const off = s.relation === "duplicate", need = (s.relation === "new" || s.relation === "stacked") && !ctx.stairPiece;
+      sheet.appendChild(rbTick(s.id, `Stairs${s.room ? ` in ${s.room}` : ""}${s.geom && s.geom.says ? `, ${s.geom.says}` : ""} · ${floorName(s.floor_id)}`,
+        [`${rel}.${s.reads > 1 ? "" : " Maybe: one read only."}`, need ? "A new stair is built in the 3D view: open Live Aboard to save it." : ""], { off: off || need }));
+    }
+  }
+  function paintRbFoot(){
+    const foot = d("div", "pl-foot");
+    foot.setAttribute("data-plan-build", "rooms-foot");
+    const ids = [...rbTicks].filter(id => !rbSaved(id)), c = (pre) => ids.filter(i => i.startsWith(pre)).length;
+    if (rbProp() && ids.length) {
+      const save = btn(`Accept all for ${luFloorName(rbSess.floor_id)} (experimental): ${[c("room:") ? `${c("room:")} rooms` : "", c("space:") ? `${c("space:")} new` : "", c("door:") ? `${c("door:")} doors` : "",
+        c("window:") ? `${c("window:")} windows` : "", c("stairs:") ? `${c("stairs:")} stairs` : ""].filter(Boolean).join(", ")}`,
+      "Everything ticked, in one save: a backup is taken first, and one undo takes it all back", () => rbSave(), "go");
+      save.disabled = rbBusy;
+      foot.appendChild(save);
+    }
+    if (rbSess.saved && Object.keys(rbSess.saved).length) {
+      if (rbAskUndo) {
+        foot.appendChild(d("div", "pl-note", "Put every room, door, window and stair this session saved back as it was? A backup is taken first; anything you changed since is left as it is."));
+        const yes = btn("Undo it (experimental)", "Takes the whole rooms session back", () => rbUndoIt(), "go");
+        yes.disabled = rbBusy;
+        foot.append(yes, btn("Cancel", "Keep what was saved", () => { rbAskUndo = false; redraw(); }));
+      } else foot.appendChild(btn("Undo this rooms session (experimental)", "Puts back everything this session saved", () => { rbAskUndo = true; redraw(); }));
+    }
+    foot.appendChild(btn("Read the floor again (experimental)", "Pick a floor and read it again", () => { rbSess = null; rbKey = null; rbSel.clear(); rbGate = null; rbSleep(); luInfo().then(() => redraw()); }));
+    sheet.appendChild(foot);
+  }
+
   /** Keep mine, or the AI's position where the AI placed it too: where the keyboard starts on the first correction. */
   function paintFocus(){
     if (focusBtn && !focusBtn.disabled) { try { focusBtn.focus({ preventScroll: true }); } catch (_) { /* no matter */ } }
@@ -1975,10 +3118,32 @@ export function createPlans(ctx){
     if (view === "ignored") { mapSleep(); paintIgnored(); return true; }
     if (step === "loading") { mapSleep(); head("Add data via plans"); sheet.appendChild(d("div", "pl-note", "Looking for your plans…")); return true; }
     if (step === "sample") { mapSleep(); head("Add data via plans"); sheet.appendChild(d("div", "pl-note", "Sample mode shows a sample house: switch to Live mode to read your own plans.")); return true; }
-    if (step === "progress") { mapSleep(); paintProgress(); return true; }
+    if (mode === "rooms" && lu) {
+      // Rooms from plans: its outlines on the 3D view when there is one, the flat map and the lists on the sheet.
+      mapSleep(); luSleep();
+      const rbMap = rbMapWanted();
+      if (!rbMap) rbSleep();
+      paintRooms();
+      if (rbMap) rbSync();
+      return true;
+    }
+    rbSleep();
+    if (mode === "lineup" && lu) {
+      // The proposals on the vetting map when there is one (the 3D view), else as cards.
+      mapSleep();
+      const luMap = luMapWanted();
+      sheet.classList.toggle("map", luMap);
+      if (!luMap) luSleep();
+      paintLineup(luMap);
+      if (luMap) luSync();
+      return true;
+    }
+    luSleep();
+    if (step === "progress") { mapSleep(); luTabs(); paintProgress(); return true; }
     if (onMap) { paintMap(); paintFocus(); syncMap(); return true; }
     mapSleep();
-    if (step === "list" && sess) { paintList(); paintFocus(); return true; }
+    if (step === "list" && sess) { luTabs(); paintList(); paintFocus(); return true; }
+    luTabs();
     paintConsent();
     return true;
   }
@@ -1989,8 +3154,8 @@ export function createPlans(ctx){
       on = !!on;
       if (on === shownNow) return;
       shownNow = on;
-      if (on) { view = "list"; failing = null; listAsked = false; cur = null; card = "item"; urls = null; open(); }
-      else { stopPoll(); sheet.classList.remove("plans"); sheet.classList.remove("map"); mapSleep(); pics.clear(); }
+      if (on) { view = "list"; failing = null; listAsked = false; cur = null; card = "item"; urls = null; mode = "add"; open(); luInfo().then(() => redraw()); }
+      else { stopPoll(); luPollStop(); rbPollStop(); sheet.classList.remove("plans"); sheet.classList.remove("map"); mapSleep(); luSleep(); rbSleep(); pics.clear(); tints.clear(); }
     },
     /** The sheet's content for the step we are at; true: there is one. */
     sheet: () => paint(),
@@ -2002,9 +3167,22 @@ export function createPlans(ctx){
     /** What the harness and the tests read. */
     state(){
       return { cur, card, moving, onMap: mapAwake, floor: floorSeen, pins: [...pins.values()].map(p => ({ id: p.id, n: Number(p.el.dataset.n), state: p.el.dataset.state })),
-               ghosts: [...ghosts.keys()], plan: planNow ? planNow.map_id : null, planShown: !!(planMesh && planMesh.visible), opacity, textures: texLive, verdicts: vCount, fade };
+               ghosts: [...ghosts.keys()], plan: planNow ? planNow.map_id : null, planShown: !!(planMesh && planMesh.visible), opacity, textures: texLive, verdicts: vCount, fade,
+               lineup: { on: !!(lu && lu.on), mode, floor: luFloor, session: luSess ? luSess.id : null, status: luSess ? luSess.status : null,
+                         items: luSess ? Object.keys(luSess.items || {}) : [], cur: luCur, onMap: luAwake, meshes: luMeshes.length },
+               rooms: { floor: rbFloor, session: rbSess ? rbSess.id : null, status: rbSess ? rbSess.status : null, ticks: [...rbTicks].sort(), selected: [...rbSel],
+                        gate: rbGate, onMap: rbAwake, meshes: rbMeshes.length } };
     },
-    dispose(){ stopPoll(); shownNow = false; mapSleep(); keysTo(false); try { style.remove(); pinsEl.remove(); } catch (_) { /* gone with its root */ } },
+    /** Line up plans on the map: show this item (the harness and its screenshots). */
+    lineupItem(id){ luCur = id; luDimFor = null; luFly = true; luKey = null; redraw(); },
+    /** Line up plans (experimental): straight to its tab, on a floor (the harness and Settings' link). */
+    lineup(fid){ mode = "lineup"; if (fid) luFloor = fid; luOpen().then(() => { if (fid && !luSess) luPick(fid); }); },
+    /** Rooms from plans (experimental): straight to its tab, on a floor (the harness and its screenshots). */
+    rooms(fid){ mode = "rooms"; rbOpen().then(() => { if (fid && !rbSess) rbPick(fid); }); },
+    /** Rooms from plans: select a room or space as a tap on the map does, show both reads of a room (the harness). */
+    roomsSelect(id){ rbToggleSel(id); },
+    roomsBoth(room){ rbBoth = room; rbKey = null; redraw(); },
+    dispose(){ stopPoll(); luPollStop(); rbPollStop(); shownNow = false; mapSleep(); luSleep(); rbSleep(); keysTo(false); try { style.remove(); pinsEl.remove(); } catch (_) { /* gone with its root */ } },
   };
 }
 

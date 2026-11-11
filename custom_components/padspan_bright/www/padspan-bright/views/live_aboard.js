@@ -99,6 +99,14 @@ const RAISED = await import(`./live_aboard_raised.js${new URL(import.meta.url).s
 // the People chip, the two switches in Views ▾ (optional: missing, as it was).
 const PANEL = await import(`./live_aboard_panel.js${new URL(import.meta.url).search}`)
   .catch(err => { console.warn("PadSpan: live_aboard_panel failed to load", err); return null; });
+// The ⋯ list, "Show on this screen" (live_aboard_show.js): what this screen
+// draws, item by item (optional: missing, everything shows as it was).
+const SHOW = await import(`./live_aboard_show.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: live_aboard_show failed to load", err); return null; });
+// The scene row (scene_row.js): the host's scenes and one-floor presets as
+// small maps along the top of the bottom bar (optional: missing, no row).
+const SCENES = await import(`./scene_row.js${new URL(import.meta.url).search}`)
+  .catch(err => { console.warn("PadSpan: scene_row failed to load", err); return null; });
 // The director (live_aboard_director.js): on the sidebar, the camera flies to
 // a doorbell, door or alarm that went off (optional: missing, nothing does).
 const DIRECTOR = await import(`./live_aboard_director.js${new URL(import.meta.url).search}`)
@@ -255,7 +263,7 @@ const CSS = `
   color:#f59e0b;background:rgba(245,158,11,.12)}
 @keyframes la3d-toast{0%{opacity:0;visibility:visible}5%{opacity:1}85%{opacity:1;visibility:visible}100%{opacity:0;visibility:hidden}}
 .la3d-ov{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:1}
-.la3d-hud{position:absolute;left:72px;top:10px;z-index:3;max-width:calc(100% - 84px)}
+.la3d-hud{position:absolute;left:122px;top:10px;z-index:3;max-width:calc(100% - 134px)}
 .la3d-hud .lv-hoverhud{position:static}
 .la3d-side{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}
 .la3d-side:last-child{justify-content:flex-end;margin-left:auto}
@@ -331,19 +339,29 @@ const CSS = `
 :host([data-wall]) .la3d-bar,:host([data-wall]) .la3d-compass,:host([data-wall]) .la3d-north,
 :host([data-wall]) .la3d-menu,:host([data-wall]) .la3d-toast,:host([data-wall]) .la3d-solo,:host([data-wall]) .la3d-corner,
 :host([data-wall]) .la3d-dircard,:host([data-wall]) .la3d-sheet,:host([data-wall]) .la3d-card{zoom:var(--wall-ctl,var(--wall-ui,1))}
-:host([data-wall]) .la3d-tip{display:none}`;
+:host([data-wall]) .la3d-tip{display:none}
+/* Vacation Mode's banner (styles.css .lv-vacation) is pinned dead centre over
+   the map. While the ⋯ list or a menu is open (the panel's element carries
+   data-la3d-menu) it steps under them, and is on top again once they close. */
+:host([data-la3d-menu]) .lv-mapcard > .lv-vacation{z-index:4}`;
 // While Live Aboard shows (its sheet travels with it): the flat Atlas's
 // symbol legend matches nothing in 3D; on the sidebar the header's flat hint
 // gives way to the view's own, and on a narrow screen the emergency pill
-// folds to its icon, clear of the house.
-const CSS_SHOWING = `.lv-legend{display:none}`;
+// folds to its icon, clear of the house. The flat map's scene row gives way
+// to the view's own (scene_row.js).
+const CSS_SHOWING = `.lv-legend{display:none}.psc-atlas{display:none}`;
 // Covering the panel (the map alone, full screen): the Vacation banner and
 // the emergency lighting dial stay on top, the dial in the cover's corner.
 const COVER_TOP_Z = COVER_Z + 1;
 // With the dial in the corner, ☰ (bring the bars back) sits under it, never
 // beneath it: a tap meant for ☰ must not open, or start, the emergency test.
 const DIAL_CLEAR = 14 + 72 + 12;
-const coverCss = (c, dial) => `.lv-vacation{z-index:${COVER_TOP_Z}}
+// A list or menu open over the cover: the banner stays over the map, but not
+// over the list (the list is in the cover's own layer, so the banner can't be
+// put between them): where they overlap, the list's box is cut out of it,
+// for the eye and for a tap.
+const coverCss = (c, dial, cut) => `.lv-vacation{z-index:${COVER_TOP_Z}}
+:host([data-la3d-menu]) .lv-mapcard > .lv-vacation.lv-vacation{z-index:${COVER_TOP_Z}${cut ? `;clip-path:${cut}` : ""}}
 .lv-emerg{position:fixed;z-index:${COVER_TOP_Z};top:${Math.round(c.top + 14)}px;right:${Math.round(Math.max(0, (window.innerWidth || 0) - c.left - c.width) + 14)}px}${
   dial ? `
 .la3d .la3d-solo{top:${DIAL_CLEAR}px}` : ""}`;
@@ -585,6 +603,13 @@ function createSlot(slotKey){
   let panel = null;
   // live_aboard_director.js: the flight to what went off, its card, and back.
   let director = null;
+  // live_aboard_show.js: the ⋯ list (showMenu); what each line is on this
+  // screen (showOn, resolved on every update: this screen's ticks over the
+  // house's own, showHouse); houseP: the card's data before the list hid
+  // anything (what is ready is worked out from it).
+  let showMenu = null, showOn = null, showHouse = {}, houseP = null;
+  // scene_row.js: the scene row on the bottom bar (sceneRow), from the host's p.scenes.
+  let sceneRow = null;
   // live_aboard_storey.js: each storey's floor and roof (storeyL); roofWant:
   // the roof is showing or on its way (the walls under it stand).
   let storeyL = null, roofWant = false;
@@ -657,6 +682,10 @@ function createSlot(slotKey){
     panel = null;
     try { if (director) director.dispose(); } catch (_) { /* gone with the view */ }
     director = null;
+    try { if (showMenu) showMenu.dispose(); } catch (_) { /* gone with the view */ }
+    showMenu = null; showOn = null; houseP = null;
+    try { if (sceneRow) sceneRow.dispose(); } catch (_) { /* gone with the view */ }
+    sceneRow = null;
     try { if (fpsUi) fpsUi.dispose(); } catch (_) { /* gone with the view */ }
     fpsUi = null;
     if (peopleTimer !== null) { clearTimeout(peopleTimer); peopleTimer = null; }
@@ -767,6 +796,7 @@ function createSlot(slotKey){
       ...ANGLES.map(([t, , n]) => ({ text: t, act: () => preset(n, true) })),
       ...(floorSteps ? [null, ...floorItems()] : []), null, ...viewItems()])]]);
     abtn.classList.add("la3d-n");
+    abtn.setAttribute("data-la3d-view", "");
     const full = seg(null, [["", "", () => toggleFull()]]);
     full.setAttribute("data-la3d-full", "");
     fullBtns = [...full.querySelectorAll("button")];
@@ -780,6 +810,11 @@ function createSlot(slotKey){
     planSeg.setAttribute("data-la3d-plan", "");
     planSeg.style.display = "none";
     left.appendChild(planSeg);
+    // The scene row: its own line along the top of the bar, over the controls.
+    if (SCENES) {
+      sceneRow = SCENES.createSceneRow({ doc: document, place: "aboard", guard });
+      bar.insertBefore(sceneRow.el, bar.firstChild);
+    }
     root.appendChild(bar);
     // The map alone: one small button brings the bars back.
     soloBtn = d("button", "la3d-solo");
@@ -842,6 +877,8 @@ function createSlot(slotKey){
     root.appendChild(compass);
     compassEl = compass;
     rose = compass.querySelector(".la3d-rose");
+    // ⋯ beside it: what this screen shows (live_aboard_show.js).
+    if (SHOW) showMenu = makeShowMenu();
     // Shown on release of a spin: nothing is saved until Save.
     pill = d("span", "lv-zoomseg la3d-north");
     pill.setAttribute("role", "group");
@@ -882,7 +919,17 @@ function createSlot(slotKey){
     const c = coverRect();
     Object.assign(root.style, { left: `${c.left}px`, top: `${c.top}px`, width: `${c.width}px`, height: `${c.height}px` });
     const rn = root.getRootNode ? root.getRootNode() : null, scope = rn && rn.querySelector ? rn : document;
-    if (coverStyle) coverStyle.textContent = coverCss(c, !!scope.querySelector(".lv-emerg"));
+    const vac = menuOpen() ? scope.querySelector(".lv-mapcard > .lv-vacation") : null;
+    if (coverStyle) coverStyle.textContent = coverCss(c, !!scope.querySelector(".lv-emerg"), vac ? cutOut(vac, root.querySelectorAll(".la3d-show, .la3d-menu")) : null);
+  }
+  /** `el`'s clip-path with each of `over`'s boxes cut out of it (even-odd), or null when none overlaps it. */
+  function cutOut(el, over){
+    const b = el.getBoundingClientRect(), px = (v) => `${Math.round(v)}px`;
+    const holes = [...over].map(n => n.getBoundingClientRect())
+      .filter(r => r.width > 0 && r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top)
+      .map(r => { const x0 = px(r.left - b.left), y0 = px(r.top - b.top), x1 = px(r.right - b.left), y1 = px(r.bottom - b.top);
+                  return `, ${x0} ${y0}, ${x1} ${y0}, ${x1} ${y1}, ${x0} ${y1}, ${x0} ${y0}, 0 0`; });
+    return holes.length ? `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0${holes.join("")})` : null;
   }
   const COVER_KEYS = ["position", "margin", "borderRadius", "border", "zIndex", "maxWidth", "left", "top", "width", "height",
                       "translate"];   // a wall's burn-in shift moves the full screen; back in the card, the card's own does
@@ -1149,7 +1196,7 @@ function createSlot(slotKey){
     const o = P.open, e = o && o.leaf;
     if (!o || !o.wet || !o.wetOn || !e) return;
     const z1 = cut && e.cuttable ? Math.min(e.z1, HOUSE.CUT_H) : e.z1, hgt = z1 - e.z0;
-    o.wet.matrix.copy(hgt < 0.005 ? ZERO : compose(P.mx, F.fl.elev + e.z0 - 0.02, P.my, P.yaw, P.len + 0.08, hgt + 0.05, e.thick + 0.08));
+    o.wet.matrix.copy(hgt < 0.005 || goneHere(P, e) ? ZERO : compose(P.mx, F.fl.elev + e.z0 - 0.02, P.my, P.yaw, P.len + 0.08, hgt + 0.05, e.thick + 0.08));
     o.wet.matrixWorldNeedsUpdate = true;
   }
   /** Fly to a wet window: its floor shown, framed with a little of the room. */
@@ -1184,6 +1231,8 @@ function createSlot(slotKey){
             { text: "Save this view", act: () => saveView() },
             ...(trailsOffered() ? [{ text: `Trails, last 30 min: ${prefGet(PREF_TRAILS) === "1" ? "On" : "Off"}`, on: prefGet(PREF_TRAILS) === "1",
                                      title: "Where each person and tag went in the last half hour (this screen only)", act: () => toggleTrails() }] : []),
+            ...(showMenu ? [{ text: "Show on this screen ⋯", title: "Pick what this screen shows: lights, sensors, people, rain… (the ⋯ beside the compass)",
+                              act: () => showMenu.open() }] : []),
             ...(panel ? panel.menuItems() : [])];
   }
   // The frame-rate readout: off unless this browser turned it on (Settings
@@ -1225,11 +1274,23 @@ function createSlot(slotKey){
 
   // ── a menu over the bar (Views, and the narrow screen's Walls and View) ───
   function closeMenu(){
+    if (showMenu) showMenu.close();
     if (menuOff) menuOff();
     menuOff = null;
     if (menuEl && menuEl.parentNode) menuEl.parentNode.removeChild(menuEl);
     menuEl = null;
+    markMenus();
   }
+  /** The panel's element says whether the ⋯ list or a menu is open, so
+   *  Vacation Mode's banner steps under it (the CSS's data-la3d-menu). */
+  function markMenus(open = menuOpen()){
+    const h = hostEl();
+    if (!h || !h.setAttribute) return;
+    if (open) h.setAttribute("data-la3d-menu", "");
+    else h.removeAttribute("data-la3d-menu");
+    layCover();
+  }
+  function menuOpen(){ return !!(menuEl || (showMenu && showMenu.isOpen)); }
   /** items: {text, act, on?, del?, dot? (a floor's activity), title?} or
    *  null (a line between). A second tap on its button closes it. */
   function openMenu(anchor, items){
@@ -1271,6 +1332,7 @@ function createSlot(slotKey){
     m.style.left = `${Math.max(8, Math.min(ar.left - rr.left, rr.width - 8 - mw)) / k}px`;
     m.style.bottom = `${Math.max(8, rr.bottom - ar.top + 6) / k}px`;
     menuEl = m;
+    markMenus();
     const away = guard((e) => { const path = e.composedPath ? e.composedPath() : []; if (!path.includes(m) && !path.includes(anchor)) closeMenu(); });
     const esc = guard((e) => { if (e.key === "Escape") closeMenu(); });
     window.addEventListener("pointerdown", away, true);
@@ -1389,7 +1451,9 @@ function createSlot(slotKey){
     storeyL = STOREY ? STOREY.createStoreyLayer({ THREE, lit: (g, spec, c, r) => lit(g, spec, c, r), slabT: HOUSE.SLAB_T,
       quality: () => (profileOf().pbr ? "high" : "low") }) : null;
     raisedL = RAISED ? RAISED.createRaisedLayer({ THREE, camera: () => camera, size: () => [canvas.clientWidth || 0, canvas.clientHeight || 0],
-      any: () => !!((motionL && motionL.anyRaised()) || (tracked && tracked.tagCount)), raised: raisedNow, texts: wordsNow, ready: shouldDraw,
+      any: () => !!((motionL && motionL.anyRaised()) || (tracked && tracked.tagCount))
+        || floorsUi.reduce((n, F) => n + (F.group.visible ? F.labels.length : 0), chips.length) > 1,
+      raised: raisedNow, texts: wordsNow, words: wordUnits, ready: shouldDraw,
       busy: () => !!cam.fly || !!quality.measuring || dirty, movedAt: () => camMovedAt, off: () => raisedOff,
       quality: () => (profileOf().pbr ? "high" : "low"), settled: recheckCovers,
       draw: () => { liveMs = liveRate(performance.now()); requestRender(); } }) : null;
@@ -1793,6 +1857,8 @@ function createSlot(slotKey){
     if (!STOREY || !STOREY.isStairs(p) || !house) return p.recipe;
     const r = STOREY.stairReach(house.canon ? house.canon(p.floor_id) : p.floor_id, p.recipe.params && p.recipe.params.to_floor, house.floors,
                                 STOREY.footprint(p));
+    // The ⋯ list's Railings hides a stair's rails too, its spindles and posts with them (the steps stay).
+    if (!shownHere("railings")) return { ...p.recipe, height_m: r.rise, params: { ...(p.recipe.params || {}), rails_shown: false } };
     return { ...p.recipe, height_m: r.rise };
   }
   /** A band just inside each room's outline (EDGE_IN to EDGE_IN + EDGE_W in
@@ -1822,25 +1888,28 @@ function createSlot(slotKey){
     g.setAttribute("color", new THREE.BufferAttribute(new Float32Array(col), 3));
     return g;
   }
-  /** The Atlas's look: a faint line in each plate's colour round the plate
-   *  (its floors' rooms, padded as the flat plate is), at its floor's level,
-   *  as the Atlas outlines its plates (HOUSE.floorBadges: its colours). */
-  const PLATE_PAD = 0.6, PLATE_OP = 0.5;
+  /** The Atlas's look: a faint line in each plate's colour round the plate,
+   *  at its floor's level, as the Atlas outlines its plates (HOUSE.floorBadges:
+   *  its colours). It follows the storey's own floor (its rooms, halls filled
+   *  in: live_aboard_storey.js plateOutlines), a little way out past the
+   *  outside walls. The flat plate's rectangle round all the rooms drew
+   *  long lines in the air and out over the yard, well past the house (Garry,
+   *  2026-11-06: "lines around floor, something not quite right"). */
+  const PLATE_PAD = 0.3, PLATE_OP = 0.5;
   function platesOf(h){
     let badges = [];
     try { badges = HOUSE.floorBadges(lastP && lastP.model, lastP && lastP.floors, h); } catch (_) { badges = []; }
     for (const b of badges) {
-      const F = floorsUi.find(q => q.fl === b.floor), on = h.floors.filter(f => !f.outdoor && Math.abs(f.elev - b.floor.elev) < 0.05);
-      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for (const r of h.rooms) if (on.includes(r.floor)) for (const p of r.pts) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
-      if (!F || !Number.isFinite(x0)) continue;
-      const P = PLATE_PAD, y = b.floor.elev + 0.006;
-      const g = new THREE.BufferGeometry().setFromPoints([[x0 - P, y0 - P], [x1 + P, y0 - P], [x1 + P, y1 + P], [x0 - P, y1 + P]]
-        .map(([x, z]) => new THREE.Vector3(x, y, z)));
+      const F = floorsUi.find(q => q.fl === b.floor), loops = storeyL ? storeyL.plates(b.floor.id, PLATE_PAD) : [];
+      if (!F || !loops.length) continue;
+      const y = b.floor.elev + 0.006, pts = [];
+      for (const L of loops) L.forEach((p, i) => { const q = L[(i + 1) % L.length]; pts.push(new THREE.Vector3(p[0], y, p[1]), new THREE.Vector3(q[0], y, q[1])); });
+      const g = new THREE.BufferGeometry().setFromPoints(pts);
       const m = new THREE.LineBasicMaterial({ color: b.color, transparent: true, opacity: PLATE_OP, depthWrite: false });
       shellRes.push(g, m);
-      F.plate = new THREE.LineLoop(g, m);
+      F.plate = new THREE.LineSegments(g, m);
       F.plate.userData.n = b.n;
+      F.plate.visible = shownHere("floor_outlines");
       F.group.add(F.plate);
     }
   }
@@ -1850,7 +1919,7 @@ function createSlot(slotKey){
     const k = nightK;
     for (const F of floorsUi) {
       if (F.lift) { F.lift.material.opacity = NIGHT_FLOOR * k; F.lift.visible = k > 0.01; }
-      if (F.edges) { F.edges.material.opacity = atlas ? Math.max(atlas.lineOp, NIGHT_EDGE * k) : NIGHT_EDGE * k; F.edges.visible = !!atlas || k > 0.01; }
+      if (F.edges) { F.edges.material.opacity = atlas ? Math.max(atlas.lineOp, NIGHT_EDGE * k) : NIGHT_EDGE * k; F.edges.visible = (!!atlas || k > 0.01) && shownHere("room_outlines"); }
     }
     topGlow.value = NIGHT_TOP * k;
     if (storeyL) storeyL.night(k);                           // the roof keeps a little of its colour
@@ -2116,7 +2185,7 @@ function createSlot(slotKey){
       let z1 = cut && e.cuttable ? Math.min(e.z1, HOUSE.CUT_H) : e.z1;
       if (F.clip !== undefined && F.clip !== null && z1 > F.clip + 0.3) z1 = Math.max(e.z0, F.clip);   // applyTop: under the hidden floors
       const hgt = z1 - e.z0;
-      e.mesh.setMatrixAt(e.i, hgt < 0.005 ? ZERO : P.open && e === P.open.leaf ? (P.open.slots ? ZERO : leafMatrix(F, P, e.z0, hgt, e.thick))
+      e.mesh.setMatrixAt(e.i, hgt < 0.005 || goneHere(P, e) ? ZERO : P.open && e === P.open.leaf ? (P.open.slots ? ZERO : leafMatrix(F, P, e.z0, hgt, e.thick))
         : compose(P.mx, F.fl.elev + e.z0, P.my, P.yaw, P.len, hgt, e.thick));
       e.mesh.instanceMatrix.needsUpdate = true;
     }
@@ -2239,8 +2308,8 @@ function createSlot(slotKey){
   function placePanels(F, P, cut){
     const o = P.open, im = F.panels;
     if (!im || !o.slots) return;
-    const a = o.at * o.at * (3 - 2 * o.at), list = panelsOf(F, P, a);
-    for (let i = 0; i < o.slots[1]; i++) im.setMatrixAt(o.slots[0] + i, list[i] ? panelMatrix(F, P, list[i], cut) : ZERO);
+    const a = o.at * o.at * (3 - 2 * o.at), list = panelsOf(F, P, a), gone = !!o.leaf && goneHere(P, o.leaf);
+    for (let i = 0; i < o.slots[1]; i++) im.setMatrixAt(o.slots[0] + i, list[i] && !gone ? panelMatrix(F, P, list[i], cut) : ZERO);
     im.instanceMatrix.needsUpdate = true;
   }
   // A door linked to a cover follows it (live_aboard_storey.js coverAt): its
@@ -2291,7 +2360,7 @@ function createSlot(slotKey){
   // set on the frame (animateLive); nothing while locked.
   function placeFlash(F, P, cut){
     const o = P.open, e = o.leaf || o.span, m = o.flash;
-    if (o.state !== "unlocked" && o.lockState !== "unlocked") m.matrix.copy(ZERO);
+    if ((o.state !== "unlocked" && o.lockState !== "unlocked") || !shownHere("locks")) m.matrix.copy(ZERO);
     else {
       const z1 = cut ? Math.min(e.z1, HOUSE.CUT_H) : e.z1;
       m.matrix.copy(compose(P.mx, F.fl.elev + e.z0 - 0.01, P.my, P.yaw, P.len + 0.04, z1 - e.z0 + 0.03, e.thick + 0.05));
@@ -2487,7 +2556,8 @@ function createSlot(slotKey){
   const OFF_LEAN = 0.6, _c2 = new THREE.Color();
   function offColour(c){ return atlas ? c.lerp(_c2.set(atlas.offFill), OFF_LEAN) : c; }
   function paintLight(L){
-    const F = L.F, k = L.look, on = k.on, hidden = !!(L.wall && L.wall.cut) || !!L.swap, glow = theme3d ? theme3d.glow : 1;
+    // The ⋯ list's Light glow off: the bulbs only, no pool, glow or wash.
+    const F = L.F, k = L.look, on = k.on, hidden = !!(L.wall && L.wall.cut) || !!L.swap, glow = (theme3d ? theme3d.glow : 1) * (shownHere("glow") ? 1 : 0);
     const c = new THREE.Color().setRGB(k.rgb[0], k.rgb[1], k.rgb[2], THREE.SRGBColorSpace);
     L.color = c; L.f = k.f;
     const core = on ? c.clone().lerp(_white, 0.35).multiplyScalar(0.55 + 0.45 * k.f) : null;
@@ -2565,7 +2635,7 @@ function createSlot(slotKey){
   function assignLamps(){
     lampsDirty = false;
     lampTarget.copy(cam.target);
-    const n = profileOf().lamps;
+    const n = shownHere("glow") ? profileOf().lamps : 0;    // Light glow off (the ⋯ list): no lamp lights the rooms
     // A fixture with a piece of its own (P5) lights from the piece's bulb.
     const cands = lights.filter(L => L.look && L.look.on && L.kf > 0 && L.F.group.visible && !L.swap)
       .map(L => ({ pos: L.lamp, color: L.color, k: L.f * L.kf * (dimOf(L.eid) ? MARKS.DIM_K : 1) }))
@@ -2588,7 +2658,7 @@ function createSlot(slotKey){
   function syncDevices(p, vd){
     if (!devices) return;
     const em = Array.isArray(p.emergency) && p.emergency.length ? new Set(p.emergency.map(String)) : null;
-    let changed = devices.sync(vd.pieces, { states: p.states || {}, regIds: p.regIds || null, entities: p.entities || null, lbe, emergency: em,
+    let changed = devices.sync(piecesNow(vd.pieces), { states: p.states || {}, regIds: p.regIds || null, entities: p.entities || null, lbe, emergency: em,
                                             dim: classF ? dimOf : null, dimK: MARKS ? MARKS.DIM_K : 1 });
     for (const L of lights) {
       const s = devices.has(L.eid, L.drawn === "fan" || (L.l && L.l.isFan) ? "spin" : "glow");
@@ -2630,7 +2700,7 @@ function createSlot(slotKey){
     if (!tr) { trailData = null; trailAt = 0; trailLoad = null; }
     else readTrails(tr);
     if (tracked.sync({ model: p.model, looks: vd.devices, figures: vd.figures, snapshot: pp ? peopleSnap : null,
-                       states: p.states || {}, people: on(p.people), tags: on(p.tags),
+                       states: p.states || {}, people: on(p.people), tags: on(p.tags), scanners: p.scanners,
                        carries: p.settings3d ? p.settings3d.atlas_3d_carries : null, trails: tr ? trailData : null }, rebuilt)) requestRender();
     if (panel) panel.peopleChanged();
     peopleClock();
@@ -2964,7 +3034,7 @@ function createSlot(slotKey){
     if (motionL && house && motionL.sync({ lbe, states: lastP && lastP.states, entities: lastP && lastP.entities, now, haStarted,
                                            t: performance.now(), cls: classF, night: nightK, ground: house.ground })) changed = true;
     // Another class picked on the chips: the Motion chip stands down with motion.
-    if (mchip && motionL) mchip.update(classF && classF !== "motion" ? [] : motionL.rooms(narrow ? 2 : 3));
+    if (mchip && motionL) mchip.update((classF && classF !== "motion") || !shownHere("motion_rooms") ? [] : motionL.rooms(narrow ? 2 : 3));
     for (const T of tints) {
       // The room shows its most telling sensor: active before quiet, the
       // latest quiet one; the worst air.
@@ -3119,9 +3189,10 @@ function createSlot(slotKey){
             if (!underRoof(F, _v2) && !behind(_v2, occ, F)) { lbl.position.copy(_v2); u.behind = false; break; }
           }
         }
-        lbl.visible = !quiet && !u.covered && !(persp && u.behind) && wPx - 28 * hPx / 68 <= roomPx * 1.15;   // the plan: no wall stands in front
+        lbl.visible = !quiet && shownHere("room_names") && !u.covered && !(persp && u.behind) && wPx - 28 * hPx / 68 <= roomPx * 1.15;   // the plan: no wall stands in front
         u.px = lbl.visible ? hPx : 0;
         lbl.scale.set(wPx * k, hPx * k, 1);
+        lbl.center.set(0.5, 0.5 + (u.dy || 0) / hPx);         // moved clear of another word (wordUnits)
       });
     }
     for (const C of chips) {
@@ -3131,12 +3202,20 @@ function createSlot(slotKey){
       const hPx = Math.max(READ_PX[0] * wallK, Math.min(READ_PX[1] * wallK, READ_H / mpp)) * READ_C / (READ_C - 8);
       C.sprite.scale.set(hPx * READ_W / READ_C * k, hPx * k, 1);
       C.px = hPx;
-      // Under the room's name (or where the name would be), clear of it.
-      const nameH = C.label ? Math.max(C.label.userData.px, 18) : 0;
-      C.sprite.center.set(0.5, C.label ? 0.5 + (nameH / 2 + 2 + hPx / 2) / hPx : 0.5);
+      centreChip(C);
       if (persp && !C.label) C.behind = underRoof(C.F, C.sprite.position) || behind(C.sprite.position, above(C.F), C.F);
       C.sprite.visible = !quiet && !!C.parts && !(C.label ? C.label.userData.covered || (persp && C.label.userData.behind) : persp && C.behind);
     }
+  }
+  /** Where a chip sits on its spot: under its room's name (or where the name
+   *  would be), clear of it; moved with its name, or alone where no name
+   *  shows (wordUnits). */
+  function centreChip(C){
+    const hPx = C.px;
+    if (!hPx) return;
+    const nameH = C.label ? Math.max(C.label.userData.px, 18) : 0;
+    const dy = (C.label && C.label.visible ? C.label.userData.dy : C.dy) || 0;
+    C.sprite.center.set(0.5, (C.label ? 0.5 + (nameH / 2 + 2 + hPx / 2) / hPx : 0.5) + dy / hPx);
   }
   /** Does a floor show above this one? */
   function floorAbove(F){ return floorsUi.some(G => G !== F && G.group.visible && !G.fl.outdoor && G.fl.elev > F.fl.elev + 0.5); }
@@ -3159,10 +3238,34 @@ function createSlot(slotKey){
     const out = [];
     for (const F of floorsUi) {
       if (!F.group.visible) continue;
-      F.labels.forEach((l, i) => { if (l.visible) out.push({ sprite: l, tw: 1 - 28 / (l.userData.aspect * 68), th: l.userData.letters, owner: null, id: `name ${F.rooms[i].name}` }); });
+      F.labels.forEach((l, i) => { if (l.visible) out.push({ ...nameWord(l), owner: null, id: `name ${F.rooms[i].name}` }); });
     }
-    for (const C of chips) if (C.F.group.visible && C.sprite.visible) out.push({ sprite: C.sprite, tw: C.pillW, th: (READ_C - 8) / READ_C, owner: null, id: `chip ${C.text}` });
+    for (const C of chips) if (C.F.group.visible && C.sprite.visible) out.push({ ...chipWord(C), owner: null, id: `chip ${C.text}` });
     for (const L of [codes, marks, tracked, devices]) if (L && L.texts) out.push(...L.texts());
+    return out;
+  }
+  /** How much of a name's or a chip's sprite its words fill. */
+  const nameWord = (l) => ({ sprite: l, tw: 1 - 28 / (l.userData.aspect * 68), th: l.userData.letters });
+  const chipWord = (C) => ({ sprite: C.sprite, tw: C.pillW, th: (READ_C - 8) / READ_C });
+  /** The rooms' names, each with the chip under it, then each chip with no
+   *  name showing over it: on each other, they move apart on screen
+   *  (live_aboard_raised.js spreadWords), the later one in this order moving. */
+  function wordUnits(){
+    const out = [];
+    for (const F of floorsUi) {
+      if (!F.group.visible) continue;
+      F.labels.forEach((l, i) => {
+        if (!l.visible) return;
+        const C = chips.find(x => x.label === l && x.sprite.visible), u = l.userData;
+        out.push({ id: `name ${F.fl.id} ${F.rooms[i].name}`, h: u.px, dy: u.dy || 0, parts: C ? [nameWord(l), chipWord(C)] : [nameWord(l)],
+                   set: (dy) => { u.dy = dy; if (u.px) l.center.set(0.5, 0.5 + dy / u.px); if (C) centreChip(C); } });
+      });
+    }
+    chips.forEach((C, i) => {
+      if (!C.F.group.visible || !C.sprite.visible || (C.label && C.label.visible)) return;
+      out.push({ id: `chip ${i} ${C.room ? C.room.name : C.name}`, h: C.px, dy: C.dy || 0, parts: [chipWord(C)],
+                 set: (dy) => { C.dy = dy; centreChip(C); } });
+    });
     return out;
   }
   /** Under the roof while it shows: a name, a chip (live_aboard_storey.js). */
@@ -3276,7 +3379,7 @@ function createSlot(slotKey){
       if (o.userData && o.userData.spec) o.material = mat(o.userData.spec);
     });
     for (const F of floorsUi) if (F.ao) F.ao.visible = !!Q.ao;
-    if (layer) layer.sync(viewData().pieces);              // furniture's finishes and shadows go with the profile
+    if (layer) layer.sync(piecesNow(viewData().pieces));              // furniture's finishes and shadows go with the profile
     if (lastP) { syncDevices(lastP, viewData()); syncTracked(lastP, viewData(), false); }
     for (const L of lights) if (L.spin) L.spin.rps = (L.spin.base || 0) * fanK(name);   // a running fan's speed goes with the profile
     if (studio) studio.profile();
@@ -3318,17 +3421,17 @@ function createSlot(slotKey){
   // +y), phi tilts down from straight above. Drag turns it; right-drag, or
   // two fingers, pans along the ground; the wheel, or a pinch, zooms about the
   // point under the cursor or between the fingers.
-  /** Turn the camera. A wall framed whole fills its band with the camera's
+  /** Turn the camera. A wall (or a short screen) framed whole fills its band with the camera's
    *  middle off the house's (frameFor), so unless it is zoomed in it turns
    *  about the middle of what shows, however it got there (a saved home, a
    *  floor, Whole house), or the house would swing off the screen. */
   function turnBy(d){
-    if (onWallPage(root) && (!wallPivot || wallPivot.top !== topElev)) {
-      const pts = visiblePoints(), m = new THREE.Box3().setFromPoints(pts).getCenter(new THREE.Vector3());
-      wallPivot = { top: topElev, x: m.x, z: m.z, r: frameFor(cam.theta, cam.phi, pts).radius };
+    if (!wallPivot || wallPivot.top !== topElev) {
+      const pts = onWallPage(root) || banded(uiPad()) ? visiblePoints() : null, m = pts ? new THREE.Box3().setFromPoints(pts).getCenter(new THREE.Vector3()) : null;
+      wallPivot = pts ? { top: topElev, x: m.x, z: m.z, r: frameFor(cam.theta, cam.phi, pts).radius } : { top: topElev, r: null };
     }
     cam.theta += d;
-    if (!onWallPage(root) || cam.radius < wallPivot.r * 0.9) return;
+    if (wallPivot.r === null || cam.radius < wallPivot.r * 0.9) return;
     const c = Math.cos(d), s = Math.sin(d), x = cam.target.x - wallPivot.x, z = cam.target.z - wallPivot.z;
     cam.target.x = wallPivot.x + x * c + z * s;
     cam.target.z = wallPivot.z - x * s + z * c;
@@ -3584,7 +3687,7 @@ function createSlot(slotKey){
     const r0 = root.getBoundingClientRect();
     // A wall's bars fade when nobody is there: they don't get to shrink the house.
     const wall = onWallPage(root), rot = wall ? root.getRootNode().host.getAttribute("data-wall-rotate") : null;
-    for (const el of root.querySelectorAll(wall ? ".la3d-tip, .la3d-mchip, .la3d-wet, .la3d-pchip" : ".la3d-tip, .la3d-mchip, .la3d-wet, .la3d-bar")) {
+    for (const el of root.querySelectorAll(wall ? ".la3d-tip, .la3d-mchip, .la3d-wet, .la3d-pchip, .psc-row" : ".la3d-tip, .la3d-mchip, .la3d-wet, .la3d-bar")) {
       const r = el.getBoundingClientRect && el.getBoundingClientRect();
       if (!r || !(r.height > 0) || !(r.width > 0) || getComputedStyle(el).visibility === "hidden") continue;
       // A wall turned by its link: these are the turned boxes, the page's top along a side of the screen.
@@ -3600,7 +3703,14 @@ function createSlot(slotKey){
   }
   const WALL_CLEAR = 0.05;                                   // a wall's house keeps this clear of the screen's edge (of half the screen)
   const WALL_CHIPS_PX = 82;                                  // the chip row's room at the top of a wall, before --wall-ui
-  let wallPivot = null;                                      // a wall: the middle of what shows, and its whole-house radius (turnBy)
+  let wallPivot = null;                                      // a wall (or a short screen's band): the middle of what shows, and its whole-house radius (turnBy)
+  /** The house fits the band between what covers the top and the bottom,
+   *  moved into it: on a wall, and on a short screen with the scene row on
+   *  the bar, where the band the larger of the two leaves on both sides is
+   *  under 60% of the view (held at 60%, the house's front ran under the
+   *  row). Else it stays in the middle of the view, as ever. */
+  const banded = (pad) => !!pad.H && (onWallPage(root)
+    || (!!bar && bar.classList.contains("psc-has") && 1 - 2 * Math.max(pad.top, pad.bottom) / pad.H < 0.6));
   function frameFor(theta, phi, pts){
     const keep = { p: camera.position.clone(), q: camera.quaternion.clone() };
     const dir = new THREE.Vector3(Math.sin(phi) * Math.sin(theta), Math.cos(phi), Math.sin(phi) * Math.cos(theta));
@@ -3623,10 +3733,11 @@ function createSlot(slotKey){
       const o = q.clone().sub(c), z = o.dot(dir);
       need = Math.max(need, z + Math.abs(o.dot(right)) / th * 1.08, z + Math.abs(o.dot(up)) / (tv * fr) * vk);   // sides: 8% clear (4% ran a narrow screen's house to its edge)
     }
-    // A wall: the house as large as the screen lets it be, in the band what stays on show leaves.
-    if (pad.H && onWallPage(root)) {
+    // A wall, or a short screen: the house as large as the screen lets it be, in the band what stays on show leaves.
+    if (banded(pad)) {
       const f = HOUSE.fillBand(pts.map((q) => { const o = q.clone().sub(c); return [o.dot(right), o.dot(up), o.dot(dir)]; }), th, tv,
-                               1 - 2 * pad.top / pad.H - WALL_CLEAR, -1 + 2 * pad.bottom / pad.H + WALL_CLEAR, 1 - WALL_CLEAR);
+                               1 - 2 * pad.top / pad.H - WALL_CLEAR, -1 + 2 * pad.bottom / pad.H + WALL_CLEAR,
+                               onWallPage(root) ? 1 - WALL_CLEAR : 1 / 1.08);   // sides as above, off a wall
       if (Number.isFinite(f.x + f.y + f.r)) {
         c.addScaledVector(right, f.x).addScaledVector(up, f.y);
         need = Math.max(2, f.r);
@@ -3665,7 +3776,14 @@ function createSlot(slotKey){
     cam.fly = null;
     if (name === "iso") { const a = isoAngle(); fit(a.theta, a.phi); }
     else if (name === "top") fit(0, MIN_PHI);
-    else if (name === "turn") { turnBy(Math.PI / 2); applyCam(); }
+    else if (name === "turn") {
+      // Not zoomed in: framed again at the new angle as Fit frames it (zoomed
+      // out, as far out again), or a corner turns in under the scene row.
+      const pts = visiblePoints(), k = cam.radius / frameFor(cam.theta, cam.phi, pts).radius;
+      turnBy(Math.PI / 2);
+      if (k >= 0.9) { const g = frameFor(cam.theta, cam.phi, pts); cam.target.copy(g.target); cam.radius = Math.min(MAX_R, g.radius * Math.max(1, k)); }
+      applyCam();
+    }
     else fit();
     if (byHand && bare) setBare(false, false);
   }
@@ -3900,7 +4018,8 @@ function createSlot(slotKey){
       });
     }
     openings.forEach(({ F, P }, i) => {
-      if (!F.group.visible || !(P.open.cover ? !!(lastP && lastP.states && lastP.states[P.open.eid]) : HOUSE.openingPressable(lbe[P.open.eid]))) return;
+      if (!F.group.visible || (P.open.leaf && goneHere(P, P.open.leaf))
+          || !(P.open.cover ? !!(lastP && lastP.states && lastP.states[P.open.eid]) : HOUSE.openingPressable(lbe[P.open.eid]))) return;
       const q = openingQuad(F, P), poly = q.map(v => screenPt(v, rect));
       if (!poly.every(Boolean) || !nearPoly(clientX, clientY, poly, 6)) return;
       const at = q[0].clone().add(q[2]).multiplyScalar(0.5);
@@ -4728,6 +4847,7 @@ function createSlot(slotKey){
    *  view's failure: trees that cannot be drawn are simply not drawn. */
   function syncForest(){
     const want = !!atlas && atlas.on && atlas.theme === "west_coast_forest" && !forestFailed;
+    if (!shownHere("forest")) { dropForest(false); return; }   // hidden on this screen (the ⋯ list)
     if (!want) { dropForest(false); return; }
     if (!FOREST) {
       if (!forestImport) {
@@ -4814,6 +4934,257 @@ function createSlot(slotKey){
     }
   }
 
+  // ── the ⋯ list: what this screen shows (live_aboard_show.js) ──────────────
+  // Each line is this screen's (prefs), over the house's own; hidden is not
+  // drawn at all. Most of it is a filter over the card's data, as the Plans
+  // tool's quietOf is: a light, strip, fan, readout or lock left out the way
+  // the Atlas's hidden lights are (built again once, when the list changes,
+  // never on a poll), rain and snow, the theme, the codes, people and tags.
+  // The rest is drawn by its own layer and asked of it as it draws (shownHere):
+  // the glow, motion's parts, doors and windows, railings, names, outlines,
+  // the trees, furniture. Edit and Furnish show everything (they work on it).
+  const shownHere = (key) => !showOn || showSuspended() || showOn[key] !== false;
+  const showSuspended = () => !!((editor && editor.active) || furnishOn || quiet);
+  const showOver = () => (SHOW ? SHOW.readShown(prefGet(SHOW.prefKey(slotKey))) : {});
+  const onObj = (x) => !!(x && typeof x === "object");
+  /** The house's own for each line, from the card's data before the list. */
+  function showHouseOf(p){
+    const s = p.settings3d && typeof p.settings3d === "object" ? p.settings3d : null;
+    const vd = viewData(), looks = (vd && vd.devices) || {}, sp = (p.model && p.model.scanner_positions_m) || {};
+    const looked = Object.keys(sp).some(a => looks[a] && looks[a].recipe && typeof looks[a].recipe === "object");
+    const people = s ? s.atlas_3d_people === true && onObj(p.people) : onObj(p.people);
+    const tags = s ? s.atlas_3d_tags === true && onObj(p.tags) : onObj(p.tags);
+    return { people, tags, radios: tags || looked, rain: p.weather3d !== false, codes: onObj(p.codes),
+             trails: prefGet(PREF_TRAILS) === "1", roof: roofPick() !== "off", other_floors: false };
+  }
+  /** The eids the list leaves out (lights, strips, fans, readouts, locks: never an alarm). */
+  function showHidden(p, on){
+    const out = new Set();
+    if (on.lights && on.strips && on.fans && on.readouts && on.locks) return out;
+    const pos = (p.model && p.model.light_positions_m) || {}, lb = p.lightsByEid || {}, zs = (viewData() || {}).lights || {};
+    const shapes = (p.shapeOverrides && typeof p.shapeOverrides === "object") ? p.shapeOverrides : {};
+    const LINE = { light: "lights", strip: "strips", fan: "fans", readout: "readouts", lock: "locks" };
+    for (const eid of Object.keys(pos)) {
+      const k = HOUSE.showKindOf(lb[eid], pos[eid], zs[eid], shapes[eid]);
+      if (k && LINE[k] && !on[LINE[k]]) out.add(eid);
+    }
+    return out;
+  }
+  /** The card's data as this screen shows it. */
+  function showP(p){
+    showHouse = showHouseOf(p);
+    showOn = SHOW.resolveShown(showOver(), showHouse);
+    if (showSuspended()) return p;
+    const on = showOn, q = { ...p }, hide = showHidden(p, on);
+    if (hide.size) { const h0 = p.hidden; q.hidden = { has: (eid) => hide.has(eid) || !!(h0 && typeof h0.has === "function" && h0.has(eid)) }; }
+    q.weather3d = on.rain;
+    q.codes = on.codes ? (onObj(p.codes) ? p.codes : { showcase: !!(p.atlasLook && p.atlasLook.on) }) : null;
+    if (!on.theme) { q.look3d = "own"; q.showcase3d = false; }
+    if (!on.people) q.people = null;
+    if (!on.tags) q.tags = null;
+    // Receivers: as the house draws them until this screen says (then every placed one, or none).
+    const over = showOver();
+    if (typeof over.radios === "boolean") q.scanners = over.radios;
+    return q;
+  }
+  /** The furniture as this screen shows it: furniture, devices in it, stairs (their opening stays). */
+  function piecesNow(pieces){
+    if (!showOn || showSuspended() || (showOn.furniture && showOn.devices && showOn.stairs)) return pieces;
+    const out = {};
+    for (const [id, q] of Object.entries(pieces || {})) {
+      const stairs = !!(STOREY && STOREY.isStairs(q)), dev = !!(q && typeof q.entity_id === "string" && q.entity_id);
+      if (stairs ? showOn.stairs : dev ? showOn.devices : showOn.furniture) out[id] = q;
+    }
+    return out;
+  }
+  /** A wall piece's part the list hides: a door's or a window's leaf, a garage door's, a railing. */
+  function goneHere(P, e){
+    if (!showOn || showSuspended()) return false;
+    const k = P.pc.kind, cover = !!(P.open && P.open.cover);
+    if (e.leaf) return k === "door" ? !shownHere(cover ? "covers" : "doors") : k === "window" ? !shownHere("windows") : false;
+    return !e.cuttable && (k === "rail" || k === "open") && !shownHere("railings");
+  }
+  /** Is a weather source set up (Settings → Atlas → Outdoor weather, and something to read)? */
+  function weatherReady(p){
+    const w = p && p.weather && p.weather.settings ? p.weather : null;
+    if (!w || !AW) return false;
+    const s = AW.weatherSettingsFrom(w.settings);
+    return s.enabled && !!(s.rainEntity || s.conditionEntity || s.warningEntity || AW.firstWeatherEntity(w.states || (p && p.states) || {}));
+  }
+  /** What this house has ready, line by line: {key: setupLine} for each that is not. */
+  function showReady(){
+    const p = houseP, out = {};
+    if (!p || !SHOW) return out;
+    const s = p.settings3d && typeof p.settings3d === "object" ? p.settings3d : null;
+    const pos = (p.model && p.model.light_positions_m) || {}, lb = p.lightsByEid || {}, vd = viewData() || {}, zs = vd.lights || {};
+    const n = {};
+    for (const eid of Object.keys(pos)) { const k = HOUSE.showKindOf(lb[eid], pos[eid], zs[eid], (p.shapeOverrides || {})[eid]); if (k) n[k] = (n[k] || 0) + 1; }
+    const pieces = Object.values(vd.pieces || {}).filter(q => q && q.recipe);
+    const stairs = pieces.filter(q => STOREY && STOREY.isStairs(q)).length, dev = pieces.filter(q => !(STOREY && STOREY.isStairs(q)) && typeof q.entity_id === "string" && q.entity_id).length;
+    const walls = floorsUi.flatMap(F => F.pieces);
+    const has = (kind) => walls.some(P => P.pc.kind === kind);
+    const look = p.look3d === "atlas" ? (LOOKS ? LOOKS.atlasLook(p.atlasLook) : null) : null;
+    const admin = p.admin === true;
+    const not = {
+      lights: !n.light, strips: !n.strip, fans: !n.fan, motion_sensors: !n.motion, motion_rooms: !n.motion, motion_reach: !n.motion,
+      readouts: !n.readout, locks: !n.lock && !openings.some(({ P }) => P.open && P.open.lock),
+      doors: !has("door"), windows: !has("window"), covers: !openings.some(({ P }) => P.open && P.open.cover),
+      railings: !walls.some(P => P.els.some(e => !e.cuttable))
+        && !pieces.some(q => STOREY && STOREY.isStairs(q) && q.recipe.params && q.recipe.params.rail && q.recipe.params.rail !== "none"),
+      radios: !Object.keys((p.model && p.model.scanner_positions_m) || {}).length,
+      tags: s ? s.atlas_3d_tags !== true : !onObj(p.tags), people: s ? s.atlas_3d_people !== true : !onObj(p.people),
+      trails: !(TRAILS && (onObj(p.people) || onObj(p.tags)) && onObj(p.trails) && typeof p.trails.read === "function"),
+      furniture: !(pieces.length - stairs - dev), devices: !dev, stairs: !stairs,
+      room_names: !(house && house.rooms.length), room_outlines: !(house && house.rooms.length),
+      floor_outlines: !look, roof: !STOREY, rain: !weatherReady(p),
+      theme: !(p.look3d === "atlas" || p.look3d === "studio" || (LOOKS && p.showcase3d === true && p.showcase && p.showcase.key && p.showcase.key !== "classic")),
+      forest: !(look && look.on && look.theme === "west_coast_forest"),
+      scenes: !scenesOf(p).tiles.length,
+    };
+    const canGo = typeof p.goTo === "function", kiosk = p.kiosk === true;
+    for (const [k, v] of Object.entries(not)) {
+      // A new scene is made in Home Assistant, through the row's own way there (an administrator's, never a wall's).
+      if (v) out[k] = SHOW.setupLine(k, admin, k === "scenes" ? typeof scenesOf(p).add === "function" : canGo, null, kiosk);
+    }
+    // People or tags on with no history to read (sample data): trails wait on that, not on them.
+    if (out.trails && (onObj(p.people) || onObj(p.tags))) out.trails = SHOW.setupLine("trails", admin, canGo, SHOW.setupLine("trails_live", admin).text);
+    return out;
+  }
+  /** The list's lines now: ticks, set-up lines, and a line waiting on another. */
+  function showRows(){
+    const on = { ...(showOn || {}) }, ready = showReady();
+    for (const k of Object.keys(ready)) on[k] = false;              // not set up: never ticked
+    const groups = SHOW.rowsOf(on, ready);
+    // The scene row only where the host hands in scenes (the sidebar's Atlas), and its link only to make the first one.
+    for (const g of groups) g.rows = g.rows.filter(r => r.key !== "scenes" || !!(houseP && houseP.scenes));
+    for (const g of groups) for (const r of g.rows) {
+      if (r.key === "scenes" && !ready.scenes) r.link = null;
+      if (ready[r.key]) continue;
+      if ((r.key === "forest" || r.key === "floor_outlines") && on[r.key] && !on.theme) r.hint = "Comes back with Theme colours";
+      if (r.key === "trails" && on.trails && !on.people && !on.tags) r.hint = "Comes back with People or Beacons and tags";
+    }
+    return groups;
+  }
+  const showSend = (name, once) => (once ? HOUSE.countHouse3dOnce(name, send) : HOUSE.countHouse3d ? HOUSE.countHouse3d(name, send) : false);
+  /** A line ticked or unticked. Trails and the roof keep their own prefs (the Views menu's and the Roof button's). */
+  function toggleShow(key){
+    const ready = showReady();
+    if (ready[key]) {
+      // People or tags off for the house: the way to their switch (Garry: "send them to the screen where they can get permission").
+      if (ready[key].perm) { showSetup(key, ready[key]); return; }
+      if (showMenu) showMenu.paint();
+      return;
+    }
+    const was = shownHere(key);
+    if (key === "trails") toggleTrails();
+    else if (key === "roof") setRoof(was ? "off" : "auto");
+    else prefSet(SHOW.prefKey(slotKey), JSON.stringify(SHOW.withTick(showOver(), key, !was, showHouse[key] !== false)));
+    showSend(`house3d_show:${was ? "hide" : "show"}:${key}`);
+    applyShow();
+  }
+  /** Back to house defaults, on this screen. */
+  function resetShow(){
+    prefSet(SHOW.prefKey(slotKey), "{}");
+    if (prefGet(PREF_TRAILS) === "1") toggleTrails();
+    if (roofPick() === "off") setRoof("auto");
+    showSend("house3d_show:reset");
+    applyShow();
+  }
+  /** Has this screen changed anything from the house's own? */
+  function showChanged(){ return Object.keys(showOver()).length > 0 || prefGet(PREF_TRAILS) === "1" || roofPick() === "off"; }
+  /** A "not set up" line's button: where it is set up, or (people, tags) their switch. */
+  function showSetup(key, line){
+    if (line.perm) {
+      showSend(`house3d_show:permission:${line.perm}`);
+      if (showMenu) showMenu.close();
+      if (houseP && houseP.admin === true) {
+        // The switch is Views ▾ → Show people (or tags) while Live Aboard is on (settings.js says so too).
+        const seg = bar ? bar.querySelector(narrow ? "[data-la3d-view]" : "[data-la3d-saved]") : null, b = seg ? seg.querySelector("button") : null;
+        if (b) {
+          if (typeof b.click === "function") b.click(); else b.dispatchEvent({ type: "click", detail: 1, stopPropagation(){}, preventDefault(){} });
+          markSwitch(line.perm);
+        }
+      } else toast(line.text);
+      return;
+    }
+    if (!line.go) return;
+    showSend(`house3d_show:setup_go:${key}`);
+    showGo(line.go);
+  }
+  /** What the host hands in for the scene row (p.scenes: lights_map.js), or nothing. */
+  function scenesOf(p){
+    const sc = p && p.scenes && typeof p.scenes === "object" ? p.scenes : null;
+    return sc && Array.isArray(sc.tiles) ? sc : { tiles: [] };
+  }
+  /** The scene row as this screen shows it: hidden from the ⋯ list, or while
+   *  Edit, Furnish or the Plans tool's map has the view. A preset's ✎ opens
+   *  the Atlas's Whole house bar, so the map alone gives way to it first. */
+  function syncScenes(){
+    if (!sceneRow) return;
+    const sc = scenesOf(houseP);
+    sceneRow.update({ ...sc,
+      count: (name, once) => showSend(name, once),
+      edit: (t, row) => {
+        if (t && t.kind === "preset") { if (fsOn) leaveFull(); if (bare) setBare(false, true); }
+        if (typeof sc.edit === "function") sc.edit(t, row);
+      } });
+    sceneRow.hide(!(showOn ? showOn.scenes !== false : true) || showSuspended());
+  }
+  /** In the Views menu just opened, the people or tags switch stands out. */
+  function markSwitch(which){
+    const words = which === "people" ? "Show people" : "Show tags & scanners";
+    const b = menuEl ? [...menuEl.querySelectorAll("button")].find(x => x.textContent.startsWith(words)) : null;
+    if (!b) return;
+    b.style.outline = "2px solid #fbbf24"; b.style.background = "rgba(251,191,36,.14)";
+    try { b.focus({ preventScroll: true }); } catch (_) { /* no focus here */ }
+  }
+  /** The host's way to Settings or Mapping (p.goTo(where)); false where it has none.
+   *  A new scene: the scene row's own way to Home Assistant's editor. */
+  function showGo(where){
+    if (where === "scene_new") { const sc = scenesOf(houseP); if (typeof sc.add !== "function") return false; sc.add("show"); return true; }
+    const g = houseP && typeof houseP.goTo === "function" ? houseP.goTo : null, t = SHOW.GO_TO[where];
+    if (!g || !t) return false;
+    try { g({ ...t, where: String(where) }); return true; } catch (_) { return false; }
+  }
+  function makeShowMenu(){
+    return SHOW.createShowMenu({
+      root, guard,
+      rows: () => showRows(),
+      changed: () => showChanged(),
+      toggle: (key) => toggleShow(key),
+      setup: (r) => showSetup(r.key, r.setup),
+      go: (where) => showGo(where),
+      // Settings and Mapping are an administrator's: anyone else gets no links (each line says who sets it up).
+      canGo: () => !!(houseP && typeof houseP.goTo === "function" && houseP.admin === true),
+      reset: () => resetShow(),
+      opened: () => { showSend("house3d_show:opened"); layCover(); },   // drawn now: the banner cut round it
+      seen: (groups) => { for (const g of groups) for (const r of g.rows) if (r.setup && !r.setup.perm) showSend(`house3d_show:setup_seen:${r.key}`, true); },
+      onOpen: () => { closeMenu(); if (use) use.clear(); markMenus(true); },
+      onClose: () => markMenus(),
+    });
+  }
+  /** The list changed: drawn again from the card's data (only what it touches
+   *  is built again), and what each layer asks as it draws, asked again. */
+  function applyShow(){
+    for (const L of lights) L.key = null;
+    lampsDirty = true;
+    // A line that builds the house again (the theme) keeps the camera where it is:
+    // no fit back to the home view, which would close the list under the finger.
+    const fitting = cam.needsFit;
+    redraw();
+    if (!fitting) cam.needsFit = false;
+    for (const F of floorsUi) {
+      for (const P of F.pieces) placePiece(F, P, !!P.cut);
+      if (F.plate) F.plate.visible = shownHere("floor_outlines");
+    }
+    paintNight();
+    if (motionL) motionL.recheck();
+    if (codes && codes.recheck) codes.recheck();
+    if (showMenu) showMenu.mark();
+    syncScenes();
+    requestRender();
+  }
+
   // ── the slot ──────────────────────────────────────────────────────────────
   // The Plans tool's vetting map: only the plan, the house and its pins. Nothing
   // live is drawn (no lights, sensors, readouts, names, people or weather, and
@@ -4872,7 +5243,12 @@ function createSlot(slotKey){
     if (quiet && p) p = quietOf(p);
     // A room raised above its floor is drawn as a level of its own (HOUSE.splitLevels).
     if (p && p.model && HOUSE.splitLevels) p = { ...p, model: HOUSE.splitLevels(p.model) };
+    // The ⋯ list: what this screen shows (showP), from the house's own (houseP).
+    houseP = p;
+    if (SHOW && p) p = showP(p);
+    if (showMenu) showMenu.mark();                         // the dot from the first draw (a screen opened with ticks of its own)
     lastP = p;
+    syncScenes();
     applyLook(p);
     const setting = HOUSE.qualitySetting(p.quality);
     // This card's records and api: a press acts through the newest.
@@ -4913,8 +5289,9 @@ function createSlot(slotKey){
       requestRender();
     }
     // Furniture (P2): each piece on its floor, from the draft while editing.
-    if (layer && layer.sync(vd.pieces, rebuilt)) requestRender();
+    if (layer && layer.sync(piecesNow(vd.pieces), rebuilt)) requestRender();
     syncDevices(p, vd);
+    if (motionL && motionL.show && motionL.show({ sensor: shownHere("motion_sensors"), room: shownHere("motion_rooms"), reach: shownHere("motion_reach") })) requestRender();
     syncTracked(p, vd, rebuilt);
     paintLights(p.lightsByEid);
     paintWindows();
@@ -4980,7 +5357,9 @@ function createSlot(slotKey){
      *  label: the zoom against the whole-house fit, on every change),
      *  settings3d (the settings: who carries what, going back home), admin
      *  and saveSetting(key, value) → Promise (Show people / Show tags &
-     *  scanners from Views ▾; live_aboard_panel.js)}. */
+     *  scanners from Views ▾; live_aboard_panel.js), goTo(where) (the ⋯
+     *  list's links: a key of live_aboard_show.js LINK_WORDS, opened by the
+     *  host; none, no links)}. */
     attach(s, p){
       send = p && p.telemetry;
       touchCb = p && p.onTouch;
@@ -5113,6 +5492,9 @@ function createSlot(slotKey){
                edit: editor ? editor.state() : null,
                // P8: the look as drawn, and rain and snow.
                look: scene ? { key: lookKey, atlas: atlas ? { on: atlas.on, theme: atlas.theme, plates: floorsUi.filter(F => F.plate).map(F => F.plate.userData.n),
+                                                         // Each plate's line as drawn: its floor, whether it hides with it, its points (x, y, z).
+                                                         plateLines: floorsUi.filter(F => F.plate).map(F => ({ n: F.plate.userData.n, floor: F.fl.id,
+                                                           withFloor: F.plate.parent === F.group, pts: Array.from(F.plate.geometry.attributes.position.array) })),
                                                          edges: floorsUi.filter(F => F.edges).map(F => (F.edges.visible ? F.edges.material.opacity : 0)) } : null,
                                bg: "#" + scene.background.getHexString(), fog: "#" + scene.fog.color.getHexString(),
                                sky: "#" + hemi.color.getHexString(), skyI: hemi.intensity, glow: theme3d ? theme3d.glow : 1,
@@ -5131,6 +5513,14 @@ function createSlot(slotKey){
                // P6: scanners, beacons and people as drawn, and how often the snapshot was read.
                tracked: tracked ? tracked.state() : [], peopleReads, trails: tracked && tracked.trails ? tracked.trails() : [], trailReads, panel: panel ? panel.state() : null,
                director: director ? director.state() : null,
+               // The ⋯ list: each line on this screen, the house's own, the list as drawn,
+               // and each door's, window's and rail's parts: drawn or not.
+               show: SHOW ? { on: showOn ? { ...showOn } : null, house: { ...showHouse }, menu: showMenu ? showMenu.state() : null,
+                              walls: floorsUi.flatMap(F => F.pieces.filter(P => P.els.some(e => e.leaf || !e.cuttable)).map(P => ({ kind: P.pc.kind, cover: !!(P.open && P.open.cover),
+                                drawn: P.els.filter(e => e.leaf || !e.cuttable).some(e => { e.mesh.getMatrixAt(e.i, _m); return _m.elements.slice(0, 11).some(v => v !== 0); }) }))),
+                              plates: floorsUi.filter(F => F.plate).map(F => F.plate.visible), edges: floorsUi.filter(F => F.edges).map(F => F.edges.visible) } : null,
+               // The scene row: shown or not, its tiles ([key, state, kind]), its ✎s, + New scene, its note.
+               scenes: sceneRow ? sceneRow.state() : null,
                // The Atlas's drawers and its other devices (live_aboard_marks.js).
                marks: marks ? marks.state() : [], codes: codes ? codes.state() : null, classF, zoomPct: zoomPctNow(),
                chipsFaded: chips.filter(C => C.sprite.material.opacity < 1).map(C => (C.room ? C.room.name : null)),

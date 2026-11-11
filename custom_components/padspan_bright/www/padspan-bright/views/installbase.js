@@ -680,6 +680,15 @@ const W_SURFACE = {
 };
 // Add data via plans (telemetry.PLAN_AI_EVENTS, experimental): the kinds it suggests.
 const W_PLAN_KIND = { stairs: "stairs", railing: "a railing hint", light: "a light" };
+// Live Aboard's ⋯ list: each line's plain name (views/live_aboard_show.js SHOW_ITEMS).
+const W_SHOW_LINE = {
+  lights: "lights", glow: "light glow", strips: "LED strips", fans: "ceiling fans", scenes: "the scene row", motion_sensors: "motion sensors",
+  motion_rooms: "motion in rooms", motion_reach: "motion reach", readouts: "temperature and air", doors: "doors", windows: "windows",
+  covers: "garage doors and gates", locks: "locks", railings: "railings", radios: "receivers", tags: "beacons and tags", people: "people",
+  trails: "trails", codes: "device codes", furniture: "furniture", devices: "devices in furniture", stairs: "stairs",
+  room_names: "room names", room_outlines: "room outlines", floor_outlines: "floor outlines", other_floors: "other floors, faded", roof: "the roof",
+  rain: "rain and snow", theme: "theme colours", forest: "forest trees",
+};
 const W_EVENT = {
   stale_receivers_listed: "Opened the stale-receiver list (Mapping › 3D Stack)",
   status_dot_open: "Opened Health from the top bar's status dot",
@@ -870,6 +879,50 @@ function word(kind, k) {
       if (a === "plan_ai_commit") return `Plan AI keep ${{ done: "written", rev_mismatch: "refused: the list had changed", already_committed: "refused: already kept", changed_since: "refused: a target changed since",
         not_open: "refused: item no longer open", stair_first: "refused: railing before its stair", invalid: "refused: not a valid item", backup_failed: "stopped: no safety backup", save_failed: "stopped: the write failed" }[b] || b}`;
       if (a === "plan_ai_undo") return `Plan AI undo: ${{ batch: "a batch taken back", put_back: "an undo put back", item_skipped: "an item left, changed since", stairs: "a stair taken back", railing: "a railing taken back", light: "a light's kind taken back", already_undone: "refused: already undone", save_failed: "stopped: the write failed" }[b] || b}`;
+      // The AI credit tracker (ai_usage.py, experimental): every feature's AI reads.
+      if (a === "ai_reads_kind") return `AI read sent for ${{ photo: "a photo", stairs: "the stair finder", plans: "Add data via plans", plan_build: "the plan line-up", other: "something else" }[b] || b}`;
+      if (a === "ai_reads_maker") return `AI read sent to ${{ claude: "Claude (Anthropic)", openai: "OpenAI", google: "Google", ollama: "Ollama (local)", other: "another AI" }[b] || b}`;
+      if (a === "ai_reads_fail") return `AI read stopped: ${{ unreachable: "the AI couldn't be reached", no_credit: "out of credit", timeout: "no answer in time", refusal: "the AI declined",
+        bad_answer: "an answer PadSpan couldn't use", no_ai: "no AI Task that can do it", no_fallback: "stopped, no other AI is used", no_media: "the media folder couldn't take the picture", error: "another error" }[b] || b}`;
+      if (a === "ai_reads_month") return `AI reads last month: ${{ "0": "none", "1_20": "1–20", "21_100": "21–100", "101_500": "101–500", gt500: "over 500" }[b] || b}`;
+      if (a === "ai_credit_month") return `AI credit used last month (estimate): ${{ none: "no priced Claude model", lt1: "under $1", "1_5": "$1–5", "5_20": "$5–20", "20_50": "$20–50", gt50: "over $50" }[b] || b}`;
+      if (a === "ai_credit_warn") return `AI credit warning ${{ set_50: "set to 50 %", set_75: "set to 75 %", set_90: "set to 90 %", off: "turned off", fired: "shown" }[b] || b}`;
+      // Build from plans: plan line-up (experimental; telemetry.PLAN_BUILD_EVENTS). Values of the run families carry the stage (s1 = line up).
+      const pbStage = (v) => String(v).replace(/^s\d_/, "");
+      if (a === "plan_build_setting") return `Plan line-up (experimental) setting ${{ shown: "shown (Claude qualifies)", on: "turned on", off: "turned off" }[b] || b}`;
+      if (a === "plan_build_unlock") return `Plan line-up (experimental) AI: ${{ opus: "Claude Opus (unlocked)", fable: "Claude Fable (unlocked)", other: "another Claude tier (unlocked)", not_anthropic: "not Anthropic's integration (locked)", below_opus_5_5: "below Opus 5.5 (locked)", unknown_model: "model unknown (locked)", sources_disagree: "model names disagree (locked)", no_ai_task: "no AI Task (locked)" }[b] || b}`;
+      if (a === "plan_build_run") return `Plan line-up (experimental) run: ${{ started: "started", finished: "finished", needs_help: "needed help", resumed: "resumed", cancelled: "cancelled", failed: "failed", out_of_time: "ran out of time", no_credit: "out of credit", abandoned: "abandoned", read_again: "a room read again" }[pbStage(b)] || b}`;
+      if (a === "plan_build_run_secs") return `Plan line-up (experimental) run took ${{ lt1m: "under 1 min", "1_3m": "1–3 min", "3_10m": "3–10 min", gt10m: "over 10 min" }[pbStage(b)] || b}`;
+      if (a === "plan_build_plans") return `Plan line-up (experimental) over ${{ "1": "1 plan", "2_3": "2–3 plans", "4_6": "4–6 plans", gt6: "over 6 plans" }[b] || b}`;
+      if (a === "plan_build_credit_run") return `Plan line-up (experimental) run cost (estimate) ${{ lt0_10: "under $0.10", "0_10_0_50": "$0.10–0.50", "0_50_2": "$0.50–2", gt2: "over $2" }[pbStage(b)] || b}`;
+      if (a === "plan_build_read") return `Plan line-up (experimental) read: ${{ plan: "a whole plan", dimension: "one dimension line", retry: "a retry", reused: "a whole plan reused (no read)" }[pbStage(b)] || b}`;
+      if (a === "plan_build_read_fail") return `Plan line-up (experimental) read failed: ${{ timeout: "no answer in time", refusal: "the AI declined", bad_answer: "nothing usable", unreachable: "couldn't be reached", no_credit: "out of credit", no_media: "media folder", suspect_frame: "positions off the drawing", backup_used: "backup used (a bug)" }[pbStage(b)] || b}`;
+      if (a === "plan_build_read_secs") return `Plan line-up (experimental) read took ${{ lt5: "under 5 s", "5_15": "5–15 s", "15_45": "15–45 s", gt45: "over 45 s" }[b] || b}`;
+      if (a === "plan_build_anchor") return `Plan line-up (experimental) floor's anchor: ${{ gauge: "the measured plan", evidence: "a plan agreeing with its own dimensions", none: "none" }[b] || b}`;
+      if (a === "plan_build_dims") return `Plan line-up (experimental) printed dimensions on an axis: ${{ agree: "two or more agree", disagree: "disagree", single: "one reading", none: "none", parse_mismatch: "PadSpan and Claude read it differently" }[b] || b}`;
+      if (a === "plan_build_fit") return `Plan line-up (experimental) fit: ${{ lt70: "match under 0.70", "70_85": "match 0.70–0.85", "85_95": "match 0.85–0.95", ge95: "match 0.95 or more", ratio_disagree: "match and dimensions disagree" }[b] || b}`;
+      if (a === "plan_build_seed") return `Plan line-up (experimental) fit started from ${{ stairs: "the stairs", search: "a search", taps: "the person's taps" }[b] || b}`;
+      if (a === "plan_build_fit_secs") return `Plan line-up (experimental) fit took ${{ lt5: "under 5 s", "5_20": "5–20 s", "20_60": "20–60 s", capped: "the 60 s cap" }[b] || b}`;
+      if (a === "plan_build_shape_err") return `Plan line-up (experimental) plan squeezed ${{ lt1: "under 1 %", "1_3": "1–3 %", "3_10": "3–10 %", gt10: "over 10 %" }[b] || b}`;
+      if (a === "plan_build_refile") return `Plan line-up (experimental) refile ${{ suggested: "suggested", by_hand: "asked by hand", refused_drawn: "refused (things drawn on it)", accepted: "saved", wrong: "marked wrong", undone: "undone" }[b] || b}`;
+      if (a === "plan_build_help") return `Plan line-up (experimental) help: ${{ dimension_shown: "a dimension to confirm", dimension_yes: "confirmed", dimension_typed: "typed", dimension_skipped: "skipped", taps_shown: "corners to tap", taps_done: "tapped", taps_skipped: "taps skipped", gave_up: "past the limit" }[b] || b}`;
+      if (a === "plan_build_item") { const k = ["anchor_scale", "place", "refile", "room", "space", "door", "window", "stairs"].find(x => String(b).startsWith(x + "_")) || "", v = k ? String(b).slice(k.length + 1) : String(b);
+        return `${["room", "space", "door", "window", "stairs"].includes(k) ? "Rooms from plans" : "Plan line-up"} (experimental) ${{ place: "placement", refile: "refile", anchor_scale: "anchor's own scale", room: "room", space: "extra space", door: "door", window: "window", stairs: "stairs" }[k] || k} ${{ shown: "shown", maybe: "shown as a maybe (one read)", accepted: "saved", accepted_group: "saved with its floor's group", not_now: "not now", wrong: "marked wrong", undone: "undone", stale: "changed since" }[v] || v}`; }
+      if (a === "plan_build_heldout") return `Rooms from plans (experimental) room score on the calibration spots at a save: ${{ up: "up", same: "the same", down: "down", unscored: "too few spots to judge" }[b] || b}`;
+      if (a === "plan_build_agree") return `Rooms from plans (experimental) a room: ${{ ready: "two reads agreed", differ: "two reads differed", apart: "parts didn't join", spots_out: "some calibration spots would fall outside", two_of_three: "read again: two of three agreed", three_differ: "read again: all three differed" }[b] || b}`;
+      if (a === "plan_build_merge") return `Rooms from plans (experimental) merge: ${{ into_room: "a space into a room", together: "spaces together", new_room: "a space added as a new room", separated: "a merge taken back" }[b] || b}`;
+      if (a === "plan_build_wrong_why") return `Plan line-up (experimental) wrong: ${{ wrong_match: "wrong match", wrong_scale: "wrong scale", wrong_floor: "wrong floor", cant_tell: "can't tell" }[b] || b}`;
+      if (a === "plan_build_move") { const [s, ...r] = String(b).split("_"); return `Plan line-up (experimental) ${s === "accepted" ? "saved" : "proposal"} moves a corner ${{ lt0_3: "under 0.3 m", "0_3_1": "0.3–1 m", "1_3": "1–3 m", gt3: "over 3 m" }[r.join("_")] || b}`; }
+      if (a === "plan_build_scale_change") { const [s, ...r] = String(b).split("_"); return `Plan line-up (experimental) ${s === "accepted" ? "saved" : "proposal"} changes scale ${{ lt1: "under 1 %", "1_3": "1–3 %", "3_10": "3–10 %", gt10: "over 10 %" }[r.join("_")] || b}`; }
+      if (a === "plan_build_flags") return `Plan line-up (experimental) proposal would shift ${{ calibration: "calibration points", device: "devices drawn on it", room_trace: "traced rooms" }[b] || b}`;
+      if (a === "plan_build_flag_move") return `Plan line-up (experimental) a calibration click would land ${{ lt0_3: "under 0.3 m", "0_3_1": "0.3–1 m", "1_3": "1–3 m", gt3: "over 3 m" }[b] || b} away`;
+      if (a === "plan_build_stop") return `Plan line-up (experimental) stopped: ${{ locked: "no qualifying AI", unreachable: "Claude unreachable", no_credit: "out of credit", out_of_time: "out of time", no_media: "media folder", help_unanswered: "a question waiting", help_limit: "past the question limit", refile_refused: "refile refused (things on it)", measured_plan_protected: "the measured plan is protected", anchor_error: "the anchor off its own dimensions", no_anchor: "no anchor on the floor", no_metre_scale: "no metre scale yet", not_placed: "a plan not placed", fit_rejected: "fit not accepted", cancelled: "cancelled", abandoned: "abandoned", group_refused: "group accept refused", preflight_blocked: "calibration preflight", backup_failed: "backup failed", undo_failed: "undo failed", changed_while_saving: "changed in Mapping while saving", floor_gone: "refile to a floor since removed", plan_changed: "a plan changed while read", ai_changed: "the AI Task changed", restart: "a restart mid-read", bad_answer: "answers unusable", refusal: "Claude declined", error: "an unexpected error", anchor_after_fit: "anchor scale after plans fitted to it", save_stands: "a save cut short left standing", undo_stands: "an undo cut short left standing", room_gate: "room score gate", rooms_changed: "rooms: changed since read", name_taken: "rooms: name taken" }[b] || b}`;
+      if (a === "plan_build_stress") return `Plan line-up (experimental) stress: ${{ repeat: "the same stop twice in a run", help_over: "help past its limit", resumes: "Resume more than twice", quick_abandon: "left within a minute of a stop" }[b] || b}`;
+      if (a === "plan_build_wait") return `Plan line-up (experimental) the person waited ${{ lt1m: "under 1 min", "1_10m": "1–10 min", "10_60m": "10–60 min", gt1h: "over an hour" }[b] || b} at a stop`;
+      if (a === "plan_build_commit") return `Plan line-up (experimental) save: ${{ done: "written", changed_since: "refused: changed since", points_out_of_range: "refused: calibration preflight", measured_plan_protected: "refused: the measured plan", refile_refused: "refused: refile of a plan with things on it", group_refused: "refused: group with effects", backup_failed: "stopped: no safety backup", save_failed: "stopped: the write failed", rolled_back: "put back after a failed write", anchor_after_fit: "refused: plans already lined up to the anchor" }[b] || b}`;
+      if (a === "plan_build_preflight") return `Plan line-up (experimental) calibration preflight ${{ checked: "run", blocked: "blocked a save" }[b] || b}`;
+      if (a === "plan_build_undo") return `Plan line-up (experimental) undo: ${{ session: "a session taken back", item_skipped: "a plan left, moved since", failed: "failed, nothing changed" }[b] || b}`;
+      if (a === "plan_build_settled") return `Plan line-up (experimental) a save cut short (restart) was ${{ finished: "finished", put_back: "put back", stood: "left standing (couldn't be put back)" }[b] || b}`;
       if (key === "plan_ai_stale") return "Plan AI item changed since it was read (stale)";
       if (key === "plan_ai_light_unmatched") return "Plan AI fixture symbol with no placed light (not an AI failure)";
       if (key === "plan_ai_tiles_slow") return "Plan AI light tiles skipped: its first read took over 45 s";
@@ -884,6 +937,26 @@ function word(kind, k) {
       if (a === "stairs_shape") return `Stairs shaped ${{ straight: "straight", l: "L", u: "U", l2: "with two landings", l3: "with three landings" }[b] || b}`;
       if (a === "stairs_style") return `Stairs: ${{ closed: "closed", open: "open risers", treads: "treads only", floating: "floating (on a spine)" }[b] || b}`;
       if (a === "stair_secs") return `AI took ${{ lt5: "under 5 s", "5_15": "5–15 s", "15_45": "15–45 s", gt45: "over 45 s" }[b] || b} to read a floor plan`;
+      if (a === "house3d_show") {
+        // Live Aboard's ⋯ list, "Show on this screen" (views/live_aboard_show.js).
+        const line = W_SHOW_LINE[c] || tidy(c || "");
+        if (b === "opened") return "Live Aboard: opened Show on this screen (⋯)";
+        if (b === "reset") return "Live Aboard: Show on this screen put back to the house's defaults";
+        if (b === "hide") return `Live Aboard: hid ${line} on a screen`;
+        if (b === "show") return `Live Aboard: showed ${line} again on a screen`;
+        if (b === "setup_seen") return `Live Aboard: saw "${line} isn't set up yet"`;
+        if (b === "setup_go") return `Live Aboard: followed "set it up" for ${line}`;
+        if (b === "permission") return `Live Aboard: sent to where ${c === "tags" ? "tags" : "people"} are turned on for the house`;
+        // The scene row (views/scene_row.js), under the flat Atlas and in Live Aboard.
+        const sk = c === "preset" ? "a Whole house preset" : "a Home Assistant scene";
+        if (b === "scene_row") return `Scene row shown ${c === "aboard" ? "in Live Aboard" : "under the Atlas"}`;
+        if (b === "scene_run") return `Scene row: ran ${sk}`;
+        if (b === "scene_off") return `Scene row: turned off ${sk}`;
+        if (b === "scene_new") return `Opened Home Assistant's new scene editor (${{ row: "from the scene row", show: "from Live Aboard's ⋯ list", settings: "from Settings → Atlas" }[c] || c})`;
+        if (b === "scene_edit") return { scene: "Scene row: opened a scene in Home Assistant's editor", yaml: "Scene row: opened the scene list for a scene made outside the editor",
+                                         preset: "Scene row: opened a Whole house preset to edit" }[c] || tidy(key);
+        return tidy(key);
+      }
       if (a === "house3d_fallback_size") return `3D house fell back, in a house of ${{ lt20: "under 20", "20_60": "20–60", "60_150": "60–150", gt150: "over 150" }[b] || b} rooms`;
       if (a === "tip_shown" || a === "tip_opened" || a === "tip_hidden") {
         const tip = { floor_heights: "floor heights", receiver_heights: "receiver heights", scale: "a real-world scale", all: "all of them" }[b] || b;

@@ -22,8 +22,8 @@ If UI changes don't show:
 // BUILD_ID (YYYYMMDDTHHMMSSZ) is appended to all JS import URLs as a cache-buster
 // so browsers always load the latest code after a release.
 // CHANNEL controls the sidebar badge and maps to GitHub release types (beta=pre-release).
-const APP_VERSION = "0.38.224";
-const RELEASE_BUILD_ID = "20261103T155048Z";
+const APP_VERSION = "0.38.231";
+const RELEASE_BUILD_ID = "20261111T013802Z";
 // The stamp the views are actually loaded with.
 //
 // This was the release literal above, so every view URL stayed frozen between
@@ -318,7 +318,7 @@ function _sampleKind(payload){
   const READS = new Set(("adaptive_fingerprints_get adaptive_status_get auto_diagnostics bright_import_status calibration_beacon_profiles "
     + "calibration_get calibration_health_check calibration_room_walk_preview capture_get capture_list capture_status device_registry_list "
     + "emergency_status fabric_health fabric_truth_candidates follow_alert_get forensics_query forensics_stats guests_get ha_entities_audit "
-    + "house3d_get house3d_import_preview house3d_library_get house3d_library_search house3d_stairs_plans house3d_stairs_read plan_ai_plans plan_ai_status plan_ai_sessions_get insights_get "
+    + "house3d_get house3d_import_preview house3d_library_get house3d_library_search house3d_stairs_plans house3d_stairs_read plan_ai_plans plan_ai_status plan_ai_sessions_get plan_build_info plan_build_status plan_build_rooms_status plan_build_rooms_check ai_usage_get insights_get "
     + "install_base licence_homes live_snapshot logs_get lost_and_found_get maps_image_urls maps_list model_get movement_history_get "
     + "notify_services_list object_label_list occupancy_estimate positioning_diag private_ble_status propagation_health radio_audit "
     + "room_tags setup_tips status store_backup_list subzones_list system_critics tags_status tester_preview tester_status traceback_get "
@@ -1044,6 +1044,11 @@ class PadSpanHaApp extends HTMLElement {
       if (reqView === "maps" && reqTab && /^[a-z]+$/.test(reqTab)) this.state.mapsTab = reqTab;
       // ?view=calibration&tab=tune opens that Calibration tab (Results otherwise).
       if (reqView === "calibration" && reqTab && /^[a-z]+$/.test(reqTab)) this.state._calibTabRequest = reqTab;
+      // ?view=settings&tab=atlas&part=atlas_weather (Live Aboard's ⋯ list):
+      // that Settings tab, scrolled to the card marked data-focus-part.
+      if (reqView === "settings" && reqTab && /^[a-z]+$/.test(reqTab)) this.state._settingsTab = reqTab;
+      const reqPart = q.get("part");
+      if (reqView === "settings" && reqPart && /^[a-z0-9_]+$/.test(reqPart)) this.state._settingsPart = reqPart;
       const reqLight = q.get("light");
       if (reqLight && /^(light|fan|binary_sensor|sensor)\.[a-z0-9_]+$/.test(reqLight)) {
         this.state.maps._selLight = { eid: reqLight, mapId: null };

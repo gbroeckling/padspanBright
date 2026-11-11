@@ -48,6 +48,7 @@ from .const import DATA_MAPS, DATA_MODEL, DATA_SETTINGS, DOMAIN
 from .house3d_store import enabled
 from .ws_common import _tier_at_least
 from .ws_house3d import OFF_CODE, OFF_MESSAGE, PRO_MESSAGE
+from . import ai_usage as U
 from . import ws_house3d_photo as P
 from .ws_common import admin_if_enhanced_security
 
@@ -227,16 +228,23 @@ def frame_of(w: int, h: int) -> tuple[int, int]:
     return max(PATCH_PX, round(w / PATCH_PX) * PATCH_PX), max(PATCH_PX, round(h / PATCH_PX) * PATCH_PX)
 
 
-def shrink(path) -> tuple[bytes, int, int]:
+def shrink(path, px: int = SHRINK_PX, max_mp: float | None = None, framed: bool = True) -> tuple[bytes, int, int]:
     """A plan's image as a JPEG at the frame the model looks at it in
-    (frame_of, after making it at most SHRINK_PX on its long side), and that
-    size. Pillow ships with Home Assistant. Runs in the executor."""
+    (frame_of, after making it at most `px` on its long side), and that
+    size. `framed` False: a model that answers in the picture's own pixels
+    (Claude, the plan line-up: plan_ai.PIXEL_FRAME) gets it at that size,
+    no larger than `max_mp` megapixels either. Pillow ships with Home
+    Assistant. Runs in the executor."""
     from PIL import Image  # noqa: PLC0415
     import io  # noqa: PLC0415
     with Image.open(path) as im:
         im = im.convert("RGB")
-        im.thumbnail((SHRINK_PX, SHRINK_PX))
-        im = im.resize(frame_of(*im.size), Image.LANCZOS)
+        im.thumbnail((px, px))
+        if max_mp and im.size[0] * im.size[1] > max_mp * 1e6:
+            k = math.sqrt(max_mp * 1e6 / (im.size[0] * im.size[1]))
+            im = im.resize((max(1, int(im.size[0] * k)), max(1, int(im.size[1] * k))), Image.LANCZOS)
+        if framed:
+            im = im.resize(frame_of(*im.size), Image.LANCZOS)
         buf = io.BytesIO()
         im.save(buf, "JPEG", quality=88)
         return buf.getvalue(), im.size[0], im.size[1]
@@ -313,6 +321,7 @@ async def ws_house3d_stairs_read(hass: HomeAssistant, connection, msg) -> None:
         return
     if not ai["ready"]:
         _bump(hass, "stair_read:no_ai_task")
+        await U.refused(hass, "no_ai", ai.get("ai_task"))
         connection.send_error(msg["id"], P.NO_AI_CODE, ai["message"])
         return
     model = hass.data.get(DOMAIN, {}).get(DATA_MODEL)
@@ -352,6 +361,7 @@ async def ws_house3d_stairs_read(hass: HomeAssistant, connection, msg) -> None:
     found = stairs_from_answer(answer, w, h, lambda fx, fy: model.map_frac_to_metres(fx, fy, map_id), counts)
     if found is None:
         _bump(hass, "stair_read:bad_answer")
+        U.unusable(hass, by, answer)
         connection.send_result(msg["id"], {"ok": False, "reason": "bad_answer", "took_s": took,
                                            "message": "The AI's answer had no stairs in it that PadSpan could read."})
         return

@@ -159,6 +159,13 @@ export function render(ctx){
   root.appendChild(tabBar);
 
   root.appendChild(_tabBody(activeTab));
+  // A link that named a card (?part=, Live Aboard's ⋯ list): scrolled to once, on this draw.
+  const wantPart = ctx.state._settingsPart;
+  if (wantPart) {
+    ctx.state._settingsPart = null;
+    const n = FOCUS.pickPart(root, wantPart);
+    if (n) setTimeout(() => { try { n.scrollIntoView({ block: "start", behavior: "smooth" }); } catch (_) { /* gone */ } }, 80);
+  }
   return root;
 }
 
@@ -4137,7 +4144,8 @@ function _settingsAI(ctx, el){
   }
   aiSel.value = aiCur;
   let aiLast = aiCur;
-  aiSel.addEventListener("change", ()=>{ const want = aiSel.value; save("atlas_3d_ai_task_entity", want, ()=>{ aiSel.value = aiLast; }).then(ok=>{ if (ok) { aiLast = want; syncBackup(); } }); });
+  let pbRefresh = null;            // Build from plans: the row asks the server again when the AI Task changes
+  aiSel.addEventListener("change", ()=>{ const want = aiSel.value; save("atlas_3d_ai_task_entity", want, ()=>{ aiSel.value = aiLast; }).then(ok=>{ if (ok) { aiLast = want; syncBackup(); if (pbRefresh) pbRefresh(); } }); });
   card.appendChild(el("div",{style:"display:flex;align-items:center;gap:10px;flex-wrap:wrap"},
     [el("span",{style:"font-size:13px;color:#a7f3d0;min-width:130px"}, "AI Task"), aiSel]));
   card.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-top:6px"}, aiIds.length
@@ -4165,6 +4173,8 @@ function _settingsAI(ctx, el){
     [el("span",{style:"font-size:13px;color:#a7f3d0;min-width:130px"}, "Backup AI task"), bkSel]));
   card.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-top:6px"},
     "Used when the main one can't be reached, e.g. a computer that's away."));
+  // This month's AI reads (ai_usage.py, experimental): asked only by an administrator, as the command is.
+  if (ctx.hass && ctx.hass.user && ctx.hass.user.is_admin) card.appendChild(_aiUsageRow(ctx, el, save));
   wrap.appendChild(card);
 
   // What it reads: a switch each; what is not built yet says so.
@@ -4193,13 +4203,13 @@ function _settingsAI(ctx, el){
   master.appendChild(el("div",{},[
     el("div",{style:"font-size:13px;color:#e2e8f0;font-weight:600"}, ["AI map-building research (experimental)", chip]),
     el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-top:2px"},
-      "Research feature. The AI suggests; you check every item. It never writes your map, rooms, walls or calibration. " +
+      "Research feature. The AI suggests; you check every item. It never writes your rooms, walls or calibration; only Line up plans moves a plan's picture, when you accept it. " +
       "Turning it off hides it; it does not undo what you kept."),
   ]));
   feats.appendChild(master);
   const under = el("div",{"data-ai-plans-under":"",style:`margin-left:22px;display:${settings.ai_plans_enabled === true ? "" : "none"}`});
   masterCb.addEventListener("change", ()=>{ const want = masterCb.checked; under.style.display = want ? "" : "none";
-    save("ai_plans_enabled", want, ()=>{ masterCb.checked = !want; under.style.display = !want ? "" : "none"; }); });
+    save("ai_plans_enabled", want, ()=>{ masterCb.checked = !want; under.style.display = !want ? "" : "none"; }).then(ok=>{ if (ok && want && pbRefresh) pbRefresh(); }); });
   under.appendChild(sw("ai_stairs_enabled", "Stairs from your floor plans",
     "Adds Read stairs off the plans (AI) to Live Aboard's Furnish → Build ▾ → House. Your AI looks for the stairs on each floor " +
     "plan you placed and puts what it finds in as a first guess: check where each one stands and which way is up, then " +
@@ -4212,6 +4222,9 @@ function _settingsAI(ctx, el){
       "In Live Aboard's Edit bar, the Plans tool: your AI reads the floor plans you placed for staircases and railings and lists " +
       "what it finds for you to check, item by item. What you keep goes into your 3D house when you press Save, and one undo takes a whole session back."),
   ]));
+  // Build from plans (experimental; replaces "Rooms and walls… coming soon"): drawn only when the server says
+  // Claude Opus 5.5 or newer is the AI Task (padspan_bright/plan_build_info); the panel never decides that itself.
+  if (ctx.hass && ctx.hass.user && ctx.hass.user.is_admin) { const pb = _planBuildRow(ctx, el, save, settings); under.appendChild(pb); pbRefresh = pb._refresh; }
   // The last session's undo (admins; ws_plan_ai.plan_ai_undo): what changed since is left, and said. Asked here in the page.
   if (ctx.hass && ctx.hass.user && ctx.hass.user.is_admin && settings.ai_plans_enabled === true) under.appendChild(_planAiLastRow(ctx, el));
   feats.appendChild(under);
@@ -4219,8 +4232,6 @@ function _settingsAI(ctx, el){
     "In Live Aboard's Furnish, take a photo of a sofa, a bed or a lamp and the AI fills in its kind, style, colours and sizes. " +
     "Tags, receivers and people's figures too. It names the piece itself, then reads that kind's details; telling it what the piece is first is quicker. It asks you for one real measurement unless something in the photo shows the scale.",
     settings.ai_photos_enabled !== false, false));
-  feats.appendChild(sw("", "Rooms and walls from a floor plan picture",
-    "Traces the rooms and walls of a floor plan image for you, as a first guess to check before it is kept.", false, true));
   feats.appendChild(sw("", "Ask your voice assistant where someone is",
     "Lets an AI voice assistant in Home Assistant ask PadSpan which room someone is in, in your own words.", false, true));
   feats.appendChild(note);
@@ -4520,6 +4531,161 @@ function _atlas3dSection(ctx, el, settings){
 // library's server is live (LIBRARY_SERVER_LIVE in the library's own module,
 // loaded here only then): before that, nothing of the library shows.
 /** "Last plan session: 17 items, 2026-11-05 · Undo": hidden until the server names a batch that can be undone. */
+/** The AI credit tracker (ai_usage.py, experimental, Garry 2026-11-09): this month's AI reads under
+ *  the AI Task picker. For a Claude AI Task, the estimate, "of your monthly credit" once an amount is
+ *  typed in, and the warning (off until chosen); any other AI, reads only. The stops by reason. */
+function _aiUsageRow(ctx, el, save){
+  const settings = ctx.state.settings || {};
+  const box = el("div",{"data-ai-usage":"",style:"display:none;margin-top:10px;padding:8px 10px;border:1px solid #1e3a2a;border-radius:8px"});
+  const chip = el("span",{style:"margin-left:8px;font-size:10px;font-weight:700;letter-spacing:.06em;color:#fbbf24;border:1px solid rgba(251,191,36,.45);border-radius:999px;padding:0 7px"}, "EXPERIMENTAL");
+  const line = el("div",{style:"font-size:13px;color:#e2e8f0;font-weight:600"});
+  const stops = el("div",{"data-ai-usage-stops":"",style:"display:none;font-size:12px;color:#fca5a5;margin-top:4px"});
+  const how = el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-top:4px"});
+  const controls = el("div",{style:"display:none;flex-wrap:wrap;gap:10px;align-items:center;margin-top:8px"});
+  const money = (v) => `$${Number(v).toFixed(2)}`;
+  let credit = Number(settings.ai_credit_month_usd) > 0 ? Number(settings.ai_credit_month_usd) : 0;
+  const inp = el("input",{type:"number", min:"0", step:"any", placeholder:"e.g. 200", "data-ai-credit":"", class:"input", style:"width:90px;box-sizing:content-box"});
+  inp.value = credit > 0 ? String(credit) : "";
+  inp.addEventListener("change", ()=>{ const was = credit, want = inp.value.trim() === "" ? 0 : Math.max(0, Number(inp.value) || 0);
+    save("ai_credit_month_usd", want, ()=>{ inp.value = was > 0 ? String(was) : ""; }).then(ok=>{ if (ok) { credit = want; load(); } }); });
+  const warn = document.createElement("select");
+  warn.className = "select";
+  warn.setAttribute("data-ai-credit-warn", "");
+  for (const [v, n] of [["0", "Off"], ["50", "at 50 %"], ["75", "at 75 %"], ["90", "at 90 %"]]) warn.appendChild(el("option",{value:v}, n));
+  warn.value = String([50, 75, 90].includes(Number(settings.ai_credit_warn_pct)) ? Number(settings.ai_credit_warn_pct) : 0);
+  let warnLast = warn.value;
+  warn.addEventListener("change", ()=>{ const want = warn.value; save("ai_credit_warn_pct", Number(want), ()=>{ warn.value = warnLast; }).then(ok=>{ if (ok) warnLast = want; }); });
+  controls.appendChild(el("label",{style:"display:flex;align-items:center;gap:6px;font-size:12px;color:#a7f3d0;white-space:nowrap"}, ["Your monthly credit, US$", inp]));
+  controls.appendChild(el("label",{style:"display:flex;align-items:center;gap:6px;font-size:12px;color:#a7f3d0;white-space:nowrap"}, ["Warn me", warn]));
+  box.appendChild(line);
+  box.appendChild(stops);
+  box.appendChild(how);
+  box.appendChild(controls);
+  function show(u){
+    box.style.display = u ? "" : "none";
+    if (!u) return;
+    const claude = u.main_maker === "claude";
+    let text;
+    if (claude) {
+      text = `Claude reads this month: ${u.claude_reads}`;
+      // A priced model with nothing priced yet this month (the 1st, or only failed reads) is $0.00, not "no price known".
+      if (u.claude_usd == null && !u.main_priced) text += " (no price known for this model)";
+      else text += `, about ${money(u.claude_usd || 0)}` + (credit > 0 ? ` of your $${credit} monthly credit` : "");
+    } else {
+      text = `AI reads this month: ${u.reads}`;
+    }
+    line.innerHTML = "";
+    line.appendChild(document.createTextNode(text));
+    line.appendChild(chip);
+    const list = u.stops || [];
+    const n = list.reduce((s, x) => s + (x.n || 0), 0);
+    stops.style.display = n ? "" : "none";
+    stops.textContent = !n ? "" : `${n} read${n === 1 ? "" : "s"} stopped: ` +
+      (list.length === 1 ? list[0].words : list.map(x => `${x.n} ${x.words}`).join(", "));
+    how.innerHTML = "";
+    if (claude) {
+      how.appendChild(document.createTextNode("An estimate from each picture's size and each question's length: Home Assistant doesn't pass on what Claude counted. Exact numbers: "));
+      how.appendChild(el("a",{href:"https://platform.claude.com/usage", target:"_blank", rel:"noopener noreferrer", style:"color:#52b788"}, "Anthropic Console → Usage"));
+      how.appendChild(document.createTextNode(" (filter by the key Home Assistant uses)." + (u.warned ? " This month's warning has been shown." : "")));
+    } else {
+      how.textContent = "Every read PadSpan sent to your AI this month. A cost is estimated for Claude only.";
+    }
+    controls.style.display = claude ? "flex" : "none";
+  }
+  // Sample mode's {}: nothing. No AI Task and no reads this month: nothing either (a house that never uses AI, review B4).
+  function load(){ ctx.actions.wsCall("padspan_bright/ai_usage_get").then(u => show(u && u.month && (u.main_maker || u.reads) ? u : null)).catch(() => show(null)); }
+  load();
+  return box;
+}
+
+/** Settings → AI: Build from plans: advanced plan alignment (Claude, experimental). Off for everyone; drawn
+ *  only when the server's unlock rule passes (plan_ai.unlock: Claude Opus 5.5 or newer through Home Assistant's
+ *  Anthropic integration) and the master switch is on; asked again after the AI Task changes (`_refresh`). */
+function _planBuildRow(ctx, el, save, settings){
+  const box = el("div",{"data-ai-plan-build":"", style:"display:none;padding:8px 0;border-top:1px solid #1e3a2a"});
+  let on = settings.ai_plan_build_enabled === true;
+  const chip = () => el("span",{style:"margin-left:8px;font-size:10px;font-weight:700;letter-spacing:.06em;color:#fbbf24;border:1px solid rgba(251,191,36,.45);border-radius:999px;padding:0 7px"}, "EXPERIMENTAL");
+  const show = (info) => {
+    box.innerHTML = "";
+    const ok = !!(info && info.master && info.unlock && info.unlock.ok);
+    // The last line-up's undo stays here whatever the AI Task (form q3): a session can always be taken back.
+    const undo = info && info.master && info.undo ? info.undo : null;
+    const rundo = info && info.master && info.rooms_undo ? info.rooms_undo : null;   // Rooms from plans' too (Stage 2)
+    box.style.display = ok || undo || rundo ? "" : "none";
+    if (!ok) { if (undo) box.appendChild(undoRow(undo, false)); if (rundo) box.appendChild(undoRow(rundo, false, true)); return; }
+    const label = el("label",{style:"display:flex;align-items:flex-start;gap:10px;cursor:pointer"});
+    const cb = el("input",{type:"checkbox", style:"margin-top:3px", "data-ai-plan-build-switch":""});
+    cb.checked = on;
+    cb.addEventListener("change", ()=>{ const want = cb.checked; save("ai_plan_build_enabled", want, ()=>{ cb.checked = !want; }).then(ok2=>{ if (ok2) on = want; }); });
+    label.appendChild(cb);
+    label.appendChild(el("div",{},[
+      el("div",{style:"font-size:13px;color:#e2e8f0;font-weight:600"}, ["Build from plans: advanced plan alignment (Claude, experimental)", chip()]),
+      el("div",{style:"font-size:11px;color:#94a3b8;line-height:1.5;margin-top:2px"},
+        "Claude reads your floor plans and lines them up to each other and to your house. You check every change on a map before anything is saved; " +
+        "a backup is taken before each save and one undo takes a session back. It never changes calibration or anything placed in metres. " +
+        "Needs Claude Opus 5.5 or newer as your AI Task. In Live Aboard: Edit → Plans → Line up plans; then, on a lined-up floor, Rooms from plans " +
+        "reads its rooms, doors, windows and stairs, saved together with one backup and one undo."),
+      el("div",{style:"font-size:11px;color:#a7f3d0;margin-top:2px"}, `Reads with ${info.unlock.display || "Claude"}. The plans leave the house for Anthropic.`),
+    ]));
+    box.appendChild(label);
+    // The stall watch (design 14): this house's own stops, said here, not only in the usage report.
+    const month = (info.stall && info.stall.month) || {}, words = (info.stall && info.stall.words) || {};
+    const keys = Object.keys(month).filter(k => month[k] > 0).sort((a, b) => month[b] - month[a]);
+    if (keys.length) box.appendChild(el("div",{"data-ai-plan-build-stops":"", style:"font-size:11px;color:#94a3b8;line-height:1.5;margin:4px 0 0 24px"},
+      "Line-up stops this month (experimental): " + keys.slice(0, 4).map(k => `${String(words[k] || k).replace(/\.$/, "")} (×${month[k]})`).join(" · ")));
+    if (undo) { const r = undoRow(undo, true); r.style.margin = "6px 0 0 24px"; box.appendChild(r); }
+    if (rundo) { const r = undoRow(rundo, true, true); r.style.margin = "6px 0 0 24px"; box.appendChild(r); }
+  };
+  // Undo this line-up session (experimental): asked once, then the whole session; said in plain words either way.
+  // `rooms`: the same for Rooms from plans (Stage 2): its own words, session and command (UNDO_OF).
+  const UNDO_OF = {
+    lineup: { title: "Undo this line-up session (experimental)", cmd: "padspan_bright/plan_build_undo", prefix: "Line up plans (experimental): ", tool: "Line up plans",
+      what: (u) => `The last plan line-up saved on ${u.floor_name || "a floor"}${u.when}: ${u.items} plan${u.items === 1 ? "" : "s"} moved or refiled. ` +
+        "Undo puts every one back where it was; a backup is taken first, and a plan you moved by hand since is left as it is.",
+      sure: "Put every plan this session saved back where it was?",
+      done: (n, k) => `${n} plan${n === 1 ? "" : "s"} put back where ${n === 1 ? "it was" : "they were"}${k ? `; ${k} moved by hand since left as ${k === 1 ? "it is" : "they are"}` : ""}.` },
+    rooms: { title: "Undo this rooms session (experimental)", cmd: "padspan_bright/plan_build_rooms_undo", prefix: "Rooms from plans (experimental): ", tool: "Rooms from plans",
+      what: (u) => `The last rooms from plans saved on ${u.floor_name || "a floor"}${u.when}: ${u.items} item${u.items === 1 ? "" : "s"} (rooms, doors, windows, stairs). ` +
+        "Undo puts every one back as it was; a backup is taken first, and anything you changed since is left as it is.",
+      sure: "Put every room, door, window and stair this session saved back as it was?",
+      done: (n, k) => `${n} put back${k ? `; ${k} changed since left as ${k === 1 ? "it is" : "they are"}` : ""}.` },
+  };
+  const asking = { lineup: false, rooms: false }, said = { lineup: "", rooms: "" };
+  function undoRow(u, unlocked, rooms = false){
+    const kind = rooms ? "rooms" : "lineup", K = UNDO_OF[kind];
+    const row = el("div",{[rooms ? "data-ai-plan-build-rooms-undo" : "data-ai-plan-build-undo"]:"", style:"font-size:11px;color:#94a3b8;line-height:1.5;margin:0 0 6px 0"});
+    const when = u.at ? ` (${new Date(u.at * 1000).toLocaleDateString()})` : "";
+    row.appendChild(el("div",{style:"font-size:12px;color:#e2e8f0;font-weight:600"}, [K.title, chip()]));
+    row.appendChild(el("div",{}, K.what({ ...u, when }) + (unlocked ? "" : ` ${K.tool} is hidden while your AI Task isn't Claude Opus 5.5 or newer; this undo stays here.`)));
+    const bs = { style:"margin:4px 6px 0 0;padding:4px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#e2e8f0;font-size:11px;cursor:pointer" };
+    if (!asking[kind]) {
+      const b = el("button",{...bs, type:"button", "data-ai-plan-build-undo-ask":""}, K.title);
+      b.addEventListener("click", ()=>{ asking[kind] = true; said[kind] = ""; ask(); });
+      row.appendChild(b);
+    } else {
+      const yes = el("button",{...bs, type:"button", "data-ai-plan-build-undo-go":"", style: bs.style + ";background:#1b4332;border-color:#52b788;color:#d8f3dc;font-weight:700"}, "Undo it (experimental)");
+      const no = el("button",{...bs, type:"button"}, "Cancel");
+      yes.addEventListener("click", ()=>{
+        yes.disabled = true;
+        ctx.actions.wsCall(K.cmd, { session: u.session }).then((r)=>{
+          asking[kind] = false;
+          if (r && r.ok === false) { said[kind] = String(r.message || r.code || ""); ask(); return; }
+          ctx.toast(K.prefix + K.done((r && r.undone) || 0, ((r && r.skipped) || []).length));
+          said[kind] = ""; ask();
+        }).catch((e)=>{ asking[kind] = false; said[kind] = K.prefix + String((e && e.message) || e).replace(K.prefix, ""); ask(); });
+      });
+      no.addEventListener("click", ()=>{ asking[kind] = false; ask(); });
+      row.appendChild(el("div",{style:"color:#fde68a;margin-top:2px"}, K.sure));
+      row.appendChild(yes); row.appendChild(no);
+    }
+    if (said[kind]) row.appendChild(el("div",{role:"alert", style:"color:#fca5a5;margin-top:2px"}, said[kind]));
+    return row;
+  }
+  const ask = () => ctx.actions.wsCall("padspan_bright/plan_build_info").then(show).catch(() => show(null));
+  box._refresh = ask;
+  if (settings.ai_plans_enabled === true) ask();
+  return box;
+}
 function _planAiLastRow(ctx, el){
   const box = el("div",{"data-ai-plans-last":"", style:"display:none;padding:8px 0;border-top:1px solid #1e3a2a"});
   const show = (u) => {
@@ -4706,6 +4872,33 @@ function _settingsUI(ctx, el){
   return wrap;
 }
 
+// Scenes (2026-11-07, views/scene_row.js): the row under the Atlas is made of
+// Home Assistant's scenes and the one-floor Whole house presets; a new scene
+// is made in Home Assistant's own editor, which is an administrator's.
+function _atlasScenesLine(ctx, el){
+  const admin = !!(ctx.hass && ctx.hass.user && ctx.hass.user.is_admin);
+  const box = el("div",{"data-focus-part":"scenes",style:"margin-top:14px;padding-top:12px;border-top:1px solid #1e3a2a"});
+  box.appendChild(el("div",{style:"color:#e2e8f0;font-size:14px"},"Scenes"));
+  box.appendChild(el("div",{style:"font-size:11px;color:#94a3b8;margin:2px 0 8px;line-height:1.5"},
+    "The row of small maps under the Atlas (and in Live Aboard) shows Home Assistant's scenes that set a placed light, and the Whole house presets that light one floor. Tap one to run it, tap it again to turn its lights off. A screen can hide the row in Live Aboard's \u22ef list."));
+  if (!admin) {
+    box.appendChild(el("div",{style:"font-size:12px;color:#94a3b8"},"An administrator makes scenes in Home Assistant."));
+    return box;
+  }
+  // Home Assistant's own page, as the panel opens one (rooms.js): its router, else a plain load.
+  const open = (path, word) => {
+    if (word && ctx.actions.telemetryEvent) ctx.actions.telemetryEvent(word);
+    try { history.pushState(null, "", path); window.dispatchEvent(new CustomEvent("location-changed", { detail: { replace: false } })); }
+    catch (_) { try { window.location.assign(path); } catch (__) { /* stays here */ } }
+  };
+  const mk = el("button",{class:"btn inline","data-scene-new":"settings"},"+ New scene in Home Assistant \u203a");
+  mk.addEventListener("click", ()=>open("/config/scene/edit/new", "house3d_show:scene_new:settings"));
+  const all = el("button",{class:"btn inline"},"All scenes \u203a");
+  all.addEventListener("click", ()=>open("/config/scene/dashboard", null));
+  box.appendChild(el("div",{style:"display:flex;align-items:center;flex-wrap:wrap;gap:6px"},[mk, all]));
+  return box;
+}
+
 // ── Atlas tab ────────────────────────────────────────────────────────────────
 // The Atlas and Live Aboard settings, moved out of UI Structure as they were
 // (2026-10-30): the same cards, rows, keys and saves.
@@ -4845,6 +5038,7 @@ function _settingsAtlas(ctx, el){
     }
   });
   }
+  lightsCard.appendChild(_atlasScenesLine(ctx, el));
   lightsCard.appendChild(_atlasWeatherSection(ctx, el, settings));
   // The 3D house is Pro's (PadSpan Pro and Bright Pro): below Pro, no box at
   // all, and whatever is stored is kept for when a key comes back.

@@ -12,8 +12,8 @@
   BUILD_ID / APP_VERSION updated automatically by scripts/release.py.
 */
 
-const APP_VERSION = "0.38.224";
-const BUILD_ID = "20261103T155048Z";
+const APP_VERSION = "0.38.231";
+const BUILD_ID = "20261111T013802Z";
 
 // Query inherited from our own module URL so the ?b= cache-buster propagates
 // (see docs/06_UI_CACHE_BUSTING.md).
@@ -946,6 +946,11 @@ class PadSpanLightsApp extends HTMLElement {
     // Door/window/lock click-to-control (Garry, 2026-09-22) — same gate as
     // maps.js's own barrierHit (_isPro there): Bright or Pro, never free.
     const paid=["bright","pro"].includes(String(this.state._tier||"").toLowerCase());
+    // A wall (?kiosk=1): nothing on it may lead off this page (the ⋯ list's
+    // links, the scene row's + New scene and ✎); what is set up elsewhere
+    // says where, from another screen.
+    let kiosk=false;
+    try{ kiosk=new URLSearchParams(location.search).get("kiosk")==="1"; }catch(_){}
 
     const host={
       el,
@@ -1035,6 +1040,27 @@ class PadSpanLightsApp extends HTMLElement {
         this.state._vacationModeResumed = !!res?.settings?.vacation_mode_pattern_for;
         this._render();
         return true;
+      },
+      // The scene row under the map and in Live Aboard (views/scene_row.js):
+      // Home Assistant's scenes and the one-floor Whole house presets above.
+      // A tap goes through this panel's own calls (Home Assistant's services,
+      // _setMany, the presets' Apply); + New scene and ✎ open Home
+      // Assistant's scene editor, an administrator's, never on a wall.
+      scenes: {
+        slot: "atlas", states: this._hass?.states || {}, entities: this._hass?.entities || null,
+        admin: !!this._hass?.user?.is_admin, kiosk,
+        callService: (d, svc, data)=>this._hass.callService(d, svc, data),
+        setMany: (eids, on)=>this._setMany(eids, on),
+        openHa: (path)=>{
+          try { history.pushState(null, "", path); window.dispatchEvent(new CustomEvent("location-changed", { detail: { replace: false } })); }
+          catch (_) { try { window.location.assign(path); } catch (__) { /* stays here */ } }
+        },
+        toast: (m, e)=>this._toast(m, e),
+        rerender: ()=>this._render(),
+        telemetry: (name)=>{
+          if(!this.state._telemetryOn || !this._hass) return;
+          Promise.resolve(this._ws({ type:"padspan_bright/telemetry_event", event:String(name) })).catch(()=>{});
+        },
       },
       vacationModeEnabled: !!this.state._vacationModeEnabled,
       vacationModeResumed: !!this.state._vacationModeResumed,
@@ -1153,6 +1179,16 @@ class PadSpanLightsApp extends HTMLElement {
           this._render();
           return true;
         },
+        // The ⋯ list's links and "Set it up" (live_aboard_show.js GO_TO):
+        // the PadSpan panel on that tab, its card scrolled to (panel.js reads
+        // ?view=, ?tab= and ?part=). Not in Basic, where those are expert
+        // screens, and never on a wall (kiosk), which would be left there.
+        goTo: this._basicMode() || kiosk ? null : (t)=>{
+          const q = new URLSearchParams({ view: String(t.view), tab: String(t.tab) });
+          if (t.part) q.set("part", String(t.part));
+          try { window.location.assign(`/padspan-bright?${q.toString()}`); } catch (_) { /* stays here */ }
+        },
+        kiosk,
         // Furniture that is a device (P5): renames followed through the
         // registry already read above, and the emergency lights while a
         // test runs (the status this panel already keeps).
@@ -1487,11 +1523,17 @@ class PadSpanLightsApp extends HTMLElement {
         /* Nobody at the wall: the controls floating over the map and the 3D
            house fade away (they come back with a touch, a mouse or a key),
            so a big wall shows the house, not its buttons. */
-        :host([data-wall]) .la3d-bar, :host([data-wall]) .la3d-compass, :host([data-wall]) .la3d-hud,
+        /* The ⋯ beside the compass goes and comes back with it; so do the
+           Motion chip (and its colour key, if open) and the flat map's scene row. */
+        :host([data-wall]) .la3d-bar, :host([data-wall]) .la3d-compass, :host([data-wall]) .la3d-more, :host([data-wall]) .la3d-hud,
+        :host([data-wall]) .la3d-mchip, :host([data-wall]) .la3d-mkey, :host([data-wall]) .psc-atlas,
         :host([data-wall]) .lv-alone-anchor > button{transition:opacity .6s ease}
         :host([data-wall]:not([data-wall-active])) .la3d-bar, :host([data-wall]:not([data-wall-active])) .la3d-compass,
-        :host([data-wall]:not([data-wall-active])) .la3d-hud,
+        :host([data-wall]:not([data-wall-active])) .la3d-more, :host([data-wall]:not([data-wall-active])) .la3d-hud,
+        :host([data-wall]:not([data-wall-active])) .la3d-mchip, :host([data-wall]:not([data-wall-active])) .la3d-mkey,
+        :host([data-wall]:not([data-wall-active])) .psc-atlas,
         :host([data-wall]:not([data-wall-active])) .lv-alone-anchor > button{opacity:0;pointer-events:none}
+        :host([data-wall]:not([data-wall-active])) .psc-atlas *{pointer-events:none}
       </style>
       <div id="content"></div>
     `;
@@ -1567,7 +1609,7 @@ class PadSpanLightsApp extends HTMLElement {
       // it: a light, the 3D house) it does nothing else. Anywhere else (the
       // rail, a light, the map, all still showing) it works as a tap. A mouse
       // has already woken it by moving.
-      const FADED = ".la3d-bar, .la3d-compass, .la3d-hud, .lv-alone-anchor > button";
+      const FADED = ".la3d-bar, .la3d-compass, .la3d-more, .la3d-hud, .la3d-mchip, .la3d-mkey, .psc-atlas .psc-scroll, .lv-alone-anchor > button";
       const onFaded = (x, y)=>[...(this.shadowRoot ? this.shadowRoot.querySelectorAll(FADED) : [])].some(el=>{
         const r = el.getBoundingClientRect();
         return r.width > 0 && x >= r.left - 8 && x <= r.right + 8 && y >= r.top - 8 && y <= r.bottom + 8;

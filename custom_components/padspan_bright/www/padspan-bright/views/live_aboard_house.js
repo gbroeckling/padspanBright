@@ -41,6 +41,8 @@ const COMPASS = await import(`./fabric_compass.js${new URL(import.meta.url).sear
 const DRAFT = await import(`./live_aboard_draft.js${new URL(import.meta.url).search}`);
 // Where a strip or a string of lights really goes (the Strip tool's runs), as numbers.
 const RUNS = await import(`./live_aboard_runs.js${new URL(import.meta.url).search}`);
+// The ⋯ list's words for the usage report (it imports nothing itself).
+const SHOW = await import(`./live_aboard_show.js${new URL(import.meta.url).search}`);
 export const { normBearing, fabricCompass, bearingOfNorth, compassDir, northArrowDeg } = COMPASS;
 
 // ── The usage report's words (telemetry.py HOUSE3D_EVENTS holds the same) ────
@@ -66,15 +68,25 @@ export const STAIR_STYLES = ["closed", "open", "treads", "floating"];
 export const STAIR_USE_EVENTS = ["stairs_drawn", ...["all_ok", "some_landing", "some_nofloor"].map(k => `stairs_outcome:${k}`),
   "stairs_reach:split_level", "stairs_reach:within", ...STAIR_SHAPES.map(k => `stairs_shape:${k}`), ...STAIR_STYLES.map(k => `stairs_style:${k}`)];
 export const WALL_DRAW_KINDS = ["high", "high_still", "high_capped", "low"];
+// The ⋯ list (live_aboard_show.js SHOW_EVENTS, 2026-11-07): opened, each line
+// hidden or shown again, a "not set up" line seen and followed, sent to where
+// people or tags are switched on, Back to house defaults. Counts only.
+export const SHOW_EVENTS = SHOW.SHOW_EVENTS;
 export const HOUSE3D_EVENTS = ["house3d_opened", ...HOUSE3D_FALLBACK_KINDS.map(k => `house3d_fallback:${k}`), ...WALL_DRAW_KINDS.map(k => `house3d_wall_draw:${k}`), "house3d_wet_window",
   "house3d_loft_rail", "house3d_mezzanine", "house3d_wall_capped", ...HOUSE_SIZE_BANDS.map(b => `house3d_fallback_size:${b}`),
-  ...STAIR_USE_EVENTS];
+  ...STAIR_USE_EVENTS, ...SHOW_EVENTS];
 const _ALLOWED = new Set(HOUSE3D_EVENTS);
 const _counted = new Set();
 /** Count `name` once per page load, and only a name from the closed list. */
 export function countHouse3dOnce(name, send){
   if (!_ALLOWED.has(name) || _counted.has(name)) return false;
   _counted.add(name);
+  try { if (typeof send === "function") send(name); } catch (_) { /* the report must never be the error */ }
+  return true;
+}
+/** Count `name` each time (something a person did: the ⋯ list's), only a name from the closed list. */
+export function countHouse3d(name, send){
+  if (!_ALLOWED.has(name)) return false;
   try { if (typeof send === "function") send(name); } catch (_) { /* the report must never be the error */ }
   return true;
 }
@@ -1252,6 +1264,16 @@ export function nearestWall(pieces, x, y, maxD, rails = false, align = null){
   const off = pc.thick / 2 + 0.012;
   return { x: px + n[0] * off, y: py + n[1] * off, n, dir: unit([pc.x1 - pc.x0, pc.y1 - pc.y0]), rail: pc.kind === "rail", pc };
 }
+/** A light `len` long centred at (x, y) along the deck rail it is on
+ *  (nearestWall's w): the part of it on the rail as drawn (drawnSpan, its
+ *  corners included), so it ends where the rail does. */
+export function onRail(w, x, y, len){
+  const S = drawnSpan(w.pc), d = w.dir, s = (x - S.mx) * d[0] + (y - S.my) * d[1];
+  const lo = Math.max(-S.len / 2, s - len / 2), hi = Math.min(S.len / 2, s + len / 2);
+  if (hi - lo < 0.05) return { x, y, len: Math.min(len, 0.05) };
+  const m = (lo + hi) / 2 - s;
+  return { x: x + d[0] * m, y: y + d[1] * m, len: hi - lo };
+}
 /** The wall of `room` a light inside it runs along, at any distance: the
  *  nearest running `align`'s way, else the nearest. Where on it: square
  *  across from (x, y), on the room's side (as nearestWall gives it). */
@@ -1438,6 +1460,10 @@ export function fixtureParts(L, ctx){
         h = kind === "kick" ? 0.1 : snap.rail ? RAIL_H + 0.03 : where === "none" ? ceil - 0.15 : 2.2;
       } else h = kind === "kick" ? 0.1 : 0.05;                 // nothing to hang it on: a ground strip
       if (w) { dir = w.dir; cx = w.x; cy = w.y; n = w.n; if (!w.rail) P.wall = w.pc; }
+      // On a deck rail, no further than the rail itself: a strip longer than
+      // its run, or hanging off its end, ran on past the glass and round no
+      // corner, a second top rail out in the air (Garry's wall, 2026-11-05).
+      if (w && w.rail) ({ x: cx, y: cy, len } = onRail(w, cx, cy, len));
       dir = dir || unit(isoToPlan(Math.cos(L.rot * Math.PI / 180), Math.sin(L.rot * Math.PI / 180)));
       n = n || perp(dir);
       const hideOff = kind !== "strip" && kind !== "valance";  // tape under a cabinet, at the floor, behind a TV: unseen when off
@@ -2024,6 +2050,27 @@ export function readSensors(model, F, lightsByEid, hidden){
     out.push({ eid, l, kind, floor: fl, x, y });
   }
   return out;
+}
+// ── What the ⋯ list calls a placed device (live_aboard_show.js) ─────────────
+// Its line in "Show on this screen": a light, an LED strip (a strip's kind, or
+// laid out along a run with the Strip tool, a string of bulbs aside) or a
+// ceiling fan; a temperature, humidity or air readout; motion; a lock; an
+// alarm (a leak, smoke, CO or gas sensor: never hidden). Anything else: null.
+// stored: its record in the 3D file (lights[eid]: a kind set there, a run);
+// override: the Atlas shape the person set (settings.light_shapes).
+const STRIP_LINE = new Set(["strip", "valance", "undercab", "kick", "tv", "cove", "perimeter"]);
+export function showKindOf(l, lp, stored, override){
+  if (!l) return null;
+  const c = deviceClassOf(l).key;
+  if (c === "flood") return "alarm";
+  if (c === "lock") return "lock";
+  if (isFixture(l)) {
+    const kind = storedKind(stored) || guessKind(l, footprint(lp), override);
+    if (kind === "fan") return "fan";
+    return STRIP_LINE.has(kind) || (RUNS.readRun(stored) && kind !== "string") ? "strip" : "light";
+  }
+  const k = sensorKindOf(l);
+  return k === "motion" ? "motion" : k ? "readout" : null;
 }
 /** What the sensors are drawn from — which, where, what kind — not their state. */
 export function sensorsSignature(model, lightsByEid, hidden){

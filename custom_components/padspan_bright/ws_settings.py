@@ -102,6 +102,25 @@ def _sanitize_light_shapes(raw: Any) -> dict[str, str]:
     }
 
 
+# West Coast Forest as the first look where a home stands among forests (Garry,
+# 2026-11-03): only the first time Showcase goes on, never over a look someone has.
+_FOREST_COUNTRIES = frozenset({"DE", "AT", "CH", "SE", "FI", "NO", "EE", "LV", "SI"})
+
+
+def _forested_home(cfg: Any) -> bool:
+    """Germany and other heavily forested countries, or the Pacific Northwest's coast
+    (coastal BC, Washington, Oregon, far northern California). Read from Home
+    Assistant's own config: nothing leaves the house."""
+    country = getattr(cfg, "country", None)
+    if isinstance(country, str) and country.strip().upper() in _FOREST_COUNTRIES:
+        return True
+    try:
+        lat, lon = float(cfg.latitude), float(cfg.longitude)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return 40.0 <= lat <= 60.0 and -135.0 <= lon <= -120.5
+
+
 def _normalize_showcase_theme(value: Any) -> str:
     """The Showcase-theme equivalent of _normalize_automorph_style above —
     same reasoning, same shared use by the live setter and the preset
@@ -553,8 +572,11 @@ async def ws_settings_get(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("atlas_3d_ai_task_entity"): vol.Any(str, None),
         vol.Optional("atlas_3d_ai_task_backup_entity"): vol.Any(str, None),
         vol.Optional("ai_photos_enabled"): bool,
+        vol.Optional("ai_credit_month_usd"): vol.Any(int, float, str, None),
+        vol.Optional("ai_credit_warn_pct"): vol.Any(int, float, str, None),
         vol.Optional("ai_stairs_enabled"): bool,
         vol.Optional("ai_plans_enabled"): bool,
+        vol.Optional("ai_plan_build_enabled"): bool,
         vol.Optional("atlas_3d_library"): bool,
         vol.Optional("atlas_3d_weather"): bool,
         vol.Optional("atlas_3d_showcase"): bool,
@@ -752,7 +774,8 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                 from .perf_sampler import async_runs_opted_out  # noqa: PLC0415
                 await async_runs_opted_out(hass)
         if ("atlas_3d_library" in msg or "atlas_3d_ai_task_entity" in msg or "ai_photos_enabled" in msg
-                or "ai_stairs_enabled" in msg or "ai_plans_enabled" in msg or "atlas_3d_ai_task_backup_entity" in msg):
+                or "ai_stairs_enabled" in msg or "ai_plans_enabled" in msg or "atlas_3d_ai_task_backup_entity" in msg
+                or "ai_credit_month_usd" in msg or "ai_credit_warn_pct" in msg or "ai_plan_build_enabled" in msg):
             # Live Aboard's shared library and a cloud AI Task reading photos
             # both let data leave the house: an administrator's call, like the
             # usage report above.
@@ -949,6 +972,22 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                 payload["atlas_3d_ai_task_backup_entity"] = _bk
         if "atlas_3d_home_idle_s" in msg:
             payload["atlas_3d_home_idle_s"] = _atlas_3d_idle(msg["atlas_3d_home_idle_s"])
+        # The AI credit tracker (ai_usage.py): the monthly credit typed in (empty = 0, none) and the
+        # warning's share, off unless 50 / 75 / 90. The report learns the share chosen, never the amount.
+        if "ai_credit_month_usd" in msg:
+            from .ai_usage import CREDIT_MAX_USD  # noqa: PLC0415
+            payload["ai_credit_month_usd"] = _clamped(msg["ai_credit_month_usd"], 0.01, CREDIT_MAX_USD, 0, zero_ok=True)
+        if "ai_plan_build_enabled" in msg and bool(msg["ai_plan_build_enabled"]) != (((st.data if st is not None else {}) or {}).get("ai_plan_build_enabled") is True):
+            # Build from plans (experimental): the switch changed (design 10).
+            from .telemetry import bump as _t_bump  # noqa: PLC0415
+            _t_bump(hass, f"plan_build_setting:{'on' if msg['ai_plan_build_enabled'] else 'off'}")
+        if "ai_credit_warn_pct" in msg:
+            from .ai_usage import WARN_PCTS  # noqa: PLC0415
+            _pct = int(_clamped(msg["ai_credit_warn_pct"], 0, 100, 0))
+            payload["ai_credit_warn_pct"] = _pct if _pct in WARN_PCTS else 0
+            if payload["ai_credit_warn_pct"] != ((st.data if st is not None else {}) or {}).get("ai_credit_warn_pct", 0):
+                from .telemetry import bump as _t_bump  # noqa: PLC0415
+                _t_bump(hass, f"ai_credit_warn:set_{_pct}" if payload["ai_credit_warn_pct"] else "ai_credit_warn:off")
         if "atlas_3d_carries" in msg and isinstance(msg["atlas_3d_carries"], dict):
             # A non-dict is ignored, never stored as empty (light_shapes' rule).
             payload["atlas_3d_carries"] = _atlas_3d_carries(msg["atlas_3d_carries"])
@@ -1009,9 +1048,16 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
             )
         if "lights_showcase" in msg:
             payload["lights_showcase"] = bool(msg["lights_showcase"])
-            if payload["lights_showcase"] and not st.data.get("lights_showcase"):
+            was_on = bool(st.data.get("lights_showcase"))
+            if payload["lights_showcase"] and not was_on:
                 from .telemetry import bump as _bump  # noqa: PLC0415
                 _bump(hass, "showcase_on")
+                if (not st.data.get("lights_showcase_seen") and "lights_showcase_theme" not in msg
+                        and st.data.get("lights_showcase_theme", "classic") == "classic" and _forested_home(hass.config)):
+                    payload["lights_showcase_theme"] = "west_coast_forest"
+                    _bump(hass, "showcase_forest_default")
+            if payload["lights_showcase"] or was_on:   # it has been used: from now on the look is theirs
+                payload["lights_showcase_seen"] = True
         if "lights_hide_untouched" in msg:
             payload["lights_hide_untouched"] = bool(msg["lights_hide_untouched"])
         if "lights_hide_device_codes" in msg:
@@ -1236,7 +1282,7 @@ async def ws_settings_set(hass: HomeAssistant, connection, msg) -> None:
                     "overview_atlas", "lights_panel_enabled", "atlas_emergency_button", "atlas_live_colours", "bermuda_ignore", "bright_reveal_presence",
                     "atlas_weather_enabled", "atlas_alert_pulse", "atlas_heatmap_enabled",
                     "atlas_3d_enabled", "atlas_3d_people", "atlas_3d_tags", "atlas_3d_library",
-                    "atlas_3d_weather", "atlas_3d_showcase", "ai_photos_enabled", "ai_stairs_enabled", "ai_plans_enabled",
+                    "atlas_3d_weather", "atlas_3d_showcase", "ai_photos_enabled", "ai_stairs_enabled", "ai_plans_enabled", "ai_plan_build_enabled",
                     "tags_room_events_enabled", "tags_nfc_identify_enabled",
                     "tags_phone_autolink_enabled", "quiet_mode", "light_theme", "day_theme", "theme_follow_sun", "wall_pixel_shift", "wall_fully",
                     "beacon_auto_calibrate", "overview_persistent_pins", "overview_show_walls",

@@ -248,6 +248,7 @@ from .ws_fabric import (  # noqa: F401  (re-exported: registration, tests, calle
     ws_fabric_beacon_position_set,
     ws_fabric_beacon_remove,
     ws_fabric_correct_room,
+    ws_fabric_rooms_merge,
     ws_fabric_floor_elevations_set,
     ws_fabric_floor_finalize,
     ws_fabric_health,
@@ -396,6 +397,10 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     from .ws_plan_ai import WS_COMMANDS as _plan_ai_commands
     for _cmd in _plan_ai_commands:
         websocket_api.async_register_command(hass, _cmd)
+    # The AI credit tracker (ai_usage.py, experimental): this month's AI reads for Settings → AI; admins only.
+    from .ai_usage import WS_COMMANDS as _ai_usage_commands
+    for _cmd in _ai_usage_commands:
+        websocket_api.async_register_command(hass, _cmd)
     websocket_api.async_register_command(hass, ws_flood_reset)
     # The Overview's accuracy tips (setup_checks.py): the setup steps the report finds skipped most.
     from .setup_checks import WS_COMMANDS as _setup_tip_commands
@@ -466,6 +471,7 @@ def async_register_websockets(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_fabric_floor_elevations_set)
     websocket_api.async_register_command(hass, ws_fabric_scanner_z_set)
     websocket_api.async_register_command(hass, ws_fabric_correct_room)
+    websocket_api.async_register_command(hass, ws_fabric_rooms_merge)
     websocket_api.async_register_command(hass, ws_fabric_rooms_reconcile)
     websocket_api.async_register_command(hass, ws_fabric_floor_finalize)
     websocket_api.async_register_command(hass, ws_fabric_truth_candidates)

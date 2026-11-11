@@ -206,8 +206,8 @@ def test_every_command_refuses_while_the_switch_live_aboard_or_pro_is_off(monkey
 
 def test_every_command_is_an_administrators_registered_and_a_read_in_sample_mode():
     src = (_ROOT / "ws_plan_ai.py").read_text(encoding="utf-8")
-    names = re.findall(r"async def (ws_plan_ai_[a-z_]+)\(", src)
-    assert len(names) == 10 and set(names) == {fn.__name__ for fn in W.WS_COMMANDS}
+    names = re.findall(r"async def (ws_plan_(?:ai|build)_[a-z_]+)\(", src)
+    assert len(names) == 28 and set(names) == {fn.__name__ for fn in W.WS_COMMANDS}       # 10 plan AI, 10 line-up, 8 rooms (Build from plans)
     for name in names:
         head = src.split(f"async def {name}(", 1)[0].rsplit("@websocket_api.websocket_command", 1)[1]
         assert "@websocket_api.require_admin" in head, name
@@ -216,6 +216,10 @@ def test_every_command_is_an_administrators_registered_and_a_read_in_sample_mode
     panel = (_WWW / "panel.js").read_text(encoding="utf-8")
     reads = panel[panel.index("const READS = new Set("):panel.index('.split(" ").map(t => "padspan_bright/" + t));')]
     assert "plan_ai_plans plan_ai_status plan_ai_sessions_get" in reads and not {"plan_ai_start", "plan_ai_verdict", "plan_ai_commit", "plan_ai_undo"} & set(reads.split())
+    assert "plan_build_info plan_build_status" in reads and not {"plan_build_start", "plan_build_answer", "plan_build_verdict", "plan_build_commit",
+                                                                 "plan_build_undo", "plan_build_refile"} & set(reads.split())
+    assert "plan_build_rooms_status plan_build_rooms_check" in reads and not {"plan_build_rooms_start", "plan_build_rooms_edit", "plan_build_rooms_commit",
+                                                                              "plan_build_rooms_undo", "plan_build_rooms_resume"} & set(reads.split())
 
 
 def test_the_stair_finders_loop_stops_on_the_master_code_and_its_menu_item_follows_the_switch():
@@ -566,8 +570,8 @@ def test_the_budget_running_out_inside_the_last_plan_is_out_of_time_not_done(mon
     def spend(runner, job):
         real = runner.ask
 
-        async def ask(prompt, raw):
-            out = await real(prompt, raw)
+        async def ask(prompt, raw, *size):
+            out = await real(prompt, raw, *size)
             runner.t0 -= A.PLAN_BUDGET_S                          # the whole read happens, then nothing is left for a crop
             return out
         runner.ask = ask
@@ -787,8 +791,8 @@ def test_the_budget_running_out_in_the_reads_says_where_and_counts_it(monkeypatc
         def before(runner, job):
             real = runner.ask
 
-            async def ask(prompt, raw):
-                out = await real(prompt, raw)
+            async def ask(prompt, raw, *size):
+                out = await real(prompt, raw, *size)
                 if ("crop of a floor plan" in prompt) == (which == "railing"):
                     runner.t0 -= A.PLAN_BUDGET_S
                 return out
@@ -1053,9 +1057,9 @@ def test_a_reject_is_remembered_on_the_same_plan_version_expires_with_a_re_place
     [sug_id] = sess["suggestions"]
     _call(W.ws_plan_ai_verdict, h, conn, session=sid, rev=sess["rev"], sug_id=sug_id, v="failure", why="nothing_there")
     [key] = store.data["rejects"]
-    assert A.remembered_reject(store.data["rejects"], "stairs", "m1", "20261102T100000", A.place_sig(_T1), 1.6, 4.3) == key
-    assert A.remembered_reject(store.data["rejects"], "railing", "m1", "20261102T100000", A.place_sig(_T1), 1.5, 4.0) is None
-    assert A.remembered_reject(store.data["rejects"], "stairs", "m1", "20261102T100000", A.place_sig(_T1), 2.5, 4.0) is None
+    assert A.remembered_reject(store.data["rejects"], "stairs", "m1", "abc", A.place_sig(_T1), 1.6, 4.3) == key
+    assert A.remembered_reject(store.data["rejects"], "railing", "m1", "abc", A.place_sig(_T1), 1.5, 4.0) is None
+    assert A.remembered_reject(store.data["rejects"], "stairs", "m1", "abc", A.place_sig(_T1), 2.5, 4.0) is None
     # Read again on the same plan version: the same find is not queued; it is listed as ignored before.
     store, sess2, sid2 = _run(_session(h, ("m1",), ("stairs",)))
     [sug] = sess2["suggestions"].values()
@@ -1071,6 +1075,35 @@ def test_a_reject_is_remembered_on_the_same_plan_version_expires_with_a_re_place
     assert _call(W.ws_plan_ai_reject_forget, h, conn, key=key) == {"ok": True}
     assert store.data["rejects"] == {} and store.session(sid2)["suggestions"][sug_id if sug_id in store.session(sid2)["suggestions"] else list(store.session(sid2)["suggestions"])[0]]["state"] == "queued"
     assert _call(W.ws_plan_ai_reject_forget, h, conn, key=key) == {"ok": False}
+
+
+def test_what_was_stored_under_the_old_picture_signature_still_matches_until_the_record_is_saved(monkeypatch, tmp_path, disk):
+    """Review B3: the picture's signature was its map's `updated` stamp
+    (0.38.220 on); now it is the picture's sha256. A reject or a session
+    stored under the old one still matches while that stamp hasn't moved (the
+    record unsaved since, so the picture can't have changed): no Wrong is
+    forgotten and no open suggestion turns changed on upgrade."""
+    h, conn, ai, media = _house(monkeypatch, tmp_path, plans=(("m1", "Main", "main", _T1),))
+    store, sess, sid = _run(_session(h, ("m1",), ("stairs",)))
+    [sug_id] = sess["suggestions"]
+    _call(W.ws_plan_ai_verdict, h, conn, session=sid, rev=sess["rev"], sug_id=sug_id, v="failure", why="nothing_there")
+    [key] = store.data["rejects"]
+    old = "20261102T100000"                                       # "2026-11-02T10:00:00", as the old signature had it
+    m1 = h.data[DOMAIN][DATA_MAPS].get_map("m1")
+    assert A.image_sig(m1) == "abc" and A.legacy_image_sig(m1) == old
+    store.data["rejects"][key]["image_sig"] = old                 # both as an earlier PadSpan stored them
+    for pl in sess["plans"]:
+        pl["image_sig"] = old
+    out = _call(W.ws_plan_ai_status, h, conn, session=sid)
+    assert not any(p["changed"] for p in out["session"]["plans"]) and "stale" not in {s["state"] for s in out["session"]["suggestions"].values()}
+    store, sess2, _sid = _run(_session(h, ("m1",), ("stairs",)))
+    [sug] = sess2["suggestions"].values()
+    assert sug["state"] == "failure" and sug["verdict"]["remembered"] is True and sug["verdict"]["reject"] == key
+    # The record saved since: its stamp moved, so the old signature vouches for nothing.
+    m1["updated"] = "2026-11-10T08:00:00"
+    store, sess3, _sid = _run(_session(h, ("m1",), ("stairs",)))
+    [sug] = sess3["suggestions"].values()
+    assert sug["state"] == "queued"
 
 
 def test_status_marks_a_changed_plan_or_target_stale(monkeypatch, tmp_path, disk):
@@ -1308,7 +1341,7 @@ def test_without_an_ai_task_start_refuses_and_counts_it(monkeypatch, tmp_path, d
     h, conn, ai, media = _house(monkeypatch, tmp_path)
     h.data[DOMAIN][DATA_SETTINGS].data["atlas_3d_ai_task_entity"] = ""
     assert _call(W.ws_plan_ai_start, h, conn, map_ids=["m1"], kinds=["stairs"])["error"] == P.NO_AI_CODE
-    assert counted == ["plan_ai_error:no_ai_task"] and ai.calls == []
+    assert counted == ["plan_ai_error:no_ai_task", "ai_reads_fail:no_ai"] and ai.calls == []
     assert _call(W.ws_plan_ai_plans, h, conn)["ai"]["ready"] is False
 
 
